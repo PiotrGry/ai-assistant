@@ -23,6 +23,7 @@ RESULTS_DIR="${BENCH_RESULTS_DIR:-$BENCH_DIR/results}"
 PROMPT_FILE="${ADA_PROMPT_FILE:-$BASE_DIR/prompts/system.md}"
 
 NUM_CTX="${OLLAMA_NUM_CTX:-8192}"
+NUM_PREDICT="${OLLAMA_NUM_PREDICT:-4096}"
 TEMPERATURE="${OLLAMA_TEMPERATURE:-0.3}"
 KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-10m}"
 THINK="${BENCH_THINK:-false}"
@@ -268,6 +269,7 @@ run_case() {
       --arg keep_alive "$KEEP_ALIVE" \
       --argjson messages "$messages" \
       --argjson num_ctx "$NUM_CTX" \
+      --argjson num_predict "$NUM_PREDICT" \
       --argjson temperature "$TEMPERATURE" \
       --argjson seed "$seed" \
       --argjson think "$THINK" '
@@ -279,6 +281,7 @@ run_case() {
         keep_alive: $keep_alive,
         options: {
           num_ctx: $num_ctx,
+          num_predict: $num_predict,
           temperature: $temperature,
           seed: $seed
         }
@@ -311,6 +314,7 @@ run_case() {
       --argjson repeat "$repeat" \
       --argjson seed "$seed" \
       --argjson context "$NUM_CTX" \
+      --argjson num_predict "$NUM_PREDICT" \
       --argjson temperature "$TEMPERATURE" \
       --argjson think "$THINK" \
       --argjson expected_cases "$CASE_COUNT" \
@@ -324,7 +328,8 @@ run_case() {
         model_quant: ($model_quant | if length > 0 then . else null end),
         repeat: $repeat, seed: $seed,
         system_prompt_sha256: $prompt_sha,
-        context: $context, temperature: $temperature, think: $think,
+        context: $context, num_predict: $num_predict,
+        temperature: $temperature, think: $think,
         machine_id: $machine_id, machine_id_source: $machine_id_source,
         host_os: $host_os, ollama_version: $ollama_version,
         gpu_name: ($gpu_name | if length > 0 then . else null end),
@@ -361,6 +366,7 @@ run_case() {
       --argjson repeat "$repeat" \
       --argjson seed "$seed" \
       --argjson context "$NUM_CTX" \
+      --argjson num_predict "$NUM_PREDICT" \
       --argjson temperature "$TEMPERATURE" \
       --argjson think "$THINK" \
       --argjson expected_cases "$CASE_COUNT" \
@@ -374,7 +380,8 @@ run_case() {
         model_quant: ($model_quant | if length > 0 then . else null end),
         repeat: $repeat, seed: $seed,
         system_prompt_sha256: $prompt_sha,
-        context: $context, temperature: $temperature, think: $think,
+        context: $context, num_predict: $num_predict,
+        temperature: $temperature, think: $think,
         machine_id: $machine_id, machine_id_source: $machine_id_source,
         host_os: $host_os, ollama_version: $ollama_version,
         gpu_name: ($gpu_name | if length > 0 then . else null end),
@@ -419,6 +426,7 @@ run_case() {
     --argjson expected_repeats "$REPEATS" \
     --argjson runtime "$runtime_info" \
     --argjson context "$NUM_CTX" \
+    --argjson num_predict "$NUM_PREDICT" \
     --argjson temperature "$TEMPERATURE" \
     --argjson think "$THINK" \
     --argjson wall_seconds "$elapsed" '
@@ -457,6 +465,7 @@ run_case() {
       expected_cases: $expected_cases,
       expected_repeats: $expected_repeats,
       context: $context,
+      num_predict: $num_predict,
       temperature: $temperature,
       think: $think,
       machine_id: $machine_id,
@@ -509,7 +518,7 @@ run_case() {
 echo "Benchmark Ada — run $RUN_ID"
 echo "Prompt: $PROMPT_FILE ($PROMPT_SHA)"
 echo "Przypadków: $CASE_COUNT | powtórzeń: $REPEATS | rekordów/model: $EXPECTED_RECORDS"
-echo "Kontekst: $NUM_CTX | temperatura: $TEMPERATURE | think: $THINK | seed bazowy: $SEED_BASE"
+echo "Kontekst: $NUM_CTX | limit generowania: $NUM_PREDICT | temperatura: $TEMPERATURE | think: $THINK | seed bazowy: $SEED_BASE"
 echo "Maszyna: $MACHINE_ID ($MACHINE_ID_SOURCE) | system: $HOST_OS | Ollama: $OLLAMA_VERSION"
 echo
 

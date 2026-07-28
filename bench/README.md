@@ -4,6 +4,11 @@ Benchmark mierzy zachowanie tekstowego asystenta bez narzędzi i bez MCP.
 Służy do porównania jakości, stabilności i wydajności konkretnych konfiguracji
 modeli.
 
+Pełny przebieg w chmurze RunPod można wykonać jednym pipeline'em opisanym
+w [`cloud/README.md`](cloud/README.md). Automatyzuje on utworzenie Poda,
+przygotowanie Ollamy, synchronizację małego pakietu benchmarku, odłączony
+przebieg, walidację i pobranie wyników.
+
 ## Zestawy
 
 - `cases.jsonl` — pełny zestaw 64 przypadków;
@@ -147,6 +152,7 @@ Starsze pliki nie zawierają oczekiwanej liczby rekordów, dlatego ich pole
 | `BENCH_ROOT` | katalog projektu | główny katalog projektu |
 | `OLLAMA_TEMPERATURE` | `0.3` | temperatura |
 | `OLLAMA_NUM_CTX` | `8192` | rozmiar kontekstu |
+| `OLLAMA_NUM_PREDICT` | `4096` | wspólny maksymalny budżet tokenów generowania, łącznie z thinkingiem |
 | `OLLAMA_KEEP_ALIVE` | `10m` | czas utrzymania modelu |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | adres Ollamy |
 

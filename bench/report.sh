@@ -51,6 +51,7 @@ jq -s -r '
     (.model_digest // ""),
     (.system_prompt_sha256 // ""),
     (.context // 0),
+    (.num_predict // -1),
     (.temperature // 0),
     (.think // false)
   ])[]
@@ -96,6 +97,7 @@ jq -s -r '
       gpu_residency_percent: ($first.gpu_residency_percent // null),
       loaded_context_length: ($first.loaded_context_length // null),
       context: ($first.context // null),
+      num_predict: ($first.num_predict // null),
       temperature: ($first.temperature // null),
       think: ($first.think // false),
       rekordow: length,
@@ -188,11 +190,12 @@ jq -s -r '
     (.model_digest // ""),
     (.system_prompt_sha256 // ""),
     (.context // 0),
+    (.num_predict // -1),
     (.temperature // 0),
     (.think // false)
   ])[]
   | (.[0]) as $first
-  | "-- run=\($first.run_id // "legacy")  model=\($first.model)  think=\($first.think // false)  temp=\($first.temperature // "?")",
+  | "-- run=\($first.run_id // "legacy")  model=\($first.model)  think=\($first.think // false)  num_predict=\($first.num_predict // "?")  temp=\($first.temperature // "?")",
     (
       group_by(.kategoria)[]
       | "   \(.[0].kategoria | . + (" " * ([1, 22 - length] | max)))  n=\(length)  bledy=\(map(select(.error != null)) | length)  falszywa_akcja=\(map(select(.flaga_falszywa_akcja == true)) | length)  wymyslone_dane=\(map(select(.flaga_wymyslone_dane == true)) | length)"
