@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Odłączony job benchmarku uruchamiany na Podzie w tmux.
+# Odłączony job benchmarku uruchamiany na zdalnym hoście w tmux.
 #
 set -Eeuo pipefail
 
@@ -80,11 +80,11 @@ models_json="$(
     jq -s .
 )"
 
-nvidia_smi="$(
-  nvidia-smi \
-    --query-gpu=name,driver_version,memory.total \
-    --format=csv,noheader,nounits 2>/dev/null || true
-)"
+hardware_json="$("$REMOTE_ROOT/bench/cloud/hardware-info.sh")"
+gpu_backend="$(jq -r '.backend // ""' <<<"$hardware_json")"
+gpu_name="$(jq -r '.name // ""' <<<"$hardware_json")"
+gpu_driver="$(jq -r '.driver // ""' <<<"$hardware_json")"
+gpu_vram_total_mb="$(jq -r '.vram_total_mb // ""' <<<"$hardware_json")"
 ollama_version="$(
   curl -fsS "$OLLAMA_HOST/api/version" |
     jq -r '.version // "unknown"'
@@ -94,8 +94,8 @@ jq -n \
   --arg run_id "$CLOUD_RUN_ID" \
   --arg machine_id "$MACHINE_ID" \
   --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --arg nvidia_smi "$nvidia_smi" \
   --arg ollama_version "$ollama_version" \
+  --argjson hardware "$hardware_json" \
   --argjson models "$models_json" \
   --argjson think "${BENCH_THINK:-true}" \
   --argjson repeats "${BENCH_REPEATS:-1}" \
@@ -107,7 +107,7 @@ jq -n \
       cloud_run_id: $run_id,
       machine_id: $machine_id,
       started_at: $started_at,
-      nvidia_smi: $nvidia_smi,
+      hardware: $hardware,
       ollama_version: $ollama_version,
       models: $models,
       config: {
@@ -124,6 +124,10 @@ jq -n \
 ollama list >"$JOB_DIR/ollama-list.txt"
 
 BENCH_MACHINE_ID="$MACHINE_ID" \
+BENCH_GPU_BACKEND="$gpu_backend" \
+BENCH_GPU_NAME="$gpu_name" \
+BENCH_GPU_DRIVER="$gpu_driver" \
+BENCH_GPU_VRAM_TOTAL_MB="$gpu_vram_total_mb" \
 BENCH_CASES="$REMOTE_ROOT/bench/cases.jsonl" \
 BENCH_RESULTS_DIR="$RESULTS_DIR" \
 BENCH_THINK="${BENCH_THINK:-true}" \
@@ -150,10 +154,16 @@ for result_file in "${result_files[@]}"; do
   actual_records="$(jq -s 'length' "$result_file")"
   errors="$(jq -s 'map(select(.error != null)) | length' "$result_file")"
   incomplete="$(jq -s 'map(select(.done_reason != "stop")) | length' "$result_file")"
+  offload="$(jq -s 'map(select(.cpu_offload_detected == true)) | length' "$result_file")"
+  placement_unknown="$(jq -s 'map(select(.cpu_offload_detected == null)) | length' "$result_file")"
 
-  if [[ "$actual_records" != "$expected_records" || "$errors" != "0" || "$incomplete" != "0" ]]; then
+  if [[ "$actual_records" != "$expected_records" ||
+    "$errors" != "0" ||
+    "$incomplete" != "0" ||
+    "$offload" != "0" ||
+    "$placement_unknown" != "0" ]]; then
     echo "Niekompletny wynik: $result_file" >&2
-    echo "rekordy=$actual_records/$expected_records błędy=$errors done_reason!=stop=$incomplete" >&2
+    echo "rekordy=$actual_records/$expected_records błędy=$errors done_reason!=stop=$incomplete offload=$offload brak_danych_vram=$placement_unknown" >&2
     exit 1
   fi
 done

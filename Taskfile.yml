@@ -1,0 +1,68 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: "3"
+
+tasks:
+  default:
+    desc: Pokaż dostępne zadania
+    cmds:
+      - task --list
+
+  cloud:plan:
+    desc: Pokaż host, modele i ustawienia bez łączenia przez SSH
+    cmds:
+      - ./bench/cloud/hostctl.sh plan
+
+  cloud:doctor:
+    desc: Sprawdź lokalne narzędzia, SSH i GPU na zdalnym hoście
+    cmds:
+      - ./bench/cloud/hostctl.sh doctor
+
+  cloud:sync:
+    desc: Wyślij wyłącznie kod benchmarku na zdalny host
+    cmds:
+      - ./bench/cloud/hostctl.sh sync
+
+  cloud:prepare:
+    desc: Zsynchronizuj kod, uruchom Ollamę i sprawdź modele
+    cmds:
+      - task: cloud:sync
+      - ./bench/cloud/hostctl.sh prepare
+
+  cloud:run:
+    desc: Przygotuj host i uruchom benchmark w odłączonym tmux
+    cmds:
+      - task: cloud:prepare
+      - ./bench/cloud/hostctl.sh start
+
+  cloud:status:
+    desc: Pokaż stan aktualnego benchmarku
+    cmds:
+      - ./bench/cloud/hostctl.sh status
+
+  cloud:logs:
+    desc: Pokaż ostatnie logi aktualnego benchmarku
+    cmds:
+      - ./bench/cloud/hostctl.sh logs {{default "100" .CLI_ARGS}}
+
+  cloud:wait:
+    desc: Czekaj na zakończenie aktualnego benchmarku
+    cmds:
+      - ./bench/cloud/hostctl.sh wait
+
+  cloud:collect:
+    desc: Pobierz archiwum i zweryfikuj jego SHA-256
+    cmds:
+      - ./bench/cloud/hostctl.sh collect
+
+  cloud:finish:
+    desc: Potwierdź, że wyniki są bezpieczne i przypomnij o usunięciu maszyny
+    cmds:
+      - ./bench/cloud/hostctl.sh finish
+
+  cloud:all:
+    desc: Przygotuj host, uruchom test, poczekaj i pobierz wyniki
+    cmds:
+      - task: cloud:run
+      - task: cloud:wait
+      - task: cloud:collect
+      - task: cloud:finish

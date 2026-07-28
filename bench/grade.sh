@@ -57,6 +57,8 @@ already_graded() {
 total=0
 graded=0
 
+# RESULTS_FILE jest czytany przez fd 3, a wpisy trafiają do osobnego GRADES_FILE.
+# shellcheck disable=SC2094
 while IFS= read -r record <&3; do
   if [[ -z "${record//[[:space:]]/}" ]]; then
     continue

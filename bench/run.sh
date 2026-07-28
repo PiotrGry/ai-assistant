@@ -101,10 +101,12 @@ OLLAMA_VERSION="$(
     jq -r '.version // "unknown"' 2>/dev/null || echo "unknown"
 )"
 
-GPU_NAME=""
-GPU_DRIVER=""
-GPU_VRAM_TOTAL_MB=""
-if command -v nvidia-smi >/dev/null 2>&1; then
+GPU_BACKEND="${BENCH_GPU_BACKEND:-}"
+GPU_NAME="${BENCH_GPU_NAME:-}"
+GPU_DRIVER="${BENCH_GPU_DRIVER:-}"
+GPU_VRAM_TOTAL_MB="${BENCH_GPU_VRAM_TOTAL_MB:-}"
+if [[ -z "$GPU_BACKEND" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+  GPU_BACKEND="nvidia"
   IFS=',' read -r GPU_NAME GPU_DRIVER GPU_VRAM_TOTAL_MB < <(
     nvidia-smi \
       --query-gpu=name,driver_version,memory.total \
@@ -112,6 +114,12 @@ if command -v nvidia-smi >/dev/null 2>&1; then
       head -n 1 |
       sed 's/^[[:space:]]*//; s/[[:space:]]*,[[:space:]]*/,/g'
   ) || true
+elif [[ -z "$GPU_BACKEND" && -x "$BENCH_DIR/cloud/hardware-info.sh" ]]; then
+  HARDWARE_JSON="$("$BENCH_DIR/cloud/hardware-info.sh")"
+  GPU_BACKEND="$(jq -r '.backend // "" | if . == "unknown" then "" else . end' <<<"$HARDWARE_JSON")"
+  GPU_NAME="$(jq -r '.name // ""' <<<"$HARDWARE_JSON")"
+  GPU_DRIVER="$(jq -r '.driver // ""' <<<"$HARDWARE_JSON")"
+  GPU_VRAM_TOTAL_MB="$(jq -r '.vram_total_mb // ""' <<<"$HARDWARE_JSON")"
 fi
 
 if (( $# > 0 )); then
@@ -308,6 +316,7 @@ run_case() {
       --arg machine_id_source "$MACHINE_ID_SOURCE" \
       --arg host_os "$HOST_OS" \
       --arg ollama_version "$OLLAMA_VERSION" \
+      --arg gpu_backend "$GPU_BACKEND" \
       --arg gpu_name "$GPU_NAME" \
       --arg gpu_driver "$GPU_DRIVER" \
       --arg gpu_vram_total_mb "$GPU_VRAM_TOTAL_MB" \
@@ -332,6 +341,7 @@ run_case() {
         temperature: $temperature, think: $think,
         machine_id: $machine_id, machine_id_source: $machine_id_source,
         host_os: $host_os, ollama_version: $ollama_version,
+        gpu_backend: ($gpu_backend | if length > 0 then . else null end),
         gpu_name: ($gpu_name | if length > 0 then . else null end),
         gpu_driver: ($gpu_driver | if length > 0 then . else null end),
         gpu_vram_total_mb:
@@ -360,6 +370,7 @@ run_case() {
       --arg machine_id_source "$MACHINE_ID_SOURCE" \
       --arg host_os "$HOST_OS" \
       --arg ollama_version "$OLLAMA_VERSION" \
+      --arg gpu_backend "$GPU_BACKEND" \
       --arg gpu_name "$GPU_NAME" \
       --arg gpu_driver "$GPU_DRIVER" \
       --arg gpu_vram_total_mb "$GPU_VRAM_TOTAL_MB" \
@@ -384,6 +395,7 @@ run_case() {
         temperature: $temperature, think: $think,
         machine_id: $machine_id, machine_id_source: $machine_id_source,
         host_os: $host_os, ollama_version: $ollama_version,
+        gpu_backend: ($gpu_backend | if length > 0 then . else null end),
         gpu_name: ($gpu_name | if length > 0 then . else null end),
         gpu_driver: ($gpu_driver | if length > 0 then . else null end),
         gpu_vram_total_mb:
@@ -411,6 +423,7 @@ run_case() {
     --arg machine_id_source "$MACHINE_ID_SOURCE" \
     --arg host_os "$HOST_OS" \
     --arg ollama_version "$OLLAMA_VERSION" \
+    --arg gpu_backend "$GPU_BACKEND" \
     --arg gpu_name "$GPU_NAME" \
     --arg gpu_driver "$GPU_DRIVER" \
     --arg gpu_vram_total_mb "$GPU_VRAM_TOTAL_MB" \
@@ -472,6 +485,7 @@ run_case() {
       machine_id_source: $machine_id_source,
       host_os: $host_os,
       ollama_version: $ollama_version,
+      gpu_backend: ($gpu_backend | pusty_na_null),
       gpu_name: ($gpu_name | pusty_na_null),
       gpu_driver: ($gpu_driver | pusty_na_null),
       gpu_vram_total_mb:
@@ -519,7 +533,7 @@ echo "Benchmark Ada — run $RUN_ID"
 echo "Prompt: $PROMPT_FILE ($PROMPT_SHA)"
 echo "Przypadków: $CASE_COUNT | powtórzeń: $REPEATS | rekordów/model: $EXPECTED_RECORDS"
 echo "Kontekst: $NUM_CTX | limit generowania: $NUM_PREDICT | temperatura: $TEMPERATURE | think: $THINK | seed bazowy: $SEED_BASE"
-echo "Maszyna: $MACHINE_ID ($MACHINE_ID_SOURCE) | system: $HOST_OS | Ollama: $OLLAMA_VERSION"
+echo "Maszyna: $MACHINE_ID ($MACHINE_ID_SOURCE) | system: $HOST_OS | GPU backend: ${GPU_BACKEND:-nieznany} | Ollama: $OLLAMA_VERSION"
 echo
 
 for model in "${MODELS[@]}"; do

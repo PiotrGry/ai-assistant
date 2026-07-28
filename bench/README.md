@@ -4,10 +4,10 @@ Benchmark mierzy zachowanie tekstowego asystenta bez narzędzi i bez MCP.
 Służy do porównania jakości, stabilności i wydajności konkretnych konfiguracji
 modeli.
 
-Pełny przebieg w chmurze RunPod można wykonać jednym pipeline'em opisanym
-w [`cloud/README.md`](cloud/README.md). Automatyzuje on utworzenie Poda,
-przygotowanie Ollamy, synchronizację małego pakietu benchmarku, odłączony
-przebieg, walidację i pobranie wyników.
+Pełny przebieg na zdalnym GPU można wykonać zadaniami z `Taskfile.yml`
+opisanymi w [`cloud/README.md`](cloud/README.md). Maszynę tworzymy ręcznie,
+a Taskfile automatyzuje SSH, przygotowanie Ollamy, synchronizację małego
+pakietu benchmarku, odłączony przebieg, walidację i pobranie wyników.
 
 ## Zestawy
 
@@ -156,7 +156,7 @@ Starsze pliki nie zawierają oczekiwanej liczby rekordów, dlatego ich pole
 | `OLLAMA_KEEP_ALIVE` | `10m` | czas utrzymania modelu |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | adres Ollamy |
 
-Wynik zapisuje także digest i quant modelu, wersję Ollamy, stan umieszczenia
-modelu z `/api/ps` oraz — jeśli dostępne przez `nvidia-smi` — nazwę GPU,
-sterownik i całkowitą pamięć VRAM. Raport sprawdza, czy wybrane wyniki mają
-wspólny `machine_id` i wersję Ollamy.
+Wynik zapisuje także digest i quant modelu, wersję Ollamy, backend GPU
+(`nvidia` lub `amd`), stan umieszczenia modelu z `/api/ps` oraz — jeśli
+dostępne — nazwę GPU, sterownik i całkowitą pamięć VRAM. Raport sprawdza,
+czy wybrane wyniki mają wspólny `machine_id` i wersję Ollamy.

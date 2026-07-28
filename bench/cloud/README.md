@@ -1,120 +1,106 @@
-# Pipeline benchmarku RunPod
+# Benchmark na zdalnym GPU przez Taskfile
 
-Pipeline automatyzuje:
+Maszynę z GPU tworzymy ręcznie w panelu wybranego dostawcy. Dzięki temu wybór
+sprzętu, ceny oraz operacja finansowa pozostają pod bezpośrednią kontrolą.
+Pozostałe kroki są powtarzalne i niezależne od dostawcy.
 
-1. utworzenie jednego Poda przez oficjalne REST API RunPod;
-2. oczekiwanie na publiczny SSH;
-3. przesłanie wyłącznie plików benchmarku, bez `.git`, `.venv` i wyników;
-4. instalację/uruchomienie Ollamy;
-5. kontrolę obecności modeli na istniejącym Network Volume;
+Taskfile automatyzuje:
+
+1. kontrolę połączenia SSH;
+2. rozpoznanie NVIDIA/CUDA albo AMD/ROCm;
+3. synchronizację wyłącznie kodu benchmarku;
+4. instalację i uruchomienie Ollamy;
+5. kontrolę dostępności modeli oraz próbne załadowanie każdego do VRAM;
 6. uruchomienie benchmarku w odłączonej sesji `tmux`;
-7. sprawdzenie kompletności wszystkich wyników;
-8. utworzenie raportu oraz archiwum;
-9. pobranie archiwum i weryfikację SHA-256.
+7. walidację kompletności odpowiedzi;
+8. raport, archiwum, pobranie oraz kontrolę SHA-256.
 
-Pipeline nie usuwa Poda automatycznie. `terminate` jest osobną operacją,
-możliwą domyślnie dopiero po prawidłowym pobraniu wyników.
+Taskfile celowo nie tworzy, nie zatrzymuje i nie usuwa maszyny.
+Etap `prepare` zatrzymuje przebieg przed właściwym testem, jeżeli `/api/ps`
+nie potwierdzi 100% modelu w VRAM.
 
-## Jednorazowa konfiguracja
+## 1. Instalacja Task
 
-Pipeline można uruchomić bezpośrednio z macOS albo Linuksa. Dzięki temu nie
-trzeba pośrednio przenosić wyników przez drugą maszynę. Wykonaj w bieżącej
-kopii repozytorium:
+Na macOS:
 
 ```bash
-cd /ścieżka/do/ai-assistant
-cp bench/cloud/runpod.env.example bench/cloud/runpod.env
-chmod 600 bench/cloud/runpod.env
+brew install go-task
 ```
 
-Uzupełnij w `bench/cloud/runpod.env`:
+Na Linuxie można użyć pakietu dystrybucji albo oficjalnego instalatora
+opisanego na stronie <https://taskfile.dev/docs/installation>.
 
-- `RUNPOD_API_KEY`;
-- `RUNPOD_NETWORK_VOLUME_ID`;
-- `RUNPOD_SSH_KEY`.
+## 2. Ręczne utworzenie maszyny
 
-Klucz API można utworzyć w ustawieniach konta RunPod. Klucz publiczny
-odpowiadający `RUNPOD_SSH_KEY` musi być dodany do konta RunPod.
+Utwórz host z publicznym SSH. Dla R9700 wymagany jest Linux ze sprawnym ROCm 7.
+Zapisz adres, port oraz ścieżkę do swojego klucza prywatnego.
 
-Jeżeli nie znasz ID woluminu, po ustawieniu samego API key uruchom:
+## 3. Konfiguracja
 
 ```bash
-./bench/cloud/runpod-pipeline.sh volumes
+cp bench/cloud/host.env.example bench/cloud/host.env
+chmod 600 bench/cloud/host.env
 ```
 
-## Pełny automatyczny przebieg
+Uzupełnij:
 
-Najpierw pokaż plan i wykonaj kontrolę:
+```dotenv
+BENCH_SSH_HOST="157.157.221.177"
+BENCH_SSH_PORT=14857
+BENCH_SSH_USER="root"
+BENCH_SSH_KEY="$HOME/.ssh/id_ed25519"
+```
+
+Konfiguracja, stan połączenia oraz wyniki są ignorowane przez Git.
+
+## 4. Uruchomienie
+
+Sprawdzenie planu i hosta:
 
 ```bash
-./bench/cloud/runpod-pipeline.sh plan
-./bench/cloud/runpod-pipeline.sh doctor
+task cloud:plan
+task cloud:doctor
 ```
 
-Następnie cały przebieg uruchamia jedno polecenie:
+Cały przebieg:
 
 ```bash
-./bench/cloud/runpod-pipeline.sh all
+task cloud:all
 ```
 
-Polecenie czeka na benchmark i pobiera zweryfikowane archiwum do:
+Benchmark działa na hoście niezależnie od lokalnego terminala. Po zerwaniu
+połączenia można użyć:
+
+```bash
+task cloud:status
+task cloud:logs
+task cloud:wait
+task cloud:collect
+task cloud:finish
+```
+
+Wyniki trafiają do:
 
 ```text
 bench/cloud-results/<run-id>/
 ```
 
-`all` jest wznawialne: po przerwaniu lokalnego terminala można uruchomić je
-ponownie, a pipeline przejdzie do pierwszego niezakończonego etapu. Benchmark
-działa niezależnie w `tmux`. Dostępne są też polecenia szczegółowe:
+Po `task cloud:finish` należy ręcznie zatrzymać lub usunąć maszynę w panelu
+dostawcy.
 
-```bash
-./bench/cloud/runpod-pipeline.sh status
-./bench/cloud/runpod-pipeline.sh logs
-./bench/cloud/runpod-pipeline.sh wait
-./bench/cloud/runpod-pipeline.sh collect
-```
+## Modele
 
-Po pobraniu wyników:
-
-```bash
-./bench/cloud/runpod-pipeline.sh terminate
-```
-
-## Istniejący Pod
-
-Jeżeli Pod został już utworzony w panelu:
-
-```bash
-./bench/cloud/runpod-pipeline.sh use-pod POD_ID
-./bench/cloud/runpod-pipeline.sh prepare
-./bench/cloud/runpod-pipeline.sh start
-./bench/cloud/runpod-pipeline.sh wait
-./bench/cloud/runpod-pipeline.sh collect
-./bench/cloud/runpod-pipeline.sh terminate
-```
-
-## Bezpieczniki
-
-- Brakujące modele domyślnie zatrzymują pipeline. Aby świadomie pozwolić na
-  ich pobieranie, ustaw `RUNPOD_PULL_MISSING_MODELS=true`.
-- `terminate` odmawia usunięcia Poda przed pobraniem wyników.
-- Awaryjne usunięcie wymaga `terminate --force`.
-- `terminate --yes` wyłącza tylko interaktywne potwierdzenie; nie omija
-  kontroli pobrania.
-- Klucz API, stan pipeline i wyniki chmurowe są ignorowane przez Git.
-
-## Co można zmienić
-
-Modele i wszystkie stałe benchmarku są jawnie zapisane w
-`bench/cloud/runpod.env`. Domyślna lista finalistów:
+Domyślny zestaw:
 
 ```text
 gemma4:31b-it-q4_K_M
 qwen3.6:35b-a3b-q4_K_M
-qwen3.5:122b-a10b-q4_K_M
 qwen3:32b-q4_K_M
 qwen3:14b-q4_K_M
 ```
 
-Domyślna konfiguracja to `think=true`, temperatura `0`, context `8192`,
-`num_predict=4096`, seed `42` i jedno powtórzenie pełnych 64 przypadków.
+Model 122B został usunięty, ponieważ screening nie wykazał przewagi jakości,
+a jego wymagania pamięciowe nie odpowiadają badanej klasie GPU 32 GB.
+
+Ustawienia domyślne: `think=true`, temperatura `0`, context `8192`,
+`num_predict=4096`, seed `42`, jedno powtórzenie 64 przypadków.

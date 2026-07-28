@@ -21,8 +21,8 @@ memory/
 .env
 .env.*
 !.env.example
-bench/cloud/runpod.env
-bench/cloud/.runpod-state.json
+bench/cloud/host.env
+bench/cloud/.host-state.json
 bench/cloud/known_hosts
 bench/cloud-results/
 

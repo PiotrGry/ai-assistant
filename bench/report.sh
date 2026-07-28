@@ -72,6 +72,7 @@ jq -s -r '
       machine_id_source: ($first.machine_id_source // null),
       host_os: ($first.host_os // null),
       ollama_version: ($first.ollama_version // null),
+      gpu_backend: ($first.gpu_backend // null),
       gpu: ($first.gpu_name // null),
       gpu_driver: ($first.gpu_driver // null),
       gpu_vram_total_mb: ($first.gpu_vram_total_mb // null),
@@ -93,7 +94,12 @@ jq -s -r '
         else null
         end
       ),
-      cpu_offload_detected: ($first.cpu_offload_detected // null),
+      cpu_offload_detected: (
+        if ($first | has("cpu_offload_detected"))
+        then $first.cpu_offload_detected
+        else null
+        end
+      ),
       gpu_residency_percent: ($first.gpu_residency_percent // null),
       loaded_context_length: ($first.loaded_context_length // null),
       context: ($first.context // null),
@@ -153,6 +159,7 @@ jq -s '
 
   (znane("machine_id")) as $machines
   | (znane("ollama_version")) as $versions
+  | (znane("gpu_backend")) as $gpu_backends
   | (znane("gpu_name")) as $gpus
   | {
       maszyny: $machines,
@@ -165,6 +172,12 @@ jq -s '
       jedna_wersja_ollamy: (
         if ($versions | length) == 0 then null
         else ($versions | length) == 1
+        end
+      ),
+      backendy_gpu: $gpu_backends,
+      jeden_backend_gpu: (
+        if ($gpu_backends | length) == 0 then null
+        else ($gpu_backends | length) == 1
         end
       ),
       gpu: $gpus,

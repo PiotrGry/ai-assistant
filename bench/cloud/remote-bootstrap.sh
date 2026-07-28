@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Uruchamiany przez runpod-pipeline.sh na Podzie. Przygotowuje narzędzia,
-# Ollamę i sprawdza dostępność dokładnie tych modeli, które obejmie test.
+# Uruchamiany przez Taskfile na dowolnym hoście SSH. Przygotowuje narzędzia,
+# Ollamę i sprawdza GPU oraz dokładnie te modele, które obejmie test.
 #
 set -Eeuo pipefail
 
@@ -30,6 +30,7 @@ missing_packages=()
 command -v curl >/dev/null 2>&1 || missing_packages+=(curl)
 command -v jq >/dev/null 2>&1 || missing_packages+=(jq)
 command -v tmux >/dev/null 2>&1 || missing_packages+=(tmux)
+command -v lspci >/dev/null 2>&1 || missing_packages+=(pciutils)
 [[ -r /etc/ssl/certs/ca-certificates.crt ]] || missing_packages+=(ca-certificates)
 
 if (( ${#missing_packages[@]} > 0 )); then
@@ -69,11 +70,18 @@ for ((attempt = 1; attempt <= 60; attempt++)); do
 done
 
 echo "Ollama: $(curl -fsS "$OLLAMA_HOST/api/version" | jq -r '.version')"
-if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=name,driver_version,memory.total \
-    --format=csv,noheader
-else
-  echo "Brak nvidia-smi." >&2
+
+hardware_json="$("$REMOTE_ROOT/bench/cloud/hardware-info.sh")"
+hardware_backend="$(jq -r '.backend' <<<"$hardware_json")"
+if [[ "$hardware_backend" == "unknown" ]]; then
+  echo "Nie wykryto obsługiwanego GPU NVIDIA ani AMD." >&2
+  exit 1
+fi
+echo "Sprzęt:"
+jq . <<<"$hardware_json"
+
+if [[ "$hardware_backend" == "amd" && ! -e /dev/kfd ]]; then
+  echo "Wykryto AMD, ale brakuje /dev/kfd wymaganego przez ROCm." >&2
   exit 1
 fi
 
@@ -90,12 +98,76 @@ for model in "${MODELS[@]}"; do
 done
 
 if (( ${#missing_models[@]} > 0 )); then
-  echo "Brak wymaganych modeli na Network Volume:" >&2
+  echo "Brak wymaganych modeli w $MODELS_DIR:" >&2
   printf '  - %s\n' "${missing_models[@]}" >&2
-  echo "Ustaw RUNPOD_PULL_MISSING_MODELS=true, jeśli pipeline ma je pobrać." >&2
+  echo "Ustaw BENCH_PULL_MISSING_MODELS=true, jeśli Taskfile ma je pobrać." >&2
   exit 1
 fi
 
 echo
 echo "Modele gotowe:"
 ollama list
+
+echo
+echo "Kontrola uruchomienia i rozmieszczenia modeli:"
+num_ctx="${OLLAMA_NUM_CTX:-8192}"
+for model in "${MODELS[@]}"; do
+  printf '  %s ... ' "$model"
+  curl -fsS --max-time 600 "$OLLAMA_HOST/api/chat" \
+    -H 'Content-Type: application/json' \
+    -d "$(
+      jq -n \
+        --arg model "$model" \
+        --argjson num_ctx "$num_ctx" '
+          {
+            model: $model,
+            messages: [{role: "user", content: "Odpowiedz: OK"}],
+            stream: false,
+            think: false,
+            keep_alive: "5m",
+            options: {
+              num_ctx: $num_ctx,
+              num_predict: 1,
+              temperature: 0,
+              seed: 42
+            }
+          }
+        '
+    )" >/dev/null
+
+  placement="$(
+    curl -fsS "$OLLAMA_HOST/api/ps" |
+      jq -c --arg model "$model" '
+        [
+          .models[]?
+          | select(
+              .name == $model
+              or .model == $model
+              or (((.name // .model // "") | sub(":latest$"; "")) == ($model | sub(":latest$"; "")))
+            )
+        ][0] // {}
+        | {
+            size: (.size // null),
+            size_vram: (.size_vram // null),
+            context_length: (.context_length // null)
+          }
+      '
+  )"
+  size="$(jq -r '.size // empty' <<<"$placement")"
+  size_vram="$(jq -r '.size_vram // empty' <<<"$placement")"
+
+  if [[ -z "$size" || -z "$size_vram" ]]; then
+    echo "brak danych /api/ps" >&2
+    exit 1
+  fi
+  if (( size_vram < size )); then
+    echo "CPU offload: $((size - size_vram)) B" >&2
+    exit 1
+  fi
+  echo "100% GPU, context=$(jq -r '.context_length' <<<"$placement")"
+
+  curl -fsS "$OLLAMA_HOST/api/generate" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg model "$model" '{model: $model, prompt: "", stream: false, keep_alive: 0}')" \
+    >/dev/null || true
+done
