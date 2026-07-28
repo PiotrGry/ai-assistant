@@ -1,0 +1,10 @@
+[project]
+name = "pirx-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "mcp[cli]>=1.28.1",
+    "ollama>=0.6.2",
+]
