@@ -10,6 +10,7 @@ test("błędna nazwa narzędzia nie wyłącza serwera MCP", async (context) => {
   const pirxDirectory = resolve(testDirectory, "..", "..", "..");
   const client = new PirxMcpClient(
     resolve(pirxDirectory, "mcp-server", "dist", "index.js"),
+    30_000,
   );
 
   context.after(async () => {

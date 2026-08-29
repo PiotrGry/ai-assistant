@@ -118,6 +118,13 @@ async function main(): Promise<void> {
               `${turn.metrics.generation_tokens_per_second.toFixed(1)} tok/s, ` +
               `${turn.metrics.tool_calls} wywołań narzędzi.`,
             );
+            const contextTokens = agent.lastContextTokens;
+            if (contextTokens !== undefined) {
+              console.log(
+                `Kontekst: ${contextTokens} / ${config.numCtx} ` +
+                `(${((contextTokens / config.numCtx) * 100).toFixed(1)}%)`,
+              );
+            }
           } catch (error: unknown) {
             const detail = error instanceof Error ? error.message : String(error);
             console.error(`\nBłąd komunikacji z Ollamą: ${detail}`);

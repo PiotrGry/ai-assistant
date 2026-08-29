@@ -100,6 +100,9 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
     logDir: join(temporaryDirectory, "logs"),
     mcpServerEntry: resolve(pirxDirectory, "mcp-server", "dist", "index.js"),
     maxToolIterations: 8,
+    maxRepeatedToolCalls: 3,
+    llmTimeoutMs: 120_000,
+    toolTimeoutMs: 30_000,
   };
 
   const agent = await PirxAgent.create(config);
@@ -192,6 +195,9 @@ test("po limicie agent finalizuje bez wykonania kolejnej akcji", async (context)
     logDir: join(temporaryDirectory, "logs"),
     mcpServerEntry: resolve(pirxDirectory, "mcp-server", "dist", "index.js"),
     maxToolIterations: 1,
+    maxRepeatedToolCalls: 3,
+    llmTimeoutMs: 120_000,
+    toolTimeoutMs: 30_000,
   };
 
   const agent = await PirxAgent.create(config);

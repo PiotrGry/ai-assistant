@@ -82,7 +82,27 @@ function normalizeArguments(value: unknown): Record<string, unknown> {
 
   return {};
 }
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
 
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} przekroczyło timeout ${timeoutMs} ms.`));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
 export class PirxAgent {
   readonly #config: AgentConfig;
   readonly #ollama: Ollama;
@@ -91,13 +111,17 @@ export class PirxAgent {
   #prompt: SystemPrompt;
   #messages: Message[];
   #mcpFailureReported = false;
+  #lastContextTokens: number | undefined;
 
   private constructor(config: AgentConfig, prompt: SystemPrompt, hooks: AgentHooks) {
     this.#config = config;
     this.#prompt = prompt;
     this.#hooks = hooks;
     this.#ollama = new Ollama({ host: config.baseUrl });
-    this.#mcp = new PirxMcpClient(config.mcpServerEntry);
+    this.#mcp = new PirxMcpClient(
+      config.mcpServerEntry,
+      config.toolTimeoutMs,
+    );
     this.#messages = [{ role: "system", content: prompt.content }];
   }
 
@@ -124,8 +148,13 @@ export class PirxAgent {
     return this.#mcp.toolNames;
   }
 
+  get lastContextTokens(): number | undefined {
+    return this.#lastContextTokens;
+  }
+
   clearHistory(): void {
     this.#messages = [{ role: "system", content: this.#prompt.content }];
+    this.#lastContextTokens = undefined;
   }
 
   async reloadSystemPrompt(): Promise<SystemPrompt> {
@@ -138,6 +167,7 @@ export class PirxAgent {
     const checkpoint = this.#messages.length;
     const timestamp = new Date().toISOString();
     const gpuBefore = await readGpuStats();
+    const repeatedToolCalls = new Map<string, number>();
     const totals: Totals = {
       totalDuration: 0,
       loadDuration: 0,
@@ -173,7 +203,14 @@ export class PirxAgent {
           },
           ...(tools.length > 0 ? { tools: [...tools] } : {}),
         };
-        const response = (await this.#ollama.chat(request)) as ResponseWithMetrics;
+
+        const response = (await withTimeout(
+          this.#ollama.chat(request),
+          this.#config.llmTimeoutMs,
+          "Ollama",
+        )) as ResponseWithMetrics;
+
+        this.#lastContextTokens = response.prompt_eval_count ?? undefined;
         addMetrics(totals, response);
 
         const toolCalls = response.message.tool_calls ?? [];
@@ -187,7 +224,7 @@ export class PirxAgent {
           finalContent = mayExecuteTools
             ? "Serwer MCP jest niedostępny, więc nie wykonano kolejnego wywołania narzędzia."
             : `Osiągnięto limit ${this.#config.maxToolIterations} rund wywołań narzędzi. ` +
-              "Ostatnia żądana akcja nie została wykonana.";
+            "Ostatnia żądana akcja nie została wykonana.";
           this.#messages.push({ role: "assistant", content: finalContent });
           totals.doneReason = mayExecuteTools
             ? "mcp_unavailable"
@@ -200,6 +237,20 @@ export class PirxAgent {
         for (const call of toolCalls) {
           const name = call.function.name;
           const arguments_ = normalizeArguments(call.function.arguments);
+          const fingerprint = JSON.stringify({ name, arguments: arguments_ });
+          const repeatedToolCallCount = (repeatedToolCalls.get(fingerprint) ?? 0) + 1;
+          repeatedToolCalls.set(fingerprint, repeatedToolCallCount);
+
+          if (repeatedToolCallCount > this.#config.maxRepeatedToolCalls) {
+            this.#messages.push({
+              role: "tool",
+              tool_name: name,
+              content:
+                "Przerwano identyczną operację narzędzia z powodu wykrycia pętli powtarzających się wywołań.",
+            });
+            continue;
+          }
+
           totals.toolCalls += 1;
           this.#hooks.onToolCall?.(name, arguments_);
 
