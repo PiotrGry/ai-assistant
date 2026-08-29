@@ -23,7 +23,14 @@ test("serwer udostępnia hello i system_info", async (context) => {
   const listed = await client.listTools();
   assert.deepEqual(
     listed.tools.map((tool) => tool.name).sort(),
-    ["hello", "system_info"],
+    [
+      "hello",
+      "obsidian_append",
+      "obsidian_create",
+      "obsidian_read",
+      "obsidian_search",
+      "system_info",
+    ],
   );
 
   const hello = await client.callTool({
@@ -42,7 +49,7 @@ test("serwer udostępnia hello i system_info", async (context) => {
   assert.notEqual(systemInfo.isError, true);
   assert.ok(
     typeof systemInfo.structuredContent === "object" &&
-      systemInfo.structuredContent !== null,
+    systemInfo.structuredContent !== null,
   );
   const structuredContent = systemInfo.structuredContent as Record<string, unknown>;
   assert.equal(typeof structuredContent["hostname"], "string");

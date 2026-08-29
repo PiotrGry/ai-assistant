@@ -10,10 +10,20 @@ test("zbudowany serwer komunikuje się przez stdio", async (context) => {
   const testDirectory = dirname(fileURLToPath(import.meta.url));
   const serverEntry = resolve(testDirectory, "..", "..", "dist", "index.js");
   const client = new Client({ name: "pirx-stdio-test", version: "0.1.0" });
+  const vaultPath = process.env["PIRX_OBSIDIAN_VAULT"];
+
+  if (!vaultPath) {
+    throw new Error("PIRX_OBSIDIAN_VAULT is not set");
+  }
+
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverEntry],
     stderr: "pipe",
+    env: {
+      ...process.env,
+      PIRX_OBSIDIAN_VAULT: vaultPath,
+    },
   });
 
   context.after(async () => {

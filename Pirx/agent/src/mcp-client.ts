@@ -5,6 +5,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import type { Tool } from "ollama";
 
 import { toolResultToText } from "./tool-result.js";
+import { env } from "node:process";
 
 export interface ToolExecution {
   readonly text: string;
@@ -58,11 +59,16 @@ export class PirxMcpClient {
         `Brak zbudowanego serwera MCP: ${this.#serverEntry}. Uruchom najpierw pnpm build.`,
       );
     }
-
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    );
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [this.#serverEntry],
       stderr: "inherit",
+      env
     });
     const client = new Client({ name: "pirx-agent", version: "0.1.0" });
 
