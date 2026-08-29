@@ -5,7 +5,7 @@
 
 ## Kontekst
 
-POC asystentki Ada ma dziś dwa niepołączone ze sobą prototypy:
+POC asystentki Pirx ma dziś dwa niepołączone ze sobą prototypy:
 
 - `assistant.sh` (bash) — pętla czatu z Ollamą, wczytywanie `prompts/system.md`, logowanie sesji (transkrypt `.md` + metryki `.jsonl`), komendy `/help /clear /reload /stats /model /unload`. Nie wywołuje żadnych narzędzi.
 - `Pirx/pirx-mcp` (Python) — działający serwer MCP (`server.py`, narzędzia `hello`, `system_info`) oraz klient testowy (`agent_test.py`), który już poprawnie realizuje pętlę: zapytanie do Ollamy z listą narzędzi → jeśli `tool_calls`, wywołanie przez sesję MCP → dołożenie wyniku do historii → ponowne zapytanie. Model wpisany na sztywno, brak system promptu, brak logowania.

@@ -529,7 +529,7 @@ run_case() {
   printf '%6ss  %-28s\n' "$elapsed_display" "$flags" >&2
 }
 
-echo "Benchmark Ada — run $RUN_ID"
+echo "Benchmark Pirx — run $RUN_ID"
 echo "Prompt: $PROMPT_FILE ($PROMPT_SHA)"
 echo "Przypadków: $CASE_COUNT | powtórzeń: $REPEATS | rekordów/model: $EXPECTED_RECORDS"
 echo "Kontekst: $NUM_CTX | limit generowania: $NUM_PREDICT | temperatura: $TEMPERATURE | think: $THINK | seed bazowy: $SEED_BASE"

@@ -56,7 +56,7 @@ async function main(): Promise<void> {
   const readline = createInterface({ input: stdin, output: stdout });
   readline.on("SIGINT", () => readline.close());
 
-  console.log("\nAda — lokalna asystentka");
+  console.log("\nPirx — lokalna asystentka");
   console.log(`Model: ${config.model}`);
   console.log(`Kontekst: ${config.numCtx}`);
   console.log(`Prompt: ${config.promptFile} (${agent.systemPrompt.sha256})`);
@@ -111,12 +111,12 @@ async function main(): Promise<void> {
         default: {
           try {
             const turn = await agent.chat(prompt);
-            console.log(`\nAda: ${turn.content}\n`);
+            console.log(`\nPirx: ${turn.content}\n`);
             await logger.saveTurn(prompt, turn.content, turn.metrics);
             console.log(
               `Metryki: ${turn.metrics.output_tokens} tokenów, ` +
-                `${turn.metrics.generation_tokens_per_second.toFixed(1)} tok/s, ` +
-                `${turn.metrics.tool_calls} wywołań narzędzi.`,
+              `${turn.metrics.generation_tokens_per_second.toFixed(1)} tok/s, ` +
+              `${turn.metrics.tool_calls} wywołań narzędzi.`,
             );
           } catch (error: unknown) {
             const detail = error instanceof Error ? error.message : String(error);
@@ -136,6 +136,6 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   const detail = error instanceof Error ? error.message : String(error);
-  console.error(`Nie można uruchomić Ady: ${detail}`);
+  console.error(`Nie można uruchomić Pirxa: ${detail}`);
   process.exitCode = 1;
 });

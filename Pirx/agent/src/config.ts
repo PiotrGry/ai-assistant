@@ -45,7 +45,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AgentC
   return {
     model:
       environment.OLLAMA_MODEL ??
-      "hf.co/google/gemma-4-12B-it-qat-q4_0-gguf",
+      "qwen3:14b",
     numCtx: positiveInteger("OLLAMA_NUM_CTX", environment.OLLAMA_NUM_CTX ?? "8192"),
     keepAlive: environment.OLLAMA_KEEP_ALIVE ?? "10m",
     baseUrl: rawBaseUrl.replace(/\/+$/u, ""),

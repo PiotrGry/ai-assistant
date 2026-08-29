@@ -28,7 +28,7 @@ export class SessionLogger {
       resolve(config.logDir, `session_${id}.jsonl`),
     );
     const header = [
-      "# Rozmowa z Adą",
+      "# Rozmowa z Pirxem",
       "",
       `- Model: \`${config.model}\``,
       `- Kontekst: \`${config.numCtx}\``,
@@ -47,7 +47,7 @@ export class SessionLogger {
   }
 
   async saveTurn(prompt: string, response: string, metrics: TurnMetrics): Promise<void> {
-    const transcript = `## Ty\n\n${prompt}\n\n## Ada\n\n${response}\n\n`;
+    const transcript = `## Ty\n\n${prompt}\n\n## Pirx\n\n${response}\n\n`;
     await Promise.all([
       appendFile(this.transcriptFile, transcript, "utf8"),
       appendFile(this.metricsFile, `${JSON.stringify(metrics)}\n`, "utf8"),

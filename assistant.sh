@@ -227,7 +227,7 @@ save_transcript_entry() {
   local response="$2"
   {
     printf '## Ty\n\n%s\n\n' "$prompt"
-    printf '## Ada\n\n%s\n\n' "$response"
+    printf '## Pirx\n\n%s\n\n' "$response"
   } >>"$TRANSCRIPT_FILE"
 }
 
@@ -334,7 +334,7 @@ chat_once() {
 
   STREAM_FILE="$(mktemp)"
 
-  printf '\nAda: '
+  printf '\nPirx: '
   if ! curl -fsS "$OLLAMA_CHAT_URL" \
     -H 'Content-Type: application/json' \
     -d "$request" |
@@ -423,7 +423,7 @@ main() {
 EOF
 
   echo
-  echo "Ada — lokalna asystentka"
+  echo "Pirx — lokalna asystentka"
   echo "Model: $MODEL"
   echo "Kontekst: $NUM_CTX"
   echo "Prompt: $PROMPT_FILE ($PROMPT_SHA)"
