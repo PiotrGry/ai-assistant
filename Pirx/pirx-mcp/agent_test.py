@@ -45,7 +45,7 @@ async def main():
     # Pirx MCP will be stared automatically by the client.
     server = StdioServerParameters(
         command="uv",
-        args=["run", "server.py"],
+        args=["run", "python", "-m", "pirx_mcp.server"],
     )
 
     ollama = AsyncClient(host="http://localhost:11434")
