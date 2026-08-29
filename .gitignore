@@ -3,12 +3,18 @@ __pycache__/
 *.py[oc]
 build/
 dist/
+dist-test/
 wheels/
 *.egg-info/
 
 # Virtual environments
 .venv/
 venv/
+
+# --- Node / TypeScript ---
+node_modules/
+.pnpm-store/
+*.tsbuildinfo
 
 # --- Runtime output ---
 # Zapisy sesji asystenta - dane lokalne, nie wersjonujemy
@@ -25,6 +31,7 @@ bench/cloud/host.env
 bench/cloud/.host-state.json
 bench/cloud/known_hosts
 bench/cloud-results/
+pirx-benchmark-results*.tar.gz
 
 # --- System ---
 .DS_Store

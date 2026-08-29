@@ -1,0 +1,5 @@
+packages:
+  - agent
+  - mcp-server
+minimumReleaseAgeExclude:
+  - zod@4.5.2

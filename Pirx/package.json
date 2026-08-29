@@ -1,0 +1,21 @@
+{
+  "name": "pirx",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p mcp-server/tsconfig.json && tsc -p agent/tsconfig.json",
+    "typecheck": "tsc -p mcp-server/tsconfig.json --noEmit && tsc -p mcp-server/tsconfig.test.json --noEmit && tsc -p agent/tsconfig.json --noEmit && tsc -p agent/tsconfig.test.json --noEmit",
+    "test": "npm run build && tsc -p mcp-server/tsconfig.test.json && node --test mcp-server/dist-test/test/*.test.js && tsc -p agent/tsconfig.test.json && node --test agent/dist-test/test/*.test.js",
+    "check": "npm run typecheck && npm run test",
+    "start": "node --enable-source-maps agent/dist/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "typescript": "^7.0.2"
+  }
+}

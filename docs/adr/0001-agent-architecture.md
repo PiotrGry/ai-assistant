@@ -25,9 +25,9 @@ Pirx/
   pirx-mcp/      (istniejący, Python) — zostaje nietknięty, jako referencja
 ```
 
-`agent` wczytuje `prompts/system.md`, rozmawia z Ollamą (domyślnie `hf.co/google/gemma-4-12B-it-qat-q4_0-gguf`, konfigurowalne przez `OLLAMA_MODEL`), spawnuje `mcp-server` jako podproces przez `StdioClientTransport` z `@modelcontextprotocol/sdk`, i loguje sesję dwoma plikami — transkrypt `.md` i metryki `.jsonl` — dokładnie jak dziś `assistant.sh`.
+`agent` wczytuje `prompts/system.md`, rozmawia z Ollamą (domyślnie `hf.co/google/gemma-4-12B-it-qat-q4_0-gguf`, konfigurowalne przez `OLLAMA_MODEL`), spawnuje `mcp-server` jako podproces przez `StdioClientTransport` z `@modelcontextprotocol/client`, i loguje sesję dwoma plikami — transkrypt `.md` i metryki `.jsonl` — dokładnie jak dziś `assistant.sh`.
 
-`mcp-server` to port `server.py` na TS SDK (`McpServer` + `StdioServerTransport`), na start z tymi samymi dwoma narzędziami (`hello`, `system_info`); narzędzia kalendarza z kroku 3 mapy drogowej dochodzą tu później.
+`mcp-server` to port `server.py` na TS SDK (`McpServer` + `serveStdio` z `@modelcontextprotocol/server`), na start z tymi samymi dwoma narzędziami (`hello`, `system_info`); narzędzia kalendarza z kroku 3 mapy drogowej dochodzą tu później.
 
 ### Przepływ jednej tury rozmowy
 

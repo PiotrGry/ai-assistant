@@ -1,0 +1,17 @@
+{
+  "name": "@pirx/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:test": "tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "tsc -p ../mcp-server/tsconfig.json && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
+    "start": "node --enable-source-maps dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "ollama": "0.6.3"
+  }
+}

@@ -7,6 +7,31 @@ tasks:
     cmds:
       - task --list
 
+  pirx:install:
+    desc: Zainstaluj zależności TypeScript zgodnie z lockfile
+    dir: Pirx
+    cmds:
+      - pnpm install --frozen-lockfile
+
+  pirx:build:
+    desc: Zbuduj agenta i serwer MCP
+    dir: Pirx
+    cmds:
+      - pnpm build
+
+  pirx:test:
+    desc: Uruchom testy i kontrolę typów Pirxa
+    dir: Pirx
+    cmds:
+      - pnpm check
+
+  pirx:start:
+    desc: Zbuduj i uruchom Adę z narzędziami MCP
+    dir: Pirx
+    cmds:
+      - pnpm build
+      - pnpm start
+
   cloud:plan:
     desc: Pokaż host, modele i ustawienia bez łączenia przez SSH
     cmds:
