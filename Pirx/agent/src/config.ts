@@ -58,7 +58,7 @@ export function loadConfig(
     environment.OLLAMA_BASE_URL ?? "http://localhost:11434";
 
   return {
-    model: environment.OLLAMA_MODEL ?? "qwen3:14b",
+    model: environment.OLLAMA_MODEL ?? "gemma4:12b",
 
     numCtx: positiveInteger(
       "OLLAMA_NUM_CTX",

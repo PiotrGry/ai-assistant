@@ -8,6 +8,7 @@
     "build:test": "tsc -p tsconfig.test.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
+    "calendar:authorize": "npm run build && node --enable-source-maps dist/google-calendar/authorize-cli.js",
     "start": "node --enable-source-maps dist/index.js"
   },
   "dependencies": {

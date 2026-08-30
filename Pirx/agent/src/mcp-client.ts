@@ -1,6 +1,11 @@
 import { access } from "node:fs/promises";
 
-import { Client, ProtocolError } from "@modelcontextprotocol/client";
+import {
+  Client,
+  ProtocolError,
+  SdkError,
+  SdkErrorCode,
+} from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import type { Tool } from "ollama";
 
@@ -18,26 +23,43 @@ interface ListedMcpTool {
   readonly inputSchema: unknown;
 }
 
-async function withTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  label: string,
-): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
+const CHILD_ENVIRONMENT_KEYS = [
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LOGNAME",
+  "PATH",
+  "SHELL",
+  "TEMP",
+  "TMPDIR",
+  "TZ",
+  "USER",
+  "PIRX_OBSIDIAN_VAULT",
+  "PIRX_GOOGLE_CREDENTIALS_FILE",
+  "PIRX_GOOGLE_TOKEN_FILE",
+  "PIRX_GOOGLE_CALENDAR_ID",
+  "PIRX_GOOGLE_CALENDAR_TIMEZONE",
+  "PIRX_GOOGLE_TIMEOUT_MS",
+  "PIRX_GOOGLE_AUTH_TIMEOUT_MS",
+] as const;
 
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error(`${label} przekroczyło timeout ${timeoutMs} ms.`));
-    }, timeoutMs);
-  });
-
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer);
+function childEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const key of CHILD_ENVIRONMENT_KEYS) {
+    const value = environment[key];
+    if (value !== undefined) {
+      result[key] = value;
     }
   }
+  return result;
+}
+
+function isConnectionFailure(error: unknown): boolean {
+  return (
+    error instanceof SdkError &&
+    (error.code === SdkErrorCode.ConnectionClosed ||
+      error.code === SdkErrorCode.NotConnected)
+  );
 }
 
 export class PirxMcpClient {
@@ -84,19 +106,11 @@ export class PirxMcpClient {
       );
     }
 
-    // Tymczasowo przekazujemy całe środowisko.
-    // Później zamienimy to na whitelistę konfiguracji MCP.
-    const childEnvironment = Object.fromEntries(
-      Object.entries(process.env).filter(
-        (entry): entry is [string, string] => entry[1] !== undefined,
-      ),
-    );
-
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [this.#serverEntry],
       stderr: "inherit",
-      env: childEnvironment,
+      env: childEnvironment(process.env),
     });
 
     const client = new Client({
@@ -105,9 +119,11 @@ export class PirxMcpClient {
     });
 
     try {
-      await client.connect(transport);
+      await client.connect(transport, { timeout: this.#toolTimeoutMs });
 
-      const response = await client.listTools();
+      const response = await client.listTools(undefined, {
+        timeout: this.#toolTimeoutMs,
+      });
 
       this.#tools = response.tools;
       this.#client = client;
@@ -144,13 +160,12 @@ export class PirxMcpClient {
     }
 
     try {
-      const result = await withTimeout(
-        this.#client.callTool({
+      const result = await this.#client.callTool(
+        {
           name,
           arguments: arguments_,
-        }),
-        this.#toolTimeoutMs,
-        `Narzędzie ${name}`,
+        },
+        { timeout: this.#toolTimeoutMs },
       );
 
       return {
@@ -166,6 +181,15 @@ export class PirxMcpClient {
           text: `Błąd wywołania narzędzia ${name}: ${detail}`,
           isError: true,
           serverUnavailable: false,
+        };
+      }
+
+      if (isConnectionFailure(error)) {
+        this.#unavailableReason = detail;
+        return {
+          text: `Serwer MCP jest niedostępny: ${detail}`,
+          isError: true,
+          serverUnavailable: true,
         };
       }
 

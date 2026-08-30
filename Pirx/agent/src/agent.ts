@@ -82,6 +82,18 @@ function normalizeArguments(value: unknown): Record<string, unknown> {
 
   return {};
 }
+
+function boundedFetch(timeoutMs: number): typeof fetch {
+  return async (input, init = {}) => {
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const signal =
+      init.signal === undefined || init.signal === null
+        ? timeoutSignal
+        : AbortSignal.any([init.signal, timeoutSignal]);
+    return fetch(input, { ...init, signal });
+  };
+}
+
 async function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -117,7 +129,10 @@ export class PirxAgent {
     this.#config = config;
     this.#prompt = prompt;
     this.#hooks = hooks;
-    this.#ollama = new Ollama({ host: config.baseUrl });
+    this.#ollama = new Ollama({
+      host: config.baseUrl,
+      fetch: boundedFetch(config.llmTimeoutMs),
+    });
     this.#mcp = new PirxMcpClient(
       config.mcpServerEntry,
       config.toolTimeoutMs,

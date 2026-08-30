@@ -27,6 +27,7 @@ memory/
 .env
 .env.*
 !.env.example
+Pirx/.secrets/
 bench/cloud/host.env
 bench/cloud/.host-state.json
 bench/cloud/known_hosts
