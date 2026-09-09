@@ -331,6 +331,40 @@ export class SqliteStore {
       );
   }
 
+  recoverInterrupted(endedAt: string): void {
+    this.#assertOpen();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#database
+        .prepare(
+          `UPDATE operations
+           SET ended_at = ?,
+               status = CASE WHEN kind = 'mcp' THEN 'unknown' ELSE 'failed' END,
+               error = 'process_restart'
+           WHERE status = 'started'`,
+        )
+        .run(endedAt);
+      this.#database
+        .prepare(
+          `UPDATE turns
+           SET ended_at = ?, status = 'failed'
+           WHERE status = 'started'`,
+        )
+        .run(endedAt);
+      this.#database
+        .prepare(
+          `UPDATE sessions
+           SET ended_at = ?, status = 'failed'
+           WHERE status = 'active'`,
+        )
+        .run(endedAt);
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   finishTurn(
     id: string,
     endedAt: string,

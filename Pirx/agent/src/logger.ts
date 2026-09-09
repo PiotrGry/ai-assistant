@@ -84,6 +84,7 @@ export class SessionLogger {
       store = SqliteStore.open({ filename: config.storagePath });
       databaseSessionId = randomUUID();
       try {
+        store.recoverInterrupted(startedAt);
         const environmentId = randomUUID();
         store.insertRunEnvironment({
           id: environmentId,
