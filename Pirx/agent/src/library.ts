@@ -24,6 +24,14 @@ export type {
   OperationStartInput,
 } from "./operation-recorder.js";
 export { ResourceSampler } from "./resource-sampler.js";
+export {
+  backupDatabase,
+  exportDatabaseJsonl,
+  pruneResourceSamples,
+  restoreDatabase,
+  retentionDryRun,
+} from "./storage/maintenance.js";
+export type { RetentionReport } from "./storage/maintenance.js";
 export type {
   ResourceSampleRecord,
   ResourceSamplerOptions,
