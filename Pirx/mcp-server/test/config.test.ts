@@ -24,6 +24,11 @@ test("MCP configuration uses the existing environment-based approach", () => {
   assert.equal(config.googleCalendar.authorizationTimeoutMs, 9_876);
 });
 
+test("MCP configuration uses the project vault by default", () => {
+  const config = loadMcpServerConfig({});
+  assert.equal(config.obsidianVaultPath?.endsWith("/Pirx/vault"), true);
+});
+
 test("MCP configuration rejects invalid timeouts and timezones", () => {
   assert.throws(
     () => loadMcpServerConfig({ PIRX_GOOGLE_TIMEOUT_MS: "0" }),

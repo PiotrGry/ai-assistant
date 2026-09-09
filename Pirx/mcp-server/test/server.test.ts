@@ -163,11 +163,12 @@ test("an unsafe Obsidian call is controlled and hello still works", async (conte
   assert.deepEqual(hello.structuredContent, { greeting: "Hello, Piotr!" });
 });
 
-test("missing integration configuration does not prevent MCP startup", async (context) => {
+test("invalid optional integration configuration does not prevent MCP startup", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pirx-missing-config-"));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createMcpServer({
     environment: {
+      PIRX_OBSIDIAN_VAULT: join(root, "missing-vault"),
       PIRX_GOOGLE_CREDENTIALS_FILE: join(root, "missing-credentials.json"),
       PIRX_GOOGLE_TOKEN_FILE: join(root, "missing-token.json"),
       PIRX_GOOGLE_CALENDAR_TIMEZONE: "UTC",
@@ -189,7 +190,7 @@ test("missing integration configuration does not prevent MCP startup", async (co
     arguments: {},
   });
   assert.equal(obsidian.isError, true);
-  assert.match(JSON.stringify(obsidian.content), /PIRX_OBSIDIAN_VAULT/u);
+  assert.match(JSON.stringify(obsidian.content), /Obsidian note not found/u);
 
   const calendar = await client.callTool({
     name: "calendar_list_calendars",

@@ -1,5 +1,7 @@
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 export interface GoogleCalendarConfig {
   readonly credentialsFile: string;
@@ -35,6 +37,15 @@ function optionalPath(value: string | undefined): string | undefined {
   return resolve(value.trim());
 }
 
+function defaultObsidianVault(): string | undefined {
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    resolve(moduleDirectory, "..", "..", "vault"),
+    resolve(moduleDirectory, "..", "..", "..", "vault"),
+  ];
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
 export function loadMcpServerConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): McpServerConfig {
@@ -51,7 +62,8 @@ export function loadMcpServerConfig(
   }
 
   return {
-    obsidianVaultPath: optionalPath(environment.PIRX_OBSIDIAN_VAULT),
+    obsidianVaultPath:
+      optionalPath(environment.PIRX_OBSIDIAN_VAULT) ?? defaultObsidianVault(),
     googleCalendar: {
       credentialsFile: resolve(
         environment.PIRX_GOOGLE_CREDENTIALS_FILE?.trim() ||

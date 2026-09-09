@@ -95,7 +95,8 @@ Logi sesji trafiają do głównego katalogu `logs/` i nie są wersjonowane.
 
 ## Obsidian
 
-Ustaw vault zmienną środowiskową przed uruchomieniem:
+Domyślnym vaultem jest `Pirx/vault`. Możesz użyć innego vaulta, ustawiając
+zmienną środowiskową przed uruchomieniem:
 
 ```bash
 export PIRX_OBSIDIAN_VAULT=/bezwzgledna/sciezka/do/vaulta
