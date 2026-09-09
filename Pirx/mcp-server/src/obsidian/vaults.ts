@@ -283,6 +283,18 @@ export class ObsidianVault {
     }
   }
 
+  async exists(path: string): Promise<boolean> {
+    try {
+      await this.#existingNote(path);
+      return true;
+    } catch (error: unknown) {
+      if (error instanceof ObsidianError && error.code === "not_found") {
+        return false;
+      }
+      throw error;
+    }
+  }
+
   async create(path: string, content: string): Promise<void> {
     const note = await this.#newNote(path);
     let handle;

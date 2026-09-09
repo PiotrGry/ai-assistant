@@ -94,6 +94,7 @@ test("server exposes complete tools with safe annotations", async (context) => {
       "obsidian_backlinks",
       "obsidian_create",
       "obsidian_delete",
+      "obsidian_exists",
       "obsidian_links",
       "obsidian_list",
       "obsidian_move",

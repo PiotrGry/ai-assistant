@@ -36,6 +36,27 @@ export function registerObsidianTools(
   vault: ObsidianVault | undefined,
 ): void {
   server.registerTool(
+    "obsidian_exists",
+    {
+      title: "Check whether an Obsidian note exists",
+      description:
+        "Check whether one Markdown note currently exists without reading its contents.",
+      inputSchema: z.object({ path: notePathSchema }),
+      outputSchema: z.object({ path: z.string(), exists: z.boolean() }),
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ path }) =>
+      structured({
+        path: normalizeNotePath(path),
+        exists: await configuredVault(vault).exists(path),
+      }),
+  );
+
+  server.registerTool(
     "obsidian_read",
     {
       title: "Read an Obsidian note",

@@ -26,6 +26,8 @@ test("create, read, write, list and search nested Markdown notes", async () => {
     await vault.create("Notes/Nested/test.md", "# Pirx\ninitial");
     await vault.create("Other.md", "unrelated");
 
+    assert.equal(await vault.exists("Notes/Nested/test.md"), true);
+    assert.equal(await vault.exists("Missing.md"), false);
     assert.equal(await vault.read("Notes/Nested/test.md"), "# Pirx\ninitial");
     await vault.write("Notes/Nested/test.md", "# Replaced\nPirx");
     assert.equal(await vault.read("Notes/Nested/test.md"), "# Replaced\nPirx");
