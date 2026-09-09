@@ -52,6 +52,11 @@ test("SQLite maintenance exports, backs up, restores and prunes only samples", a
       retentionDryRun(restored, "2026-09-05T00:00:00.000Z").resourceSamples,
       1,
     );
+    await assert.rejects(
+      restoreDatabase(backup, restored),
+      /EEXIST|already exists/u,
+    );
+    await restoreDatabase(backup, restored, { overwrite: true });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

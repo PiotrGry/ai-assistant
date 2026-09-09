@@ -1,4 +1,5 @@
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
 import { dirname } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
 
@@ -17,6 +18,10 @@ const EXPORT_TABLES = [
 export interface RetentionReport {
   readonly cutoff: string;
   readonly resourceSamples: number;
+}
+
+export interface RestoreOptions {
+  readonly overwrite?: boolean;
 }
 
 function plainRecord(value: unknown): Record<string, unknown> {
@@ -49,6 +54,7 @@ export async function backupDatabase(
 export async function restoreDatabase(
   backupFilename: string,
   destinationFilename: string,
+  options: RestoreOptions = {},
 ): Promise<void> {
   const source = new DatabaseSync(backupFilename, { readOnly: true });
   try {
@@ -57,7 +63,11 @@ export async function restoreDatabase(
     source.close();
   }
   await mkdir(dirname(destinationFilename), { recursive: true, mode: 0o700 });
-  await copyFile(backupFilename, destinationFilename);
+  await copyFile(
+    backupFilename,
+    destinationFilename,
+    options.overwrite === true ? 0 : constants.COPYFILE_EXCL,
+  );
 }
 
 export async function exportDatabaseJsonl(
