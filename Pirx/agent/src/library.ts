@@ -21,3 +21,11 @@ export type {
   OperationRecorder,
   OperationStartInput,
 } from "./operation-recorder.js";
+export { ResourceSampler } from "./resource-sampler.js";
+export type {
+  ResourceSampleRecord,
+  ResourceSamplerOptions,
+  ResourceSamplerSink,
+  ResourceSamplerState,
+  ResourceSnapshot,
+} from "./resource-sampler.js";

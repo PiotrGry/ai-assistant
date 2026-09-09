@@ -61,6 +61,17 @@ export interface ActionEventRecord {
   readonly createdAt: string;
 }
 
+export interface ResourceSampleRecord {
+  readonly id: string;
+  readonly sessionId?: string;
+  readonly turnId?: string;
+  readonly sampledAt: string;
+  readonly source: string;
+  readonly host?: string;
+  readonly gpuIndex?: number;
+  readonly payload: Record<string, unknown>;
+}
+
 function json(value: unknown): string {
   return JSON.stringify(value);
 }
@@ -362,6 +373,26 @@ export class SqliteStore {
       );
   }
 
+  insertResourceSample(record: ResourceSampleRecord): void {
+    this.#assertOpen();
+    this.#database
+      .prepare(
+        `INSERT INTO resource_samples
+          (id, session_id, turn_id, sampled_at, source, host, gpu_index, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.sessionId ?? null,
+        record.turnId ?? null,
+        record.sampledAt,
+        record.source,
+        record.host ?? null,
+        record.gpuIndex ?? null,
+        json(record.payload),
+      );
+  }
+
   latestActionState(
     mutationId: string,
   ): { readonly state: ActionEventState; readonly attempt: number } | undefined {
@@ -386,7 +417,8 @@ export class SqliteStore {
       | "sessions"
       | "turns"
       | "operations"
-      | "action_events",
+      | "action_events"
+      | "resource_samples",
   ): number {
     this.#assertOpen();
     const row = this.#database
