@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 
-export const STORAGE_SCHEMA_VERSION = 1;
+export const STORAGE_SCHEMA_VERSION = 2;
 
 export interface SqliteStoreOptions {
   readonly filename: string;
@@ -50,6 +50,31 @@ export interface ContextBuildRecord {
   readonly budgetTokens: number;
   readonly selected: Record<string, unknown>;
   readonly omitted: Record<string, unknown>;
+  readonly createdAt: string;
+}
+
+export interface MessageRecord {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly sequence: number;
+  readonly role: string;
+  readonly content?: string;
+  readonly toolName?: string;
+  readonly payload: Record<string, unknown>;
+  readonly createdAt: string;
+}
+
+export interface ArtifactRecord {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly operationId?: string;
+  readonly kind: string;
+  readonly source: string;
+  readonly contentHash: string;
+  readonly content?: string;
+  readonly payload: Record<string, unknown>;
   readonly createdAt: string;
 }
 
@@ -162,6 +187,32 @@ function initialize(database: DatabaseSync, busyTimeoutMs: number): void {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      turn_id TEXT NOT NULL REFERENCES turns(id),
+      sequence INTEGER NOT NULL CHECK (sequence >= 0),
+      role TEXT NOT NULL,
+      content TEXT,
+      tool_name TEXT,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL,
+      UNIQUE (turn_id, sequence)
+    );
+
+    CREATE TABLE IF NOT EXISTS artifacts (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      turn_id TEXT NOT NULL REFERENCES turns(id),
+      operation_id TEXT REFERENCES operations(id),
+      kind TEXT NOT NULL,
+      source TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      content TEXT,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS action_events (
       id TEXT PRIMARY KEY,
       operation_id TEXT NOT NULL REFERENCES operations(id),
@@ -191,6 +242,10 @@ function initialize(database: DatabaseSync, busyTimeoutMs: number): void {
       ON operations (turn_id, sequence);
     CREATE INDEX IF NOT EXISTS idx_operations_kind_status
       ON operations (kind, status, started_at);
+    CREATE INDEX IF NOT EXISTS idx_messages_turn_sequence
+      ON messages (turn_id, sequence);
+    CREATE INDEX IF NOT EXISTS idx_artifacts_turn_created
+      ON artifacts (turn_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_action_events_mutation
       ON action_events (mutation_id, attempt);
     CREATE INDEX IF NOT EXISTS idx_resource_samples_time
@@ -338,6 +393,51 @@ export class SqliteStore {
       );
   }
 
+  insertMessage(record: MessageRecord): void {
+    this.#assertOpen();
+    this.#database
+      .prepare(
+        `INSERT INTO messages
+          (id, session_id, turn_id, sequence, role, content, tool_name,
+           payload_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.sessionId,
+        record.turnId,
+        record.sequence,
+        record.role,
+        record.content ?? null,
+        record.toolName ?? null,
+        json(record.payload),
+        record.createdAt,
+      );
+  }
+
+  insertArtifact(record: ArtifactRecord): void {
+    this.#assertOpen();
+    this.#database
+      .prepare(
+        `INSERT INTO artifacts
+          (id, session_id, turn_id, operation_id, kind, source,
+           content_hash, content, payload_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.sessionId,
+        record.turnId,
+        record.operationId ?? null,
+        record.kind,
+        record.source,
+        record.contentHash,
+        record.content ?? null,
+        json(record.payload),
+        record.createdAt,
+      );
+  }
+
   finishSession(
     id: string,
     endedAt: string,
@@ -450,6 +550,8 @@ export class SqliteStore {
       | "turns"
       | "operations"
       | "context_builds"
+      | "messages"
+      | "artifacts"
       | "action_events"
       | "resource_samples",
   ): number {

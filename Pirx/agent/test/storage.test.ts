@@ -76,7 +76,7 @@ test("SQLite store rejects orphan records and remains reopenable", async () => {
   const reopened = SqliteStore.open({ filename });
   try {
     assert.equal(reopened.count("sessions"), 0);
-    assert.equal(STORAGE_SCHEMA_VERSION, 1);
+    assert.equal(STORAGE_SCHEMA_VERSION, 2);
     assert.match(await readFile(filename, "utf8"), /./u);
   } finally {
     reopened.close();

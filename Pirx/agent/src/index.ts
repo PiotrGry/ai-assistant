@@ -115,7 +115,13 @@ async function main(): Promise<void> {
           try {
             const turn = await agent.chat(prompt, turnContext);
             console.log(`\nPirx: ${turn.content}\n`);
-            await logger.saveTurn(prompt, turn.content, turn.metrics, turnContext);
+            await logger.saveTurn(
+              prompt,
+              turn.content,
+              turn.metrics,
+              turnContext,
+              turn.messages,
+            );
             const generationRate =
               turn.metrics.generation_tokens_per_second === null
                 ? "niedostępne"

@@ -48,6 +48,7 @@ export interface TurnMetrics {
 
 export interface ChatTurn {
   readonly content: string;
+  readonly messages: readonly Message[];
   readonly metrics: TurnMetrics;
 }
 
@@ -731,6 +732,7 @@ export class PirxAgent {
       const gpuAfter = await readGpuStats();
       return {
         content: finalContent,
+        messages: this.#messages.slice(checkpoint),
         metrics: {
           timestamp,
           model,

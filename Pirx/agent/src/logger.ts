@@ -1,9 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFile, chmod, mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import type { AgentConfig, SystemPrompt } from "./config.js";
 import type { TurnMetrics } from "./agent.js";
+import type { Message } from "ollama";
 import { SqliteActionLedger } from "./action-ledger.js";
 import { SqliteOperationRecorder } from "./operation-recorder.js";
 import type { OperationRecorder } from "./operation-recorder.js";
@@ -172,6 +173,7 @@ export class SessionLogger {
     response: string,
     metrics: TurnMetrics,
     turn?: SessionTurn,
+    messages: readonly Message[] = [],
   ): Promise<void> {
     if (this.#closed) {
       throw new Error("Session logger is closed.");
@@ -182,11 +184,37 @@ export class SessionLogger {
       this.#sessionId !== undefined &&
       turn !== undefined
     ) {
-      this.#store.finishTurn(turn.id, new Date().toISOString(), "completed", {
-        schema_version: 1,
-        response,
-        metrics,
-      });
+      const createdAt = new Date().toISOString();
+      for (const [sequence, message] of messages.entries()) {
+        this.#store.insertMessage({
+          id: randomUUID(),
+          sessionId: this.#sessionId,
+          turnId: turn.id,
+          sequence,
+          role: message.role,
+          ...(message.content === undefined ? {} : { content: message.content }),
+          ...(message.tool_name === undefined
+            ? {}
+            : { toolName: message.tool_name }),
+          payload: message as unknown as Record<string, unknown>,
+          createdAt,
+        });
+        if (message.role === "tool") {
+          this.#store.insertArtifact({
+            id: randomUUID(),
+            sessionId: this.#sessionId,
+            turnId: turn.id,
+            kind: "mcp_tool_result",
+            source: message.tool_name ?? "unknown",
+            contentHash: createHash("sha256")
+              .update(message.content ?? "")
+              .digest("hex"),
+            content: message.content,
+            payload: { schema_version: 1 },
+            createdAt,
+          });
+        }
+      }
     } else if (this.#store !== undefined && this.#sessionId !== undefined) {
       this.#store.insertTurn({
         id: randomUUID(),
@@ -205,6 +233,17 @@ export class SessionLogger {
     }
     await appendFile(this.transcriptFile, transcript, "utf8");
     await appendFile(this.metricsFile, `${JSON.stringify(metrics)}\n`, "utf8");
+    if (
+      this.#store !== undefined &&
+      this.#sessionId !== undefined &&
+      turn !== undefined
+    ) {
+      this.#store.finishTurn(turn.id, new Date().toISOString(), "completed", {
+        schema_version: 1,
+        response,
+        metrics,
+      });
+    }
     this.#lastMetrics = metrics;
     this.#resourceSampler?.setTurnId(undefined);
   }

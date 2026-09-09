@@ -73,6 +73,16 @@ test("SessionLogger persists the environment, session and completed turn", async
     "Stan jest poprawny.",
     metrics("2026-09-09T10:00:00.000Z"),
     turn,
+    [
+      { role: "user", content: "Sprawdź stan." },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ function: { name: "hello", arguments: {} } }],
+      },
+      { role: "tool", tool_name: "hello", content: "ok" },
+      { role: "assistant", content: "Stan jest poprawny." },
+    ],
   );
   await logger.close();
 
@@ -81,6 +91,8 @@ test("SessionLogger persists the environment, session and completed turn", async
     assert.equal(store.count("run_environments"), 1);
     assert.equal(store.count("sessions"), 1);
     assert.equal(store.count("turns"), 1);
+    assert.equal(store.count("messages"), 4);
+    assert.equal(store.count("artifacts"), 1);
   } finally {
     store.close();
   }
