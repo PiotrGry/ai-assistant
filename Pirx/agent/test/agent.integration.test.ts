@@ -169,6 +169,7 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
   assert.equal(turn.metrics.output_tokens, null);
   assert.equal(turn.metrics.generation_tokens_per_second, null);
   assert.equal(turn.metrics.time_zone, "Europe/Warsaw");
+  assert.ok(turn.metrics.turn_duration_ms >= 0);
   assert.equal(requests.length, 2);
   assert.equal(contextBuilds.length, 2);
   assert.equal(contextBuilds[0]?.input.policyVersion, "context-estimate-v1");

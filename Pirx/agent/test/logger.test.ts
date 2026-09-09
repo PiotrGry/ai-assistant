@@ -20,6 +20,7 @@ function metrics(timestamp: string): TurnMetrics {
     system_prompt_sha256: "prompt-hash",
     prompt: "test",
     response: "ok",
+    turn_duration_ms: 200,
     input_tokens: 3,
     output_tokens: 2,
     total_seconds: 0.2,

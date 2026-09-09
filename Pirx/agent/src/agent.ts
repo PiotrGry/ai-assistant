@@ -30,6 +30,7 @@ export interface TurnMetrics {
   readonly system_prompt_sha256: string;
   readonly prompt: string;
   readonly response: string;
+  readonly turn_duration_ms: number;
   readonly input_tokens: number | null;
   readonly output_tokens: number | null;
   readonly total_seconds: number | null;
@@ -431,6 +432,7 @@ export class PirxAgent {
 
   async chat(prompt: string, context: ChatTurnContext = {}): Promise<ChatTurn> {
     const model = this.#currentModel;
+    const turnStartedAt = performance.now();
     const checkpoint = this.#messages.length;
     const timestamp = this.#now().toISOString();
     const gpuBefore = await readGpuStats();
@@ -739,6 +741,7 @@ export class PirxAgent {
           system_prompt_sha256: this.#prompt.sha256,
           prompt,
           response: finalContent,
+          turn_duration_ms: performance.now() - turnStartedAt,
           input_tokens: totals.promptEvalCount,
           output_tokens: totals.evalCount,
           total_seconds: secondsFromNanoseconds(totals.totalDuration),
