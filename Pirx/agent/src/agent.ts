@@ -497,20 +497,6 @@ export class PirxAgent {
                 },
               })
             : undefined;
-        if (llmOperation !== undefined) {
-          const references = contextBuildReferences(
-            messagesForModel,
-            contextBuild.messages,
-          );
-          context.operationRecorder?.recordContextBuild?.(llmOperation, {
-            policyVersion: contextBuild.estimate.policyVersion,
-            estimatedInputTokens: contextBuild.estimate.estimatedInputTokens,
-            budgetTokens: contextBuild.estimate.inputBudgetTokens,
-            selected: references.selected,
-            omitted: references.omitted,
-            createdAt: this.#now().toISOString(),
-          });
-        }
         const llmStartedAt = performance.now();
         const request = {
           model,
@@ -529,6 +515,20 @@ export class PirxAgent {
 
         let response: ResponseWithMetrics;
         try {
+          if (llmOperation !== undefined) {
+            const references = contextBuildReferences(
+              messagesForModel,
+              contextBuild.messages,
+            );
+            context.operationRecorder?.recordContextBuild?.(llmOperation, {
+              policyVersion: contextBuild.estimate.policyVersion,
+              estimatedInputTokens: contextBuild.estimate.estimatedInputTokens,
+              budgetTokens: contextBuild.estimate.inputBudgetTokens,
+              selected: references.selected,
+              omitted: references.omitted,
+              createdAt: this.#now().toISOString(),
+            });
+          }
           response = (await withTimeout(
             this.#ollama.chat(request),
             this.#config.llmTimeoutMs,
