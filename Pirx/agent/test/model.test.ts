@@ -35,6 +35,7 @@ test("parses unique installed Ollama model names", () => {
 
 test("switches runtime model only after Ollama validates it", async (context) => {
   const requests: Record<string, unknown>[] = [];
+  const unloadRequests: Record<string, unknown>[] = [];
   const ollama = createServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/api/tags") {
       sendJson(response, { models: [{ name: "alpha" }, { name: "beta" }] });
@@ -54,6 +55,11 @@ test("switches runtime model only after Ollama validates it", async (context) =>
         eval_count: 1,
         eval_duration: 1_000_000,
       });
+      return;
+    }
+    if (request.method === "POST" && request.url === "/api/generate") {
+      unloadRequests.push(await requestBody(request));
+      sendJson(response, { model: "beta", response: "", done: true });
       return;
     }
     response.writeHead(404).end();
@@ -102,15 +108,24 @@ test("switches runtime model only after Ollama validates it", async (context) =>
     await rm(temporaryDirectory, { recursive: true, force: true });
   });
 
-  agent = await PirxAgent.create(config);
-  assert.equal(agent.model, "alpha");
-  await agent.setModel("beta");
-  assert.equal(agent.model, "beta");
-  await assert.rejects(() => agent.setModel("not-installed"), /nie jest zainstalowany/u);
-  assert.equal(agent.model, "beta");
+  const activeAgent = agent = await PirxAgent.create(config);
+  assert.equal(activeAgent.model, "alpha");
+  await activeAgent.setModel("beta");
+  assert.equal(activeAgent.model, "beta");
+  await assert.rejects(() => activeAgent.setModel("not-installed"), /nie jest zainstalowany/u);
+  assert.equal(activeAgent.model, "beta");
 
-  const turn = await agent.chat("Use the selected model.");
+  const turn = await activeAgent.chat("Use the selected model.");
   assert.equal(turn.content, "ready");
   assert.equal(turn.metrics.model, "beta");
   assert.equal(requests.at(-1)?.model, "beta");
+
+  await activeAgent.close();
+  agent = undefined;
+  assert.deepEqual(unloadRequests, [{
+    model: "beta",
+    prompt: "",
+    stream: false,
+    keep_alive: 0,
+  }]);
 });

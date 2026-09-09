@@ -338,6 +338,7 @@ export class PirxAgent {
   #currentModel: string;
   #mcpFailureReported = false;
   #lastContextTokens: number | undefined;
+  #modelMayBeLoaded = false;
 
   private constructor(
     config: AgentConfig,
@@ -533,6 +534,7 @@ export class PirxAgent {
 
         let response: ResponseWithMetrics;
         try {
+          this.#modelMayBeLoaded = true;
           if (llmOperation !== undefined) {
             const references = contextBuildReferences(
               messagesForModel,
@@ -804,6 +806,7 @@ export class PirxAgent {
     const response = await fetch(`${this.#config.baseUrl}/api/generate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
+      signal: AbortSignal.timeout(this.#config.llmTimeoutMs),
       body: JSON.stringify({
         model: this.#currentModel,
         prompt: "",
@@ -818,7 +821,16 @@ export class PirxAgent {
   }
 
   async close(): Promise<void> {
-    await this.#mcp.close();
+    try {
+      if (this.#modelMayBeLoaded) {
+        await this.unloadModel();
+      }
+    } catch {
+      // Shutdown must still close MCP and let the terminal process exit when
+      // Ollama is already unavailable or has unloaded the model itself.
+    } finally {
+      await this.#mcp.close();
+    }
   }
 
   #messagesForModel(): Message[] {
