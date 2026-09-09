@@ -18,6 +18,8 @@ test("błędna nazwa narzędzia nie wyłącza serwera MCP", async (context) => {
   });
 
   await client.connect();
+  assert.equal(client.isReadOnlyTool("hello"), true);
+  assert.equal(client.isReadOnlyTool("obsidian_create"), false);
   const unknown = await client.callTool("nieistniejace_narzedzie", {});
   assert.equal(unknown.isError, true);
   assert.equal(unknown.serverUnavailable, false);

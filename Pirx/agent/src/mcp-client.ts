@@ -21,6 +21,11 @@ interface ListedMcpTool {
   readonly name: string;
   readonly description?: string | undefined;
   readonly inputSchema: unknown;
+  readonly annotations?:
+    | {
+      readonly readOnlyHint?: boolean | undefined;
+      }
+    | undefined;
 }
 
 const CHILD_ENVIRONMENT_KEYS = [
@@ -81,6 +86,10 @@ export class PirxMcpClient {
 
   get isAvailable(): boolean {
     return this.#client !== undefined && this.#unavailableReason === undefined;
+  }
+
+  isReadOnlyTool(name: string): boolean {
+    return this.#tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint === true;
   }
 
   get ollamaTools(): readonly Tool[] {

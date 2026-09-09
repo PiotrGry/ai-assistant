@@ -64,10 +64,13 @@ test("SessionLogger persists the environment, session and completed turn", async
     content: "Jesteś testem.",
     sha256: "prompt-hash",
   });
+  const turn = logger.beginTurn("Sprawdź stan.");
+  assert.ok(turn.actionLedger !== undefined);
   await logger.saveTurn(
     "Sprawdź stan.",
     "Stan jest poprawny.",
     metrics("2026-09-09T10:00:00.000Z"),
+    turn,
   );
   await logger.close();
 

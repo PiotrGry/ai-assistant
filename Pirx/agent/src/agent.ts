@@ -2,6 +2,7 @@ import { Ollama, type ChatResponse, type Message, type Tool } from "ollama";
 
 import type { AgentConfig, SystemPrompt } from "./config.js";
 import { loadSystemPrompt } from "./config.js";
+import type { SqliteActionLedger } from "./action-ledger.js";
 import {
   estimateContext,
   type ContextEstimate,
@@ -41,6 +42,12 @@ export interface TurnMetrics {
 export interface ChatTurn {
   readonly content: string;
   readonly metrics: TurnMetrics;
+}
+
+export interface ChatTurnContext {
+  readonly sessionId?: string;
+  readonly turnId?: string;
+  readonly actionLedger?: SqliteActionLedger;
 }
 
 export interface AgentHooks {
@@ -150,6 +157,22 @@ function normalizeArguments(value: unknown): Record<string, unknown> {
   }
 
   return {};
+}
+
+function actionTarget(
+  name: string,
+  arguments_: Record<string, unknown>,
+): string {
+  const identifiers = [
+    "path",
+    "source",
+    "destination",
+    "calendarId",
+    "eventId",
+  ]
+    .filter((key) => typeof arguments_[key] === "string")
+    .map((key) => `${key}=${String(arguments_[key])}`);
+  return [name, ...identifiers].join(" ");
 }
 
 function boundedFetch(timeoutMs: number): typeof fetch {
@@ -304,7 +327,7 @@ export class PirxAgent {
     this.#currentModel = requestedModel;
   }
 
-  async chat(prompt: string): Promise<ChatTurn> {
+  async chat(prompt: string, context: ChatTurnContext = {}): Promise<ChatTurn> {
     const model = this.#currentModel;
     const checkpoint = this.#messages.length;
     const timestamp = this.#now().toISOString();
@@ -406,10 +429,67 @@ export class PirxAgent {
           }
 
           totals.toolCalls += 1;
+
+          const actionPlan =
+            context.actionLedger !== undefined &&
+            context.sessionId !== undefined &&
+            context.turnId !== undefined &&
+            !this.#mcp.isReadOnlyTool(name)
+              ? context.actionLedger.plan({
+                  sessionId: context.sessionId,
+                  turnId: context.turnId,
+                  sequence: totals.toolCalls - 1,
+                  target: actionTarget(name, arguments_),
+                  toolName: name,
+                  arguments: arguments_,
+                  authorization: {
+                    source: "user_prompt",
+                    turn_id: context.turnId,
+                  },
+                })
+              : undefined;
+
+          if (actionPlan?.alreadySucceeded === true) {
+            this.#messages.push({
+              role: "tool",
+              tool_name: name,
+              content:
+                "Operacja ma już zapisane potwierdzenie sukcesu i nie została wykonana ponownie.",
+            });
+            continue;
+          }
+
+          if (actionPlan?.requiresReconciliation === true) {
+            this.#messages.push({
+              role: "tool",
+              tool_name: name,
+              content:
+                "Wynik poprzedniej próby operacji jest niepewny. Najpierw sprawdź aktualny stan zewnętrzny; operacji nie wykonano ponownie.",
+            });
+            continue;
+          }
+
+          actionPlan === undefined ? undefined : context.actionLedger?.start(actionPlan);
           this.#hooks.onToolCall?.(name, arguments_);
 
           const toolStartedAt = performance.now();
           const execution = await this.#mcp.callTool(name, arguments_);
+          if (actionPlan !== undefined) {
+            const state = execution.serverUnavailable
+              ? "unknown"
+              : execution.isError
+                ? "failed"
+                : "succeeded";
+            context.actionLedger?.finish(
+              actionPlan,
+              state,
+              {
+                is_error: execution.isError,
+                server_unavailable: execution.serverUnavailable,
+              },
+              execution.isError ? execution.text : undefined,
+            );
+          }
           this.#hooks.onToolResult?.(
             name,
             execution,

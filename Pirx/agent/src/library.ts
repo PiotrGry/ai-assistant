@@ -2,9 +2,15 @@ export { PirxAgent } from "./agent.js";
 export type {
   AgentDependencies,
   AgentHooks,
+  ChatTurnContext,
   ChatTurn,
   TurnMetrics,
 } from "./agent.js";
 export { loadConfig } from "./config.js";
 export type { AgentConfig, SystemPrompt } from "./config.js";
 export { parseOllamaModelNames } from "./ollama-models.js";
+export { mutationId, SqliteActionLedger } from "./action-ledger.js";
+export type {
+  ActionPlan,
+  ActionPlanInput,
+} from "./action-ledger.js";

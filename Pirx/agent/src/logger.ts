@@ -4,7 +4,15 @@ import { dirname, resolve } from "node:path";
 
 import type { AgentConfig, SystemPrompt } from "./config.js";
 import type { TurnMetrics } from "./agent.js";
+import { SqliteActionLedger } from "./action-ledger.js";
 import { SqliteStore } from "./storage/sqlite.js";
+
+export interface SessionTurn {
+  readonly id: string;
+  readonly sequence: number;
+  readonly sessionId?: string;
+  readonly actionLedger?: SqliteActionLedger;
+}
 
 function sessionId(date: Date): string {
   return date.toISOString().replaceAll(/[-:]/gu, "").replace(/\.\d{3}Z$/u, "Z");
@@ -14,6 +22,7 @@ export class SessionLogger {
   readonly transcriptFile: string;
   readonly metricsFile: string;
   readonly storageFile: string | undefined;
+  readonly actionLedger: SqliteActionLedger | undefined;
   readonly #store: SqliteStore | undefined;
   readonly #sessionId: string | undefined;
   #lastMetrics: TurnMetrics | undefined;
@@ -25,12 +34,14 @@ export class SessionLogger {
     metricsFile: string,
     store: SqliteStore | undefined,
     sessionId: string | undefined,
+    actionLedger: SqliteActionLedger | undefined,
   ) {
     this.transcriptFile = transcriptFile;
     this.metricsFile = metricsFile;
     this.storageFile = store?.filename;
     this.#store = store;
     this.#sessionId = sessionId;
+    this.actionLedger = actionLedger;
   }
 
   static async create(config: AgentConfig, prompt: SystemPrompt): Promise<SessionLogger> {
@@ -85,6 +96,7 @@ export class SessionLogger {
       resolve(config.logDir, `session_${id}.jsonl`),
       store,
       databaseSessionId,
+      store === undefined ? undefined : new SqliteActionLedger(store),
     );
     const header = [
       "# Rozmowa z Pirxem",
@@ -106,12 +118,52 @@ export class SessionLogger {
     return this.#lastMetrics;
   }
 
-  async saveTurn(prompt: string, response: string, metrics: TurnMetrics): Promise<void> {
+  beginTurn(prompt: string): SessionTurn {
+    if (this.#closed) {
+      throw new Error("Session logger is closed.");
+    }
+    const turn: SessionTurn = {
+      id: randomUUID(),
+      sequence: this.#turnSequence,
+      ...(this.#sessionId === undefined ? {} : { sessionId: this.#sessionId }),
+      ...(this.actionLedger === undefined ? {} : { actionLedger: this.actionLedger }),
+    };
+    if (this.#store !== undefined && this.#sessionId !== undefined) {
+      this.#store.insertTurn({
+        id: turn.id,
+        sessionId: this.#sessionId,
+        sequence: turn.sequence,
+        startedAt: new Date().toISOString(),
+        status: "started",
+        userPrompt: prompt,
+        payload: { schema_version: 1 },
+      });
+    }
+    this.#turnSequence += 1;
+    return turn;
+  }
+
+  async saveTurn(
+    prompt: string,
+    response: string,
+    metrics: TurnMetrics,
+    turn?: SessionTurn,
+  ): Promise<void> {
     if (this.#closed) {
       throw new Error("Session logger is closed.");
     }
     const transcript = `## Ty\n\n${prompt}\n\n## Pirx\n\n${response}\n\n`;
-    if (this.#store !== undefined && this.#sessionId !== undefined) {
+    if (
+      this.#store !== undefined &&
+      this.#sessionId !== undefined &&
+      turn !== undefined
+    ) {
+      this.#store.finishTurn(turn.id, new Date().toISOString(), "completed", {
+        schema_version: 1,
+        response,
+        metrics,
+      });
+    } else if (this.#store !== undefined && this.#sessionId !== undefined) {
       this.#store.insertTurn({
         id: randomUUID(),
         sessionId: this.#sessionId,
@@ -125,11 +177,23 @@ export class SessionLogger {
           metrics,
         },
       });
+      this.#turnSequence += 1;
     }
-    this.#turnSequence += 1;
     await appendFile(this.transcriptFile, transcript, "utf8");
     await appendFile(this.metricsFile, `${JSON.stringify(metrics)}\n`, "utf8");
     this.#lastMetrics = metrics;
+  }
+
+  async failTurn(turn: SessionTurn, error: unknown): Promise<void> {
+    if (this.#closed) {
+      throw new Error("Session logger is closed.");
+    }
+    if (this.#store !== undefined && this.#sessionId !== undefined) {
+      this.#store.finishTurn(turn.id, new Date().toISOString(), "failed", {
+        schema_version: 1,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   async notePromptReload(prompt: SystemPrompt): Promise<void> {

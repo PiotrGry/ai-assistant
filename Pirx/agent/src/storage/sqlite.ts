@@ -254,6 +254,25 @@ export class SqliteStore {
       );
   }
 
+  finishTurn(
+    id: string,
+    endedAt: string,
+    status: "completed" | "failed",
+    payload: Record<string, unknown>,
+  ): void {
+    this.#assertOpen();
+    const result = this.#database
+      .prepare(
+        `UPDATE turns
+         SET ended_at = ?, status = ?, payload_json = ?
+         WHERE id = ? AND status = 'started'`,
+      )
+      .run(endedAt, status, json(payload), id);
+    if (result.changes !== 1) {
+      throw new Error(`Started SQLite turn not found: ${id}`);
+    }
+  }
+
   insertOperation(record: OperationRecord): void {
     this.#assertOpen();
     this.#database

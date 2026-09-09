@@ -111,10 +111,11 @@ async function main(): Promise<void> {
         case "/quit":
           return;
         default: {
+          const turnContext = logger.beginTurn(prompt);
           try {
-            const turn = await agent.chat(prompt);
+            const turn = await agent.chat(prompt, turnContext);
             console.log(`\nPirx: ${turn.content}\n`);
-            await logger.saveTurn(prompt, turn.content, turn.metrics);
+            await logger.saveTurn(prompt, turn.content, turn.metrics, turnContext);
             console.log(
               `Metryki: ${turn.metrics.output_tokens} tokenów, ` +
               `${turn.metrics.generation_tokens_per_second.toFixed(1)} tok/s, ` +
@@ -128,6 +129,7 @@ async function main(): Promise<void> {
               );
             }
           } catch (error: unknown) {
+            await logger.failTurn(turnContext, error);
             const detail = error instanceof Error ? error.message : String(error);
             console.error(`\nBłąd komunikacji z Ollamą: ${detail}`);
           }
