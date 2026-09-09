@@ -125,8 +125,9 @@ repozytorium.
 3. Zapisz go poza repozytorium (domyślnie
    `~/.config/pirx/google-calendar/credentials.json`) lub ustaw
    `PIRX_GOOGLE_CREDENTIALS_FILE`.
-4. Uruchom `pnpm --filter @pirx/mcp-server calendar:authorize`, otwórz pokazany
-   URL i zaakceptuj dostęp. Token zostanie zapisany atomowo z uprawnieniami
+4. Uruchom `pnpm --filter @pirx/mcp-server calendar:authorize`. Pirx spróbuje
+   automatycznie otworzyć domyślną przeglądarkę; jeśli środowisko jest
+   headless/SSH, użyj wypisanego URL-a ręcznie. Zaakceptuj dostęp. Token zostanie zapisany atomowo z uprawnieniami
    `0600` (domyślnie `~/.config/pirx/google-calendar/token.json`).
 
 Konfiguracja:

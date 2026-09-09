@@ -1,4 +1,6 @@
+import { execFile } from "node:child_process";
 import { createServer, type Server } from "node:http";
+import { promisify } from "node:util";
 
 import type { GoogleCalendarConfig } from "../config.js";
 import { GoogleOAuthTokenProvider } from "./auth.js";
@@ -25,9 +27,50 @@ function closeServer(server: Server): Promise<void> {
   });
 }
 
+export type BrowserCommandRunner = (
+  command: string,
+  arguments_: readonly string[],
+) => Promise<void>;
+
+export interface BrowserOpenOptions {
+  readonly platform?: NodeJS.Platform;
+  readonly run?: BrowserCommandRunner;
+}
+
+function defaultBrowserRunner(
+  command: string,
+  arguments_: readonly string[],
+): Promise<void> {
+  return promisify(execFile)(command, [...arguments_], {
+    windowsHide: true,
+  }).then(() => undefined);
+}
+
+export async function openBrowser(
+  url: string,
+  options: BrowserOpenOptions = {},
+): Promise<void> {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:") {
+    throw new Error(`Refusing to open a non-HTTPS authorization URL: ${url}`);
+  }
+  const platform = options.platform ?? process.platform;
+  const command = platform === "darwin"
+    ? { executable: "open", arguments: [url] }
+    : platform === "win32"
+      ? { executable: "cmd.exe", arguments: ["/c", "start", "", url] }
+      : { executable: "xdg-open", arguments: [url] };
+  await (options.run ?? defaultBrowserRunner)(command.executable, command.arguments);
+}
+
+export interface GoogleAuthorizationOptions {
+  readonly openUrl?: (url: string) => Promise<void>;
+}
+
 export async function authorizeGoogleCalendar(
   config: GoogleCalendarConfig,
   writeMessage: (message: string) => void = console.log,
+  options: GoogleAuthorizationOptions = {},
 ): Promise<void> {
   let expectedState: string | undefined;
   let resolveCode: ((code: string) => void) | undefined;
@@ -83,6 +126,13 @@ export async function authorizeGoogleCalendar(
 
     writeMessage("Open this URL in a browser to authorize Google Calendar:");
     writeMessage(authorization.url);
+    try {
+      await (options.openUrl ?? openBrowser)(authorization.url);
+      writeMessage("A browser window was opened. Complete Google authorization there.");
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error);
+      writeMessage(`Could not open a browser automatically (${detail}). Use the URL above.`);
+    }
 
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
