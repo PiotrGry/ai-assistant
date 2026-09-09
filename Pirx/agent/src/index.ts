@@ -59,6 +59,7 @@ async function main(): Promise<void> {
   console.log("\nPirx — lokalna asystentka");
   console.log(`Model: ${config.model}`);
   console.log(`Kontekst: ${config.numCtx}`);
+  console.log(`Strefa czasowa: ${config.timeZone}`);
   console.log(`Prompt: ${config.promptFile} (${agent.systemPrompt.sha256})`);
   console.log(`Narzędzia MCP: ${agent.toolNames.join(", ") || "brak"}`);
   console.log("Wpisz /help, aby zobaczyć komendy.");
@@ -99,6 +100,7 @@ async function main(): Promise<void> {
           console.log(`Kontekst: ${config.numCtx}`);
           console.log(`Keep alive: ${config.keepAlive}`);
           console.log(`Temperatura: ${config.temperature}`);
+          console.log(`Strefa czasowa: ${config.timeZone}`);
           console.log(JSON.stringify(await agent.modelStatus(), null, 2));
           break;
         case "/unload":

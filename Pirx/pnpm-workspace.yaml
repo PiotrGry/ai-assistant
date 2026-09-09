@@ -1,5 +1,6 @@
 packages:
   - agent
   - mcp-server
+  - tui
 minimumReleaseAgeExclude:
   - zod@4.5.2

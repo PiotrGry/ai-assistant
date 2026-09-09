@@ -30,6 +30,17 @@ task pirx:test
 task pirx:start
 ```
 
+Nowoczesny interfejs terminalowy uruchom osobno:
+
+```bash
+pnpm build
+pnpm tui
+```
+
+W TUI Enter wysyła wiadomość, Shift+Enter dodaje nową linię, Ctrl+O otwiera
+listę modeli zainstalowanych w Ollamie, a Ctrl+C kończy sesję. `pnpm start`
+pozostaje dotychczasowym interfejsem CLI.
+
 Agent domyślnie używa modelu `hf.co/google/gemma-4-12B-it-qat-q4_0-gguf` i Ollamy pod `http://localhost:11434`. Ustawienia można nadpisać zmiennymi:
 
 - `OLLAMA_MODEL`,
@@ -45,6 +56,12 @@ Bezpieczniki pętli narzędziowej są konfigurowalne przez:
 - `PIRX_MAX_REPEATED_TOOL_CALLS` (domyślnie `3`),
 - `PIRX_LLM_TIMEOUT_MS` (domyślnie `120000`),
 - `PIRX_TOOL_TIMEOUT_MS` (domyślnie `30000`).
+
+Przed każdym wywołaniem modelu agent dołącza świeżą lokalną datę, godzinę,
+offset UTC i nazwę strefy. Używa do tego `PIRX_GOOGLE_CALENDAR_TIMEZONE`
+(domyślnie strefa systemowa), dzięki czemu określenia „dzisiaj”, „jutro” i
+podobne nie zależą od pamięci modelu. Kontekst czasu jest przejściowy i nie
+narasta w historii rozmowy.
 
 Logi sesji trafiają do głównego katalogu `logs/` i nie są wersjonowane.
 
@@ -89,7 +106,8 @@ Konfiguracja:
 - `PIRX_GOOGLE_CREDENTIALS_FILE` — plik klienta OAuth,
 - `PIRX_GOOGLE_TOKEN_FILE` — lokalny plik tokenu,
 - `PIRX_GOOGLE_CALENDAR_ID` — domyślny kalendarz (`primary`),
-- `PIRX_GOOGLE_CALENDAR_TIMEZONE` — domyślna strefa IANA (domyślnie systemowa),
+- `PIRX_GOOGLE_CALENDAR_TIMEZONE` — wspólna strefa IANA agenta i kalendarza
+  (domyślnie systemowa),
 - `PIRX_GOOGLE_TIMEOUT_MS` — timeout pojedynczego żądania (domyślnie `10000`),
 - `PIRX_GOOGLE_AUTH_TIMEOUT_MS` — czas na ukończenie pierwszej autoryzacji
   (domyślnie `300000`).

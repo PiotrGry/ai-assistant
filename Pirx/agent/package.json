@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "dist/library.js",
+  "types": "dist/library.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/library.d.ts",
+      "import": "./dist/library.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:test": "tsc -p tsconfig.test.json",

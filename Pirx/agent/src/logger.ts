@@ -32,6 +32,7 @@ export class SessionLogger {
       "",
       `- Model: \`${config.model}\``,
       `- Kontekst: \`${config.numCtx}\``,
+      `- Strefa czasowa: \`${config.timeZone}\``,
       `- System prompt: \`${config.promptFile}\` (sha256: \`${prompt.sha256}\`)`,
       `- Start: \`${new Date().toISOString()}\``,
       "",
