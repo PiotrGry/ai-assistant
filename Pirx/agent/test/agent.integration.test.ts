@@ -8,6 +8,12 @@ import { fileURLToPath } from "node:url";
 
 import { PirxAgent } from "../src/agent.js";
 import type { AgentConfig } from "../src/config.js";
+import type {
+  OperationFinishInput,
+  OperationHandle,
+  OperationRecorder,
+  OperationStartInput,
+} from "../src/operation-recorder.js";
 
 async function requestJson(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -115,6 +121,20 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
   const agent = await PirxAgent.create(config, {}, {
     now: () => new Date(clockValues[clockIndex++] ?? "2026-08-30T22:01:00.000Z"),
   });
+  const operationEvents: Array<
+    | { readonly type: "start"; readonly input: OperationStartInput; readonly id: string }
+    | { readonly type: "finish"; readonly handle: OperationHandle; readonly input: OperationFinishInput }
+  > = [];
+  const operationRecorder: OperationRecorder = {
+    start: (input) => {
+      const id = `operation-${operationEvents.length}`;
+      operationEvents.push({ type: "start", input, id });
+      return { id };
+    },
+    finish: (handle, input) => {
+      operationEvents.push({ type: "finish", handle, input });
+    },
+  };
   context.after(async () => {
     await agent.close();
     await new Promise<void>((resolveClose, reject) => {
@@ -127,7 +147,11 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
   assert.ok(agent.toolNames.includes("system_info"));
   assert.ok(agent.toolNames.includes("obsidian_read"));
   assert.ok(agent.toolNames.includes("calendar_list_events"));
-  const turn = await agent.chat("Przywitaj Piotra.");
+  const turn = await agent.chat("Przywitaj Piotra.", {
+    sessionId: "session-test",
+    turnId: "turn-test",
+    operationRecorder,
+  });
 
   assert.equal(turn.content, "Narzędzie odpowiedziało: Hello, Piotr!");
   assert.equal(turn.metrics.model_calls, 2);
@@ -135,6 +159,27 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
   assert.equal(turn.metrics.input_tokens, 20);
   assert.equal(turn.metrics.time_zone, "Europe/Warsaw");
   assert.equal(requests.length, 2);
+  assert.deepEqual(
+    operationEvents.map((event) =>
+      event.type === "start"
+        ? `start:${event.input.kind}:${event.input.sequence}`
+        : `finish:${event.input.status}`,
+    ),
+    [
+      "start:llm:0",
+      "finish:succeeded",
+      "start:mcp:1",
+      "finish:succeeded",
+      "start:llm:2",
+      "finish:succeeded",
+    ],
+  );
+  const firstLlmFinish = operationEvents.find(
+    (event): event is Extract<typeof operationEvents[number], { readonly type: "finish" }> =>
+      event.type === "finish" && event.handle.id === "operation-0",
+  );
+  assert.ok(firstLlmFinish !== undefined);
+  assert.equal(firstLlmFinish.input.payload["prompt_eval_cached_count"], null);
 
   const firstMessages = requests[0]?.["messages"];
   assert.ok(Array.isArray(firstMessages));

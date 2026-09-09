@@ -5,6 +5,8 @@ import { dirname, resolve } from "node:path";
 import type { AgentConfig, SystemPrompt } from "./config.js";
 import type { TurnMetrics } from "./agent.js";
 import { SqliteActionLedger } from "./action-ledger.js";
+import { SqliteOperationRecorder } from "./operation-recorder.js";
+import type { OperationRecorder } from "./operation-recorder.js";
 import { SqliteStore } from "./storage/sqlite.js";
 
 export interface SessionTurn {
@@ -12,6 +14,7 @@ export interface SessionTurn {
   readonly sequence: number;
   readonly sessionId?: string;
   readonly actionLedger?: SqliteActionLedger;
+  readonly operationRecorder?: OperationRecorder;
 }
 
 function sessionId(date: Date): string {
@@ -23,6 +26,7 @@ export class SessionLogger {
   readonly metricsFile: string;
   readonly storageFile: string | undefined;
   readonly actionLedger: SqliteActionLedger | undefined;
+  readonly operationRecorder: OperationRecorder | undefined;
   readonly #store: SqliteStore | undefined;
   readonly #sessionId: string | undefined;
   #lastMetrics: TurnMetrics | undefined;
@@ -35,6 +39,7 @@ export class SessionLogger {
     store: SqliteStore | undefined,
     sessionId: string | undefined,
     actionLedger: SqliteActionLedger | undefined,
+    operationRecorder: OperationRecorder | undefined,
   ) {
     this.transcriptFile = transcriptFile;
     this.metricsFile = metricsFile;
@@ -42,6 +47,7 @@ export class SessionLogger {
     this.#store = store;
     this.#sessionId = sessionId;
     this.actionLedger = actionLedger;
+    this.operationRecorder = operationRecorder;
   }
 
   static async create(config: AgentConfig, prompt: SystemPrompt): Promise<SessionLogger> {
@@ -97,6 +103,7 @@ export class SessionLogger {
       store,
       databaseSessionId,
       store === undefined ? undefined : new SqliteActionLedger(store),
+      store === undefined ? undefined : new SqliteOperationRecorder(store),
     );
     const header = [
       "# Rozmowa z Pirxem",
@@ -127,6 +134,9 @@ export class SessionLogger {
       sequence: this.#turnSequence,
       ...(this.#sessionId === undefined ? {} : { sessionId: this.#sessionId }),
       ...(this.actionLedger === undefined ? {} : { actionLedger: this.actionLedger }),
+      ...(this.operationRecorder === undefined
+        ? {}
+        : { operationRecorder: this.operationRecorder }),
     };
     if (this.#store !== undefined && this.#sessionId !== undefined) {
       this.#store.insertTurn({

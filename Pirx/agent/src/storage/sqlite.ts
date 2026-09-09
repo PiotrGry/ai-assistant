@@ -318,15 +318,23 @@ export class SqliteStore {
     endedAt: string,
     status: "succeeded" | "failed" | "unknown",
     error?: string,
+    payload?: Record<string, unknown>,
   ): void {
     this.#assertOpen();
     const result = this.#database
       .prepare(
         `UPDATE operations
-         SET ended_at = ?, status = ?, error = ?
+         SET ended_at = ?, status = ?, error = ?,
+             payload_json = COALESCE(?, payload_json)
          WHERE id = ? AND status = 'started'`,
       )
-      .run(endedAt, status, error ?? null, id);
+      .run(
+        endedAt,
+        status,
+        error ?? null,
+        payload === undefined ? null : json(payload),
+        id,
+      );
     if (result.changes !== 1) {
       throw new Error(`Started SQLite operation not found: ${id}`);
     }

@@ -10,6 +10,7 @@ import {
 } from "./context-manager.js";
 import { PirxMcpClient, type ToolExecution } from "./mcp-client.js";
 import { parseOllamaModelNames } from "./ollama-models.js";
+import type { OperationRecorder } from "./operation-recorder.js";
 import { readGpuStats, type GpuStats } from "./telemetry.js";
 import { currentTimeSystemContext } from "./time-context.js";
 
@@ -48,6 +49,7 @@ export interface ChatTurnContext {
   readonly sessionId?: string;
   readonly turnId?: string;
   readonly actionLedger?: SqliteActionLedger;
+  readonly operationRecorder?: OperationRecorder;
 }
 
 export interface AgentHooks {
@@ -157,6 +159,25 @@ function normalizeArguments(value: unknown): Record<string, unknown> {
   }
 
   return {};
+}
+
+function numericMetric(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function rawOllamaMetrics(response: unknown): Record<string, unknown> {
+  const record = response as Record<string, unknown>;
+  return {
+    total_duration_ns: numericMetric(record["total_duration"]),
+    load_duration_ns: numericMetric(record["load_duration"]),
+    prompt_eval_count: numericMetric(record["prompt_eval_count"]),
+    prompt_eval_cached_count: numericMetric(record["prompt_eval_cached_count"]),
+    prompt_eval_duration_ns: numericMetric(record["prompt_eval_duration"]),
+    eval_count: numericMetric(record["eval_count"]),
+    eval_duration_ns: numericMetric(record["eval_duration"]),
+    done_reason:
+      typeof record["done_reason"] === "string" ? record["done_reason"] : null,
+  };
 }
 
 function actionTarget(
@@ -333,6 +354,7 @@ export class PirxAgent {
     const timestamp = this.#now().toISOString();
     const gpuBefore = await readGpuStats();
     const repeatedToolCalls = new Map<string, number>();
+    let operationSequence = 0;
     const totals: Totals = {
       totalDuration: 0,
       loadDuration: 0,
@@ -366,6 +388,27 @@ export class PirxAgent {
             safetyMarginTokens: this.#config.contextSafetyMarginTokens ?? 0,
           }),
         );
+        const llmOperationSequence = operationSequence;
+        operationSequence += 1;
+        const llmOperation =
+          context.operationRecorder !== undefined &&
+          context.sessionId !== undefined &&
+          context.turnId !== undefined
+            ? context.operationRecorder.start({
+                sessionId: context.sessionId,
+                turnId: context.turnId,
+                sequence: llmOperationSequence,
+                kind: "llm",
+                startedAt: this.#now().toISOString(),
+                payload: {
+                  schema_version: 1,
+                  model,
+                  iteration,
+                  context_estimate: totals.contextEstimates.at(-1),
+                },
+              })
+            : undefined;
+        const llmStartedAt = performance.now();
         const request = {
           model,
           messages,
@@ -381,11 +424,38 @@ export class PirxAgent {
           ...(tools.length > 0 ? { tools: [...tools] } : {}),
         };
 
-        const response = (await withTimeout(
-          this.#ollama.chat(request),
-          this.#config.llmTimeoutMs,
-          "Ollama",
-        )) as ResponseWithMetrics;
+        let response: ResponseWithMetrics;
+        try {
+          response = (await withTimeout(
+            this.#ollama.chat(request),
+            this.#config.llmTimeoutMs,
+            "Ollama",
+          )) as ResponseWithMetrics;
+        } catch (error: unknown) {
+          if (llmOperation !== undefined) {
+            context.operationRecorder?.finish(llmOperation, {
+              endedAt: this.#now().toISOString(),
+              status: "failed",
+              payload: {
+                schema_version: 1,
+                wall_duration_ms: performance.now() - llmStartedAt,
+              },
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          throw error;
+        }
+        if (llmOperation !== undefined) {
+          context.operationRecorder?.finish(llmOperation, {
+            endedAt: this.#now().toISOString(),
+            status: "succeeded",
+            payload: {
+              schema_version: 1,
+              ...rawOllamaMetrics(response),
+              wall_duration_ms: performance.now() - llmStartedAt,
+            },
+          });
+        }
 
         this.#lastContextTokens = response.prompt_eval_count ?? undefined;
         addMetrics(totals, response);
@@ -429,6 +499,8 @@ export class PirxAgent {
           }
 
           totals.toolCalls += 1;
+          const mcpOperationSequence = operationSequence;
+          operationSequence += 1;
 
           const actionPlan =
             context.actionLedger !== undefined &&
@@ -438,7 +510,7 @@ export class PirxAgent {
               ? context.actionLedger.plan({
                   sessionId: context.sessionId,
                   turnId: context.turnId,
-                  sequence: totals.toolCalls - 1,
+                  sequence: mcpOperationSequence,
                   target: actionTarget(name, arguments_),
                   toolName: name,
                   arguments: arguments_,
@@ -469,11 +541,50 @@ export class PirxAgent {
             continue;
           }
 
-          actionPlan === undefined ? undefined : context.actionLedger?.start(actionPlan);
+          actionPlan === undefined
+            ? undefined
+            : context.actionLedger?.start(actionPlan);
+          const mcpOperation =
+            actionPlan === undefined &&
+            context.operationRecorder !== undefined &&
+            context.sessionId !== undefined &&
+            context.turnId !== undefined
+              ? context.operationRecorder.start({
+                  sessionId: context.sessionId,
+                  turnId: context.turnId,
+                  sequence: mcpOperationSequence,
+                  kind: "mcp",
+                  startedAt: this.#now().toISOString(),
+                  payload: {
+                    schema_version: 1,
+                    tool_name: name,
+                    arguments: arguments_,
+                  },
+                })
+              : undefined;
           this.#hooks.onToolCall?.(name, arguments_);
 
           const toolStartedAt = performance.now();
           const execution = await this.#mcp.callTool(name, arguments_);
+          const toolDurationMs = performance.now() - toolStartedAt;
+          if (mcpOperation !== undefined) {
+            context.operationRecorder?.finish(mcpOperation, {
+              endedAt: this.#now().toISOString(),
+              status: execution.serverUnavailable
+                ? "unknown"
+                : execution.isError
+                  ? "failed"
+                  : "succeeded",
+              payload: {
+                schema_version: 1,
+                tool_name: name,
+                is_error: execution.isError,
+                server_unavailable: execution.serverUnavailable,
+                wall_duration_ms: toolDurationMs,
+              },
+              ...(execution.isError ? { error: execution.text } : {}),
+            });
+          }
           if (actionPlan !== undefined) {
             const state = execution.serverUnavailable
               ? "unknown"
@@ -493,7 +604,7 @@ export class PirxAgent {
           this.#hooks.onToolResult?.(
             name,
             execution,
-            performance.now() - toolStartedAt,
+            toolDurationMs,
           );
           this.#messages.push({
             role: "tool",

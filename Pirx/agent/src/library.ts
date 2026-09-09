@@ -14,3 +14,10 @@ export type {
   ActionPlan,
   ActionPlanInput,
 } from "./action-ledger.js";
+export { SqliteOperationRecorder } from "./operation-recorder.js";
+export type {
+  OperationFinishInput,
+  OperationHandle,
+  OperationRecorder,
+  OperationStartInput,
+} from "./operation-recorder.js";
