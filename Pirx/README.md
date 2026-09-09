@@ -41,7 +41,7 @@ W TUI Enter wysyła wiadomość, Shift+Enter dodaje nową linię, Ctrl+O otwiera
 listę modeli zainstalowanych w Ollamie, a Ctrl+C kończy sesję. `pnpm start`
 pozostaje dotychczasowym interfejsem CLI.
 
-Agent domyślnie używa modelu `hf.co/google/gemma-4-12B-it-qat-q4_0-gguf` i Ollamy pod `http://localhost:11434`. Ustawienia można nadpisać zmiennymi:
+Agent domyślnie używa modelu `gemma4:12b` i Ollamy pod `http://localhost:11434`. Ustawienia można nadpisać zmiennymi:
 
 - `OLLAMA_MODEL`,
 - `OLLAMA_NUM_CTX`,
