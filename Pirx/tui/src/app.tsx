@@ -188,7 +188,9 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
     : `prompt ctx ${agent.lastContextTokens}/${agent.contextSize}`;
   const speed = lastMetrics === undefined
     ? "—"
-    : `${lastMetrics.generation_tokens_per_second.toFixed(1)} tok/s`;
+    : lastMetrics.generation_tokens_per_second === null
+      ? "—"
+      : `${lastMetrics.generation_tokens_per_second.toFixed(1)} tok/s`;
 
   return (
     <Box flexDirection="column" height={Math.max(10, rows)} paddingX={1}>
