@@ -221,6 +221,8 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
     : lastMetrics.generation_tokens_per_second === null
       ? "—"
       : `${lastMetrics.generation_tokens_per_second.toFixed(1)} tok/s`;
+  const hint = notice ?? (busy ? "working…" : "Enter send · Shift+Enter newline · Ctrl+O models");
+  const runtimeStatus = `${agent.model} | MCP ${agent.mcpAvailable ? "●" : "○"} | ${context} | ${speed}`;
 
   return (
     <Box
@@ -230,9 +232,13 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
       paddingX={1}
       overflow="hidden"
     >
-      <Box width={layout.contentWidth} borderStyle="round" borderColor="cyan" paddingX={1}>
-        <Text bold color="cyan">Pirx</Text><Text color="gray"> · local chat</Text>
-      </Box>
+      {layout.tiny ? (
+        <Text bold color="cyan">Pirx</Text>
+      ) : (
+        <Box width={layout.contentWidth} borderStyle="round" borderColor="cyan" paddingX={1}>
+          <Text bold color="cyan">Pirx</Text><Text color="gray"> · local chat</Text>
+        </Box>
+      )}
 
       <Box flexDirection="column" width={layout.contentWidth} flexGrow={1} overflow="hidden" paddingY={1}>
         {visibleItems.length === 0 ? <Text color="gray">Ask Pirx something. Ctrl+O switches the model.</Text> : null}
@@ -244,7 +250,7 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
         <Box
           flexDirection="column"
           width={layout.contentWidth}
-          height={Math.max(5, layout.rows - 5)}
+          height={Math.max(3, layout.rows - (layout.tiny ? 3 : 5))}
           overflow="hidden"
           borderStyle="round"
           borderColor="magenta"
@@ -273,17 +279,21 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
         />
       )}
 
-      <Box
-        flexDirection={layout.compact ? "column" : "row"}
-        width={layout.contentWidth}
-        justifyContent={layout.compact ? undefined : "space-between"}
-        paddingTop={1}
-      >
-        <Text wrap="truncate-end" color={notice ? "yellow" : "gray"}>
-          {notice ?? (busy ? "working…" : "Enter send · Shift+Enter newline · Ctrl+O models")}
-        </Text>
-        <Text wrap="truncate-end" color="gray">{agent.model} | MCP {agent.mcpAvailable ? "●" : "○"} | {context} | {speed}</Text>
-      </Box>
+      {layout.tiny ? (
+        <Box width={layout.contentWidth}>
+          <Text wrap="truncate-end" color={notice ? "yellow" : "gray"}>{hint}</Text>
+        </Box>
+      ) : (
+        <Box
+          flexDirection={layout.compact ? "column" : "row"}
+          width={layout.contentWidth}
+          justifyContent={layout.compact ? undefined : "space-between"}
+          paddingTop={1}
+        >
+          <Text wrap="truncate-end" color={notice ? "yellow" : "gray"}>{hint}</Text>
+          <Text wrap="truncate-end" color="gray">{runtimeStatus}</Text>
+        </Box>
+      )}
     </Box>
   );
 }

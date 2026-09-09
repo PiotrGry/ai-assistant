@@ -3,6 +3,7 @@ export interface TuiLayout {
   readonly columns: number;
   readonly contentWidth: number;
   readonly compact: boolean;
+  readonly tiny: boolean;
   readonly historyItems: number;
   readonly modelItems: number;
 }
@@ -15,14 +16,16 @@ export function calculateTuiLayout(
   const terminalColumns = Number.isFinite(columns)
     ? Math.max(1, Math.floor(columns ?? 80))
     : 80;
-  const compact = terminalColumns < 100;
+  const tiny = terminalColumns < 45 || terminalRows < 8;
+  const compact = tiny || terminalColumns < 100 || terminalRows < 16;
 
   return {
-    rows: Math.max(10, terminalRows),
+    rows: terminalRows,
     columns: terminalColumns,
     contentWidth: Math.max(1, terminalColumns - 2),
     compact,
-    historyItems: Math.max(4, terminalRows - (compact ? 11 : 9)),
-    modelItems: Math.max(1, terminalRows - 9),
+    tiny,
+    historyItems: tiny ? 1 : Math.max(2, terminalRows - (compact ? 8 : 9)),
+    modelItems: tiny ? 1 : Math.max(1, terminalRows - 9),
   };
 }
