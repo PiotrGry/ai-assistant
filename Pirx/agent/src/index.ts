@@ -89,11 +89,32 @@ async function main(): Promise<void> {
           break;
         }
         case "/stats":
-          console.log(
-            logger.lastMetrics === undefined
-              ? "Nie ma jeszcze żadnych metryk."
-              : JSON.stringify(logger.lastMetrics, null, 2),
-          );
+          if (logger.lastMetrics === undefined) {
+            console.log("Nie ma jeszcze żadnych metryk.");
+            break;
+          }
+          {
+            const metrics = logger.lastMetrics;
+            const estimate = metrics.context_estimates.at(-1);
+            const largestSections = estimate === undefined
+              ? "brak"
+              : [...estimate.sections]
+                  .sort((left, right) => right.estimatedTokens - left.estimatedTokens)
+                  .slice(0, 3)
+                  .map((section) => `${section.name}=${section.estimatedTokens} tok`)
+                  .join(", ");
+            console.log(`Czas tury: ${metrics.turn_duration_ms.toFixed(1)} ms`);
+            console.log(`Wywołania LLM: ${metrics.model_calls}, MCP: ${metrics.tool_calls}`);
+            console.log(
+              `Prefill: ${metrics.input_tokens === null ? "niedostępne" : metrics.input_tokens} ` +
+              `| decode: ${metrics.output_tokens === null ? "niedostępne" : metrics.output_tokens}`,
+            );
+            console.log(
+              `Kontekst: ${estimate === undefined ? "niedostępny" : `${estimate.estimatedInputTokens}/${estimate.inputBudgetTokens} tok`} ` +
+              `| największe sekcje: ${largestSections}`,
+            );
+            console.log(`JSON: ${JSON.stringify(metrics)}`);
+          }
           break;
         case "/model":
           console.log(`Model: ${config.model}`);

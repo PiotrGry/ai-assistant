@@ -174,6 +174,8 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
   assert.equal(contextBuilds.length, 2);
   assert.equal(contextBuilds[0]?.input.policyVersion, "context-estimate-v1");
   assert.equal(contextBuilds[1]?.input.omitted["message_count"], 0);
+  assert.equal("messages" in turn.metrics.context_builds[0]!, false);
+  assert.ok((turn.metrics.context_builds[1]?.selected_message_count ?? 0) >= 4);
   assert.deepEqual(
     operationEvents.map((event) =>
       event.type === "start"

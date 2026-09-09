@@ -4,6 +4,7 @@ export type {
   AgentHooks,
   ChatTurnContext,
   ChatTurn,
+  ContextBuildSummary,
   TurnMetrics,
 } from "./agent.js";
 export { loadConfig } from "./config.js";

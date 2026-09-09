@@ -41,9 +41,15 @@ export interface TurnMetrics {
   readonly model_calls: number;
   readonly tool_calls: number;
   readonly context_estimates: readonly ContextEstimate[];
-  readonly context_builds: readonly ContextBuild<Message>[];
+  readonly context_builds: readonly ContextBuildSummary[];
   readonly gpu_before: GpuStats | null;
   readonly gpu_after: GpuStats | null;
+}
+
+export interface ContextBuildSummary {
+  readonly estimate: ContextEstimate;
+  readonly selected_message_count: number;
+  readonly omitted_message_count: number;
 }
 
 export interface ChatTurn {
@@ -761,7 +767,11 @@ export class PirxAgent {
           model_calls: totals.modelCalls,
           tool_calls: totals.toolCalls,
           context_estimates: totals.contextEstimates,
-          context_builds: totals.contextBuilds,
+          context_builds: totals.contextBuilds.map((build) => ({
+            estimate: build.estimate,
+            selected_message_count: build.messages.length,
+            omitted_message_count: build.omittedMessageCount,
+          })),
           gpu_before: gpuBefore,
           gpu_after: gpuAfter,
         },
