@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { SqliteStore } from "./storage/sqlite.js";
+import type { ContextBuildRecord, SqliteStore } from "./storage/sqlite.js";
 
 export type RecordedOperationKind = "llm" | "mcp";
 export type RecordedOperationStatus = "succeeded" | "failed" | "unknown";
@@ -25,9 +25,19 @@ export interface OperationFinishInput {
   readonly error?: string;
 }
 
+export interface ContextBuildInput {
+  readonly policyVersion: string;
+  readonly estimatedInputTokens: number;
+  readonly budgetTokens: number;
+  readonly selected: Record<string, unknown>;
+  readonly omitted: Record<string, unknown>;
+  readonly createdAt: string;
+}
+
 export interface OperationRecorder {
   start(input: OperationStartInput): OperationHandle;
   finish(handle: OperationHandle, input: OperationFinishInput): void;
+  recordContextBuild?(handle: OperationHandle, input: ContextBuildInput): void;
 }
 
 export class SqliteOperationRecorder implements OperationRecorder {
@@ -63,5 +73,22 @@ export class SqliteOperationRecorder implements OperationRecorder {
       input.error,
       input.payload,
     );
+  }
+
+  recordContextBuild(
+    handle: OperationHandle,
+    input: ContextBuildInput,
+  ): void {
+    const record: ContextBuildRecord = {
+      id: randomUUID(),
+      operationId: handle.id,
+      policyVersion: input.policyVersion,
+      estimatedInputTokens: input.estimatedInputTokens,
+      budgetTokens: input.budgetTokens,
+      selected: input.selected,
+      omitted: input.omitted,
+      createdAt: input.createdAt,
+    };
+    this.#store.insertContextBuild(record);
   }
 }

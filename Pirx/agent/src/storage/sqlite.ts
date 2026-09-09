@@ -42,6 +42,17 @@ export interface OperationRecord {
   readonly payload: Record<string, unknown>;
 }
 
+export interface ContextBuildRecord {
+  readonly id: string;
+  readonly operationId: string;
+  readonly policyVersion: string;
+  readonly estimatedInputTokens: number;
+  readonly budgetTokens: number;
+  readonly selected: Record<string, unknown>;
+  readonly omitted: Record<string, unknown>;
+  readonly createdAt: string;
+}
+
 export type ActionEventState =
   | "planned"
   | "started"
@@ -306,6 +317,27 @@ export class SqliteStore {
       );
   }
 
+  insertContextBuild(record: ContextBuildRecord): void {
+    this.#assertOpen();
+    this.#database
+      .prepare(
+        `INSERT INTO context_builds
+          (id, operation_id, policy_version, estimated_input_tokens,
+           budget_tokens, selected_json, omitted_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.operationId,
+        record.policyVersion,
+        record.estimatedInputTokens,
+        record.budgetTokens,
+        json(record.selected),
+        json(record.omitted),
+        record.createdAt,
+      );
+  }
+
   finishSession(
     id: string,
     endedAt: string,
@@ -417,6 +449,7 @@ export class SqliteStore {
       | "sessions"
       | "turns"
       | "operations"
+      | "context_builds"
       | "action_events"
       | "resource_samples",
   ): number {

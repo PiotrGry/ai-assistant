@@ -16,6 +16,7 @@ export type {
 } from "./action-ledger.js";
 export { SqliteOperationRecorder } from "./operation-recorder.js";
 export type {
+  ContextBuildInput,
   OperationFinishInput,
   OperationHandle,
   OperationRecorder,

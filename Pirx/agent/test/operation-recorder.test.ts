@@ -46,8 +46,23 @@ test("operation recorder stores terminal status and payload without fake counter
       status: "succeeded",
       payload: { prompt_eval_count: null, wall_duration_ms: 1_250 },
     });
+    recorder.recordContextBuild(operation, {
+      policyVersion: "context-estimate-v1",
+      estimatedInputTokens: 120,
+      budgetTokens: 512,
+      selected: {
+        sha256: "selected-hash",
+        messages: [{ index: 0, role: "system", sha256: "message-hash" }],
+      },
+      omitted: {
+        message_count: 2,
+        messages: [],
+      },
+      createdAt: "2026-09-09T10:00:01.100Z",
+    });
 
     assert.equal(store.count("operations"), 1);
+    assert.equal(store.count("context_builds"), 1);
   } finally {
     store.close();
     await rm(directory, { recursive: true, force: true });

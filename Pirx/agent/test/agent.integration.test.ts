@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { PirxAgent } from "../src/agent.js";
 import type { AgentConfig } from "../src/config.js";
 import type {
+  ContextBuildInput,
   OperationFinishInput,
   OperationHandle,
   OperationRecorder,
@@ -125,6 +126,10 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
     | { readonly type: "start"; readonly input: OperationStartInput; readonly id: string }
     | { readonly type: "finish"; readonly handle: OperationHandle; readonly input: OperationFinishInput }
   > = [];
+  const contextBuilds: Array<{
+    readonly handle: OperationHandle;
+    readonly input: ContextBuildInput;
+  }> = [];
   const operationRecorder: OperationRecorder = {
     start: (input) => {
       const id = `operation-${operationEvents.length}`;
@@ -133,6 +138,9 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
     },
     finish: (handle, input) => {
       operationEvents.push({ type: "finish", handle, input });
+    },
+    recordContextBuild: (handle, input) => {
+      contextBuilds.push({ handle, input });
     },
   };
   context.after(async () => {
@@ -159,6 +167,9 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
   assert.equal(turn.metrics.input_tokens, 20);
   assert.equal(turn.metrics.time_zone, "Europe/Warsaw");
   assert.equal(requests.length, 2);
+  assert.equal(contextBuilds.length, 2);
+  assert.equal(contextBuilds[0]?.input.policyVersion, "context-estimate-v1");
+  assert.equal(contextBuilds[1]?.input.omitted["message_count"], 0);
   assert.deepEqual(
     operationEvents.map((event) =>
       event.type === "start"

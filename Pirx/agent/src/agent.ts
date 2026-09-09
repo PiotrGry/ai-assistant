@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { Ollama, type ChatResponse, type Message, type Tool } from "ollama";
 
 import type { AgentConfig, SystemPrompt } from "./config.js";
@@ -96,6 +98,46 @@ function addMetrics(totals: Totals, response: ResponseWithMetrics): void {
 
 function messageText(message: Message): string {
   return JSON.stringify(message);
+}
+
+function messageHash(message: Message): string {
+  return createHash("sha256").update(messageText(message)).digest("hex");
+}
+
+function contextBuildReferences(
+  allMessages: readonly Message[],
+  selectedMessages: readonly Message[],
+): {
+  readonly selected: Record<string, unknown>;
+  readonly omitted: Record<string, unknown>;
+} {
+  const selectedSet = new Set(selectedMessages);
+  const references = allMessages.map((message, index) => ({
+    index,
+    role: message.role,
+    characters: Array.from(messageText(message)).length,
+    sha256: messageHash(message),
+  }));
+  const selectedReferences = references.filter((_, index) =>
+    selectedSet.has(allMessages[index] as Message),
+  );
+  const omittedReferences = references.filter((_, index) =>
+    !selectedSet.has(allMessages[index] as Message),
+  );
+  const selectedHash = createHash("sha256")
+    .update(JSON.stringify(selectedMessages.map(messageText)))
+    .digest("hex");
+
+  return {
+    selected: {
+      sha256: selectedHash,
+      messages: selectedReferences,
+    },
+    omitted: {
+      message_count: omittedReferences.length,
+      messages: omittedReferences,
+    },
+  };
 }
 
 function contextSections(
@@ -418,6 +460,20 @@ export class PirxAgent {
                 },
               })
             : undefined;
+        if (llmOperation !== undefined) {
+          const references = contextBuildReferences(
+            messagesForModel,
+            contextBuild.messages,
+          );
+          context.operationRecorder?.recordContextBuild?.(llmOperation, {
+            policyVersion: contextBuild.estimate.policyVersion,
+            estimatedInputTokens: contextBuild.estimate.estimatedInputTokens,
+            budgetTokens: contextBuild.estimate.inputBudgetTokens,
+            selected: references.selected,
+            omitted: references.omitted,
+            createdAt: this.#now().toISOString(),
+          });
+        }
         const llmStartedAt = performance.now();
         const request = {
           model,
