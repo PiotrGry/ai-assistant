@@ -106,8 +106,16 @@ test("SessionLogger persists the environment, session and completed turn", async
     const artifact = database
       .prepare("SELECT content FROM artifacts")
       .get() as { content: string | null };
+    const environment = database
+      .prepare("SELECT payload_json FROM run_environments")
+      .get() as { payload_json: string };
+    const manifest = JSON.parse(environment.payload_json) as {
+      environment: { platform: string; total_memory_bytes: number };
+    };
     assert.equal(message.content, null);
     assert.equal(artifact.content, null);
+    assert.equal(typeof manifest.environment.platform, "string");
+    assert.ok(manifest.environment.total_memory_bytes > 0);
   } finally {
     database.close();
   }

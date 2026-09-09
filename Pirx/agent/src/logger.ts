@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, chmod, mkdir, writeFile } from "node:fs/promises";
+import { arch, cpus, freemem, hostname, platform, release, totalmem } from "node:os";
 import { dirname, resolve } from "node:path";
 
 import type { AgentConfig, StorageMode, SystemPrompt } from "./config.js";
@@ -10,6 +11,7 @@ import { SqliteOperationRecorder } from "./operation-recorder.js";
 import type { OperationRecorder } from "./operation-recorder.js";
 import { ResourceSampler } from "./resource-sampler.js";
 import { SqliteStore, type ResourceSummary } from "./storage/sqlite.js";
+import { readGpuStats } from "./telemetry.js";
 
 export interface SessionTurn {
   readonly id: string;
@@ -77,6 +79,7 @@ export class SessionLogger {
     const id = sessionId(new Date(startedAt));
     let store: SqliteStore | undefined;
     let databaseSessionId: string | undefined;
+    const gpuAtSessionStart = await readGpuStats();
 
     if (config.storagePath !== undefined) {
       await mkdir(dirname(config.storagePath), { recursive: true, mode: 0o700 });
@@ -104,6 +107,17 @@ export class SessionLogger {
             prompt_file: config.promptFile,
             prompt_sha256: prompt.sha256,
             storage_mode: config.storageMode ?? "redacted",
+            environment: {
+              node_version: process.version,
+              platform: platform(),
+              release: release(),
+              arch: arch(),
+              hostname: hostname(),
+              cpu_count: cpus().length,
+              total_memory_bytes: totalmem(),
+              free_memory_bytes: freemem(),
+              gpu_at_session_start: gpuAtSessionStart,
+            },
           },
         });
         store.insertSession({
