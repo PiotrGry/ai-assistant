@@ -63,6 +63,7 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
         message: {
           role: "assistant",
           content: "",
+          thinking: "internal reasoning that must not be replayed",
           tool_calls: [
             {
               function: {
@@ -209,6 +210,10 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
     secondMessages.filter((message) => message.role === "system").length,
     1,
   );
+  const previousAssistant = secondMessages.find(
+    (message) => message.role === "assistant",
+  );
+  assert.equal(previousAssistant?.thinking, undefined);
   assert.deepEqual(secondMessages.at(-1), {
     role: "tool",
     tool_name: "hello",

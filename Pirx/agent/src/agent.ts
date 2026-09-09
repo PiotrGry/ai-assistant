@@ -133,6 +133,16 @@ function messageText(message: Message): string {
   return JSON.stringify(message);
 }
 
+function withoutHistoricalThinking(message: Message): Message {
+  if (message.role !== "assistant") {
+    return message;
+  }
+  const { thinking: _thinking, ...withoutThinking } = message as Message & {
+    readonly thinking?: unknown;
+  };
+  return withoutThinking as Message;
+}
+
 function messageHash(message: Message): string {
   return createHash("sha256").update(messageText(message)).digest("hex");
 }
@@ -818,7 +828,7 @@ export class PirxAgent {
         role: "system",
         content: `${this.#prompt.content.trimEnd()}\n\n---\n\n${timeContext}`,
       },
-      ...this.#messages.slice(1),
+      ...this.#messages.slice(1).map(withoutHistoricalThinking),
     ];
   }
 
