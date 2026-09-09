@@ -96,6 +96,7 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
     keepAlive: "1m",
     baseUrl: `http://127.0.0.1:${address.port}`,
     temperature: 0,
+    timeZone: "Europe/Warsaw",
     promptFile,
     logDir: join(temporaryDirectory, "logs"),
     mcpServerEntry: resolve(pirxDirectory, "mcp-server", "dist", "index.js"),
@@ -105,7 +106,15 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
     toolTimeoutMs: 30_000,
   };
 
-  const agent = await PirxAgent.create(config);
+  const clockValues = [
+    "2026-08-30T21:58:00.000Z",
+    "2026-08-30T21:59:00.000Z",
+    "2026-08-30T22:01:00.000Z",
+  ];
+  let clockIndex = 0;
+  const agent = await PirxAgent.create(config, {}, {
+    now: () => new Date(clockValues[clockIndex++] ?? "2026-08-30T22:01:00.000Z"),
+  });
   context.after(async () => {
     await agent.close();
     await new Promise<void>((resolveClose, reject) => {
@@ -124,10 +133,20 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
   assert.equal(turn.metrics.model_calls, 2);
   assert.equal(turn.metrics.tool_calls, 1);
   assert.equal(turn.metrics.input_tokens, 20);
+  assert.equal(turn.metrics.time_zone, "Europe/Warsaw");
   assert.equal(requests.length, 2);
+
+  const firstMessages = requests[0]?.["messages"];
+  assert.ok(Array.isArray(firstMessages));
+  assert.match(String(firstMessages[0]?.content), /2026-08-30T23:59:00\+02:00/u);
 
   const secondMessages = requests[1]?.["messages"];
   assert.ok(Array.isArray(secondMessages));
+  assert.match(String(secondMessages[0]?.content), /2026-08-31T00:01:00\+02:00/u);
+  assert.equal(
+    secondMessages.filter((message) => message.role === "system").length,
+    1,
+  );
   assert.deepEqual(secondMessages.at(-1), {
     role: "tool",
     tool_name: "hello",
@@ -194,6 +213,7 @@ test("po limicie agent finalizuje bez wykonania kolejnej akcji", async (context)
     keepAlive: "1m",
     baseUrl: `http://127.0.0.1:${address.port}`,
     temperature: 0,
+    timeZone: "Europe/Warsaw",
     promptFile,
     logDir: join(temporaryDirectory, "logs"),
     mcpServerEntry: resolve(pirxDirectory, "mcp-server", "dist", "index.js"),
@@ -287,6 +307,7 @@ test("agent blocks repeated identical tool calls without removing loop guards", 
     keepAlive: "1m",
     baseUrl: `http://127.0.0.1:${address.port}`,
     temperature: 0,
+    timeZone: "Europe/Warsaw",
     promptFile,
     logDir: join(temporaryDirectory, "logs"),
     mcpServerEntry: resolve(pirxDirectory, "mcp-server", "dist", "index.js"),
@@ -346,6 +367,7 @@ test("LLM timeout aborts a stalled Ollama request and rolls back the turn", asyn
     keepAlive: "1m",
     baseUrl: `http://127.0.0.1:${address.port}`,
     temperature: 0,
+    timeZone: "Europe/Warsaw",
     promptFile,
     logDir: join(temporaryDirectory, "logs"),
     mcpServerEntry: resolve(pirxDirectory, "mcp-server", "dist", "index.js"),

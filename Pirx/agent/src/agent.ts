@@ -1,15 +1,23 @@
-import { Ollama, type ChatResponse, type Message } from "ollama";
+import { Ollama, type ChatResponse, type Message, type Tool } from "ollama";
 
 import type { AgentConfig, SystemPrompt } from "./config.js";
 import { loadSystemPrompt } from "./config.js";
-import { PirxMcpClient } from "./mcp-client.js";
+import {
+  estimateContext,
+  type ContextEstimate,
+  type ContextSectionInput,
+} from "./context-manager.js";
+import { PirxMcpClient, type ToolExecution } from "./mcp-client.js";
+import { parseOllamaModelNames } from "./ollama-models.js";
 import { readGpuStats, type GpuStats } from "./telemetry.js";
+import { currentTimeSystemContext } from "./time-context.js";
 
 type ResponseWithMetrics = ChatResponse;
 
 export interface TurnMetrics {
   readonly timestamp: string;
   readonly model: string;
+  readonly time_zone: string;
   readonly context: number;
   readonly temperature: number;
   readonly system_prompt_file: string;
@@ -25,6 +33,7 @@ export interface TurnMetrics {
   readonly done_reason: string | null;
   readonly model_calls: number;
   readonly tool_calls: number;
+  readonly context_estimates: readonly ContextEstimate[];
   readonly gpu_before: GpuStats | null;
   readonly gpu_after: GpuStats | null;
 }
@@ -36,7 +45,16 @@ export interface ChatTurn {
 
 export interface AgentHooks {
   readonly onToolCall?: (name: string, arguments_: Record<string, unknown>) => void;
+  readonly onToolResult?: (
+    name: string,
+    result: ToolExecution,
+    durationMs: number,
+  ) => void;
   readonly onMcpUnavailable?: (reason: string) => void;
+}
+
+export interface AgentDependencies {
+  readonly now?: () => Date;
 }
 
 interface Totals {
@@ -49,6 +67,7 @@ interface Totals {
   modelCalls: number;
   toolCalls: number;
   doneReason: string | null;
+  contextEstimates: ContextEstimate[];
 }
 
 function addMetrics(totals: Totals, response: ResponseWithMetrics): void {
@@ -60,6 +79,56 @@ function addMetrics(totals: Totals, response: ResponseWithMetrics): void {
   totals.evalDuration += response.eval_duration ?? 0;
   totals.modelCalls += 1;
   totals.doneReason = response.done_reason ?? null;
+}
+
+function messageText(message: Message): string {
+  return JSON.stringify(message);
+}
+
+function contextSections(
+  messages: readonly Message[],
+  tools: readonly Tool[],
+): ContextSectionInput[] {
+  const currentRequestIndex = messages.findLastIndex(
+    (message) => message.role === "user",
+  );
+  const currentRequest =
+    currentRequestIndex >= 0 ? messages[currentRequestIndex] : undefined;
+  const instructions = messages.filter((message) => message.role === "system");
+  const workingMemory = messages.filter((message) => message.role === "tool");
+  const history = messages.filter(
+    (message, index) =>
+      message.role !== "system" &&
+      message.role !== "tool" &&
+      index !== currentRequestIndex,
+  );
+
+  return [
+    {
+      name: "instructions",
+      text: instructions.map(messageText).join("\n"),
+    },
+    {
+      name: "tool_schemas",
+      text: JSON.stringify(tools),
+    },
+    {
+      name: "working_memory",
+      text: workingMemory.map(messageText).join("\n"),
+    },
+    {
+      name: "history",
+      text: history.map(messageText).join("\n"),
+    },
+    {
+      name: "sources",
+      text: "",
+    },
+    {
+      name: "current_request",
+      text: currentRequest === undefined ? "" : messageText(currentRequest),
+    },
+  ];
 }
 
 function tokensPerSecond(tokens: number, durationNanoseconds: number): number {
@@ -120,15 +189,23 @@ export class PirxAgent {
   readonly #ollama: Ollama;
   readonly #mcp: PirxMcpClient;
   readonly #hooks: AgentHooks;
+  readonly #now: () => Date;
   #prompt: SystemPrompt;
   #messages: Message[];
+  #currentModel: string;
   #mcpFailureReported = false;
   #lastContextTokens: number | undefined;
 
-  private constructor(config: AgentConfig, prompt: SystemPrompt, hooks: AgentHooks) {
+  private constructor(
+    config: AgentConfig,
+    prompt: SystemPrompt,
+    hooks: AgentHooks,
+    dependencies: AgentDependencies,
+  ) {
     this.#config = config;
     this.#prompt = prompt;
     this.#hooks = hooks;
+    this.#now = dependencies.now ?? (() => new Date());
     this.#ollama = new Ollama({
       host: config.baseUrl,
       fetch: boundedFetch(config.llmTimeoutMs),
@@ -138,11 +215,16 @@ export class PirxAgent {
       config.toolTimeoutMs,
     );
     this.#messages = [{ role: "system", content: prompt.content }];
+    this.#currentModel = config.model;
   }
 
-  static async create(config: AgentConfig, hooks: AgentHooks = {}): Promise<PirxAgent> {
+  static async create(
+    config: AgentConfig,
+    hooks: AgentHooks = {},
+    dependencies: AgentDependencies = {},
+  ): Promise<PirxAgent> {
     const prompt = await loadSystemPrompt(config.promptFile);
-    const agent = new PirxAgent(config, prompt, hooks);
+    const agent = new PirxAgent(config, prompt, hooks, dependencies);
 
     await agent.checkOllama();
     try {
@@ -159,8 +241,20 @@ export class PirxAgent {
     return this.#prompt;
   }
 
+  get model(): string {
+    return this.#currentModel;
+  }
+
+  get contextSize(): number {
+    return this.#config.numCtx;
+  }
+
   get toolNames(): readonly string[] {
     return this.#mcp.toolNames;
+  }
+
+  get mcpAvailable(): boolean {
+    return this.#mcp.isAvailable;
   }
 
   get lastContextTokens(): number | undefined {
@@ -178,9 +272,42 @@ export class PirxAgent {
     return this.#prompt;
   }
 
+  async listModels(): Promise<readonly string[]> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.#config.baseUrl}/api/tags`, {
+        signal: AbortSignal.timeout(this.#config.llmTimeoutMs),
+      });
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Nie można pobrać listy modeli Ollamy: ${detail}`);
+    }
+
+    if (!response.ok) {
+      throw new Error(`Ollama /api/tags zwróciła HTTP ${response.status}.`);
+    }
+
+    return parseOllamaModelNames(await response.json());
+  }
+
+  async setModel(model: string): Promise<void> {
+    const requestedModel = model.trim();
+    if (requestedModel.length === 0) {
+      throw new Error("Nazwa modelu Ollamy nie może być pusta.");
+    }
+
+    const models = await this.listModels();
+    if (!models.includes(requestedModel)) {
+      throw new Error(`Model „${requestedModel}” nie jest zainstalowany w Ollamie.`);
+    }
+
+    this.#currentModel = requestedModel;
+  }
+
   async chat(prompt: string): Promise<ChatTurn> {
+    const model = this.#currentModel;
     const checkpoint = this.#messages.length;
-    const timestamp = new Date().toISOString();
+    const timestamp = this.#now().toISOString();
     const gpuBefore = await readGpuStats();
     const repeatedToolCalls = new Map<string, number>();
     const totals: Totals = {
@@ -193,6 +320,7 @@ export class PirxAgent {
       modelCalls: 0,
       toolCalls: 0,
       doneReason: null,
+      contextEstimates: [],
     };
 
     this.#messages.push({ role: "user", content: prompt });
@@ -207,14 +335,25 @@ export class PirxAgent {
       ) {
         const mayExecuteTools = iteration < this.#config.maxToolIterations;
         const tools = mayExecuteTools ? this.#mcp.ollamaTools : [];
+        const messages = this.#messagesForModel();
+        totals.contextEstimates.push(
+          estimateContext(contextSections(messages, tools), {
+            contextWindowTokens: this.#config.numCtx,
+            maxOutputTokens: this.#config.maxOutputTokens ?? 0,
+            safetyMarginTokens: this.#config.contextSafetyMarginTokens ?? 0,
+          }),
+        );
         const request = {
-          model: this.#config.model,
-          messages: this.#messages,
+          model,
+          messages,
           stream: false as const,
           keep_alive: this.#config.keepAlive,
           options: {
             num_ctx: this.#config.numCtx,
             temperature: this.#config.temperature,
+            ...(this.#config.maxOutputTokens !== undefined
+              ? { num_predict: this.#config.maxOutputTokens }
+              : {}),
           },
           ...(tools.length > 0 ? { tools: [...tools] } : {}),
         };
@@ -269,7 +408,13 @@ export class PirxAgent {
           totals.toolCalls += 1;
           this.#hooks.onToolCall?.(name, arguments_);
 
+          const toolStartedAt = performance.now();
           const execution = await this.#mcp.callTool(name, arguments_);
+          this.#hooks.onToolResult?.(
+            name,
+            execution,
+            performance.now() - toolStartedAt,
+          );
           this.#messages.push({
             role: "tool",
             tool_name: name,
@@ -294,7 +439,8 @@ export class PirxAgent {
         content: finalContent,
         metrics: {
           timestamp,
-          model: this.#config.model,
+          model,
+          time_zone: this.#config.timeZone,
           context: this.#config.numCtx,
           temperature: this.#config.temperature,
           system_prompt_file: this.#config.promptFile,
@@ -316,6 +462,7 @@ export class PirxAgent {
           done_reason: totals.doneReason,
           model_calls: totals.modelCalls,
           tool_calls: totals.toolCalls,
+          context_estimates: totals.contextEstimates,
           gpu_before: gpuBefore,
           gpu_after: gpuAfter,
         },
@@ -339,7 +486,7 @@ export class PirxAgent {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: this.#config.model,
+        model: this.#currentModel,
         prompt: "",
         stream: false,
         keep_alive: 0,
@@ -353,6 +500,17 @@ export class PirxAgent {
 
   async close(): Promise<void> {
     await this.#mcp.close();
+  }
+
+  #messagesForModel(): Message[] {
+    const timeContext = currentTimeSystemContext(this.#now(), this.#config.timeZone);
+    return [
+      {
+        role: "system",
+        content: `${this.#prompt.content.trimEnd()}\n\n---\n\n${timeContext}`,
+      },
+      ...this.#messages.slice(1),
+    ];
   }
 
   private async checkOllama(): Promise<void> {

@@ -79,6 +79,10 @@ export class PirxMcpClient {
     return this.#tools.map((tool) => tool.name);
   }
 
+  get isAvailable(): boolean {
+    return this.#client !== undefined && this.#unavailableReason === undefined;
+  }
+
   get ollamaTools(): readonly Tool[] {
     if (this.#unavailableReason !== undefined) {
       return [];

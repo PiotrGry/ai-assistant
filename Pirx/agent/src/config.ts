@@ -9,6 +9,9 @@ export interface AgentConfig {
   readonly keepAlive: string;
   readonly baseUrl: string;
   readonly temperature: number;
+  readonly maxOutputTokens?: number;
+  readonly contextSafetyMarginTokens?: number;
+  readonly timeZone: string;
   readonly promptFile: string;
   readonly logDir: string;
   readonly mcpServerEntry: string;
@@ -47,6 +50,22 @@ function finiteNumber(name: string, value: string): number {
   return parsed;
 }
 
+function configuredTimeZone(environment: NodeJS.ProcessEnv): string {
+  const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const timeZone =
+    environment.PIRX_GOOGLE_CALENDAR_TIMEZONE?.trim() ||
+    (detected.length > 0 ? detected : "UTC");
+
+  try {
+    new Intl.DateTimeFormat("en", { timeZone }).format();
+  } catch {
+    throw new Error(
+      `PIRX_GOOGLE_CALENDAR_TIMEZONE musi być prawidłową strefą IANA (otrzymano: ${timeZone}).`,
+    );
+  }
+  return timeZone;
+}
+
 export function loadConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): AgentConfig {
@@ -73,6 +92,18 @@ export function loadConfig(
       "OLLAMA_TEMPERATURE",
       environment.OLLAMA_TEMPERATURE ?? "0.3",
     ),
+
+    maxOutputTokens: positiveInteger(
+      "OLLAMA_MAX_OUTPUT_TOKENS",
+      environment.OLLAMA_MAX_OUTPUT_TOKENS ?? "1536",
+    ),
+
+    contextSafetyMarginTokens: positiveInteger(
+      "PIRX_CONTEXT_SAFETY_MARGIN_TOKENS",
+      environment.PIRX_CONTEXT_SAFETY_MARGIN_TOKENS ?? "512",
+    ),
+
+    timeZone: configuredTimeZone(environment),
 
     promptFile:
       environment.ADA_PROMPT_FILE ??
