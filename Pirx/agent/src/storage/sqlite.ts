@@ -42,6 +42,25 @@ export interface OperationRecord {
   readonly payload: Record<string, unknown>;
 }
 
+export type ActionEventState =
+  | "planned"
+  | "started"
+  | "succeeded"
+  | "failed"
+  | "unknown";
+
+export interface ActionEventRecord {
+  readonly id: string;
+  readonly operationId: string;
+  readonly mutationId: string;
+  readonly target: string;
+  readonly attempt: number;
+  readonly authorization: Record<string, unknown>;
+  readonly state: ActionEventState;
+  readonly confirmation?: Record<string, unknown>;
+  readonly createdAt: string;
+}
+
 function json(value: unknown): string {
   return JSON.stringify(value);
 }
@@ -275,7 +294,73 @@ export class SqliteStore {
     }
   }
 
-  count(table: "run_environments" | "sessions" | "turns" | "operations"): number {
+  finishOperation(
+    id: string,
+    endedAt: string,
+    status: "succeeded" | "failed" | "unknown",
+    error?: string,
+  ): void {
+    this.#assertOpen();
+    const result = this.#database
+      .prepare(
+        `UPDATE operations
+         SET ended_at = ?, status = ?, error = ?
+         WHERE id = ? AND status = 'started'`,
+      )
+      .run(endedAt, status, error ?? null, id);
+    if (result.changes !== 1) {
+      throw new Error(`Started SQLite operation not found: ${id}`);
+    }
+  }
+
+  insertActionEvent(record: ActionEventRecord): void {
+    this.#assertOpen();
+    this.#database
+      .prepare(
+        `INSERT INTO action_events
+          (id, operation_id, mutation_id, target, attempt,
+           authorization_json, state, confirmation_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.operationId,
+        record.mutationId,
+        record.target,
+        record.attempt,
+        json(record.authorization),
+        record.state,
+        record.confirmation === undefined ? null : json(record.confirmation),
+        record.createdAt,
+      );
+  }
+
+  latestActionState(
+    mutationId: string,
+  ): { readonly state: ActionEventState; readonly attempt: number } | undefined {
+    this.#assertOpen();
+    const row = this.#database
+      .prepare(
+        `SELECT state, attempt
+         FROM action_events
+         WHERE mutation_id = ?
+         ORDER BY rowid DESC
+         LIMIT 1`,
+      )
+      .get(mutationId) as
+      | { state: ActionEventState; attempt: number }
+      | undefined;
+    return row;
+  }
+
+  count(
+    table:
+      | "run_environments"
+      | "sessions"
+      | "turns"
+      | "operations"
+      | "action_events",
+  ): number {
     this.#assertOpen();
     const row = this.#database
       .prepare(`SELECT COUNT(*) AS count FROM ${table}`)
