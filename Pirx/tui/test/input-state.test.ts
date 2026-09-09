@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyComposerKey, type ComposerState } from "../src/input-state.js";
+import { applyComposerKey, isExitCommand, type ComposerState } from "../src/input-state.js";
 
 const empty: ComposerState = { value: "", cursor: 0 };
+
+test("exit commands are recognized without sending them to the agent", () => {
+  assert.equal(isExitCommand("/exit"), true);
+  assert.equal(isExitCommand("  /quit  "), true);
+  assert.equal(isExitCommand("/exit now"), false);
+  assert.equal(isExitCommand("hello"), false);
+});
 
 test("composer submits on Enter and inserts a newline on Shift+Enter", () => {
   const typed = applyComposerKey(empty, "hello", {});

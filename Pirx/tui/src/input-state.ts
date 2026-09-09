@@ -23,6 +23,11 @@ export interface ComposerResult {
   readonly submitted?: string;
 }
 
+export function isExitCommand(value: string): boolean {
+  const command = value.trim();
+  return command === "/exit" || command === "/quit";
+}
+
 function lineStart(value: string, cursor: number): number {
   const newline = value.lastIndexOf("\n", cursor - 1);
   return newline + 1;

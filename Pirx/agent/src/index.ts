@@ -177,6 +177,7 @@ async function main(): Promise<void> {
     }
   } finally {
     readline.close();
+    stdin.pause();
     await logger.close();
     await agent.close();
     console.log("\nSesja zakończona.");

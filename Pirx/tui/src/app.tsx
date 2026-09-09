@@ -6,6 +6,7 @@ import type { ChatTurn, PirxAgent, TurnMetrics } from "@pirx/agent";
 import { Composer } from "./composer.js";
 import type { TuiEvent } from "./events.js";
 import { TuiEventBus } from "./events.js";
+import { isExitCommand } from "./input-state.js";
 
 type ChatItem =
   | { readonly kind: "user" | "assistant"; readonly content: string }
@@ -167,6 +168,10 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
 
   const submit = (value: string): void => {
     if (busy || selectorOpen || value.trim().length === 0) return;
+    if (isExitCommand(value)) {
+      exit();
+      return;
+    }
     setHistory((current) => [...current, { kind: "user", content: value }]);
     setClearToken((current) => current + 1);
     setNotice(undefined);
