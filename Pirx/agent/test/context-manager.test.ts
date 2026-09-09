@@ -6,6 +6,7 @@ import {
   CONTEXT_POLICY_VERSION,
   estimateContext,
   estimateTextTokens,
+  selectMessagesForContext,
 } from "../src/context-manager.js";
 
 test("context estimate reports section sizes and reserves output plus margin", () => {
@@ -73,5 +74,87 @@ test("text estimator validates budgets and counts Unicode code points", () => {
         safetyMarginTokens: 1,
       }),
     /contextWindowTokens must be a non-negative safe integer/u,
+  );
+});
+
+test("context selection keeps system and current request messages", () => {
+  const messages = [
+    { role: "system", content: "system" },
+    { role: "user", content: "old request with enough text to omit" },
+    { role: "assistant", content: "old answer with enough text to omit" },
+    { role: "user", content: "current" },
+  ] as const;
+  const budget = {
+    contextWindowTokens: 5,
+    maxOutputTokens: 0,
+    safetyMarginTokens: 0,
+  };
+
+  const build = selectMessagesForContext(messages, (selected) =>
+    estimateContext(
+      [{ name: "history", text: selected.map((message) => message.content).join("") }],
+      budget,
+    ),
+  );
+
+  assert.deepEqual(
+    build.messages.map((message) => message.content),
+    ["system", "current"],
+  );
+  assert.equal(build.omittedMessageCount, 2);
+  assert.equal(build.estimate.fits, true);
+});
+
+test("context selection never separates an assistant tool call from its results", () => {
+  const messages = [
+    { role: "system", content: "system" },
+    { role: "user", content: "old request" },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [{ function: { name: "example", arguments: {} } }],
+    },
+    { role: "tool", content: "tool result" },
+    { role: "user", content: "current" },
+  ] as const;
+  const budget = {
+    contextWindowTokens: 10,
+    maxOutputTokens: 0,
+    safetyMarginTokens: 0,
+  };
+
+  const build = selectMessagesForContext(messages, (selected) =>
+    estimateContext(
+      [{ name: "history", text: selected.map((message) => message.content).join("") }],
+      budget,
+    ),
+  );
+
+  assert.deepEqual(
+    build.messages.map((message) => message.role),
+    ["system", "user", "assistant", "tool", "user"],
+  );
+  assert.equal(build.omittedMessageCount, 0);
+});
+
+test("context selection fails when protected messages exceed the budget", () => {
+  const messages = [
+    { role: "system", content: "system instructions" },
+    { role: "user", content: "the current request is too large" },
+  ] as const;
+
+  assert.throws(
+    () =>
+      selectMessagesForContext(messages, (selected) =>
+        estimateContext(
+          [{ name: "history", text: JSON.stringify(selected) }],
+          {
+            contextWindowTokens: 1,
+            maxOutputTokens: 0,
+            safetyMarginTokens: 0,
+          },
+        ),
+      ),
+    /exceeds input budget/u,
   );
 });

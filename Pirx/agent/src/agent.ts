@@ -5,6 +5,8 @@ import { loadSystemPrompt } from "./config.js";
 import type { SqliteActionLedger } from "./action-ledger.js";
 import {
   estimateContext,
+  selectMessagesForContext,
+  type ContextBuild,
   type ContextEstimate,
   type ContextSectionInput,
 } from "./context-manager.js";
@@ -36,6 +38,7 @@ export interface TurnMetrics {
   readonly model_calls: number;
   readonly tool_calls: number;
   readonly context_estimates: readonly ContextEstimate[];
+  readonly context_builds: readonly ContextBuild<Message>[];
   readonly gpu_before: GpuStats | null;
   readonly gpu_after: GpuStats | null;
 }
@@ -77,6 +80,7 @@ interface Totals {
   toolCalls: number;
   doneReason: string | null;
   contextEstimates: ContextEstimate[];
+  contextBuilds: ContextBuild<Message>[];
 }
 
 function addMetrics(totals: Totals, response: ResponseWithMetrics): void {
@@ -366,6 +370,7 @@ export class PirxAgent {
       toolCalls: 0,
       doneReason: null,
       contextEstimates: [],
+      contextBuilds: [],
     };
 
     this.#messages.push({ role: "user", content: prompt });
@@ -380,14 +385,19 @@ export class PirxAgent {
       ) {
         const mayExecuteTools = iteration < this.#config.maxToolIterations;
         const tools = mayExecuteTools ? this.#mcp.ollamaTools : [];
-        const messages = this.#messagesForModel();
-        totals.contextEstimates.push(
-          estimateContext(contextSections(messages, tools), {
-            contextWindowTokens: this.#config.numCtx,
-            maxOutputTokens: this.#config.maxOutputTokens ?? 0,
-            safetyMarginTokens: this.#config.contextSafetyMarginTokens ?? 0,
-          }),
+        const messagesForModel = this.#messagesForModel();
+        const budget = {
+          contextWindowTokens: this.#config.numCtx,
+          maxOutputTokens: this.#config.maxOutputTokens ?? 0,
+          safetyMarginTokens: this.#config.contextSafetyMarginTokens ?? 0,
+        };
+        const contextBuild = selectMessagesForContext(
+          messagesForModel,
+          (messages) => estimateContext(contextSections(messages, tools), budget),
         );
+        totals.contextBuilds.push(contextBuild);
+        totals.contextEstimates.push(contextBuild.estimate);
+        const messages = [...contextBuild.messages];
         const llmOperationSequence = operationSequence;
         operationSequence += 1;
         const llmOperation =
@@ -654,6 +664,7 @@ export class PirxAgent {
           model_calls: totals.modelCalls,
           tool_calls: totals.toolCalls,
           context_estimates: totals.contextEstimates,
+          context_builds: totals.contextBuilds,
           gpu_before: gpuBefore,
           gpu_after: gpuAfter,
         },

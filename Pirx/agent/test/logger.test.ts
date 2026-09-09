@@ -30,6 +30,7 @@ function metrics(timestamp: string): TurnMetrics {
     model_calls: 1,
     tool_calls: 0,
     context_estimates: [],
+    context_builds: [],
     gpu_before: null,
     gpu_after: null,
   };

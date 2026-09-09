@@ -38,6 +38,12 @@ export interface ContextEstimate {
   readonly overBudgetTokens: number;
 }
 
+export interface ContextBuild<T> {
+  readonly messages: readonly T[];
+  readonly estimate: ContextEstimate;
+  readonly omittedMessageCount: number;
+}
+
 function nonNegativeInteger(name: string, value: number): number {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error(`${name} must be a non-negative safe integer: ${value}`);
@@ -115,4 +121,95 @@ export function assertContextFits(estimate: ContextEstimate): void {
         `(policy ${estimate.policyVersion}).`,
     );
   }
+}
+
+function hasToolCalls(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as { readonly tool_calls?: unknown }).tool_calls)
+  );
+}
+
+function messageGroups<T extends { readonly role: string }>(
+  messages: readonly T[],
+): T[][] {
+  const groups: T[][] = [];
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message === undefined) {
+      continue;
+    }
+    const group = [message];
+    if (message.role === "assistant" && hasToolCalls(message)) {
+      while (messages[index + 1]?.role === "tool") {
+        index += 1;
+        const toolMessage = messages[index];
+        if (toolMessage !== undefined) {
+          group.push(toolMessage);
+        }
+      }
+    }
+    groups.push(group);
+  }
+  return groups;
+}
+
+export function selectMessagesForContext<T extends { readonly role: string }>(
+  messages: readonly T[],
+  estimate: (messages: readonly T[]) => ContextEstimate,
+): ContextBuild<T> {
+  const systemMessages = messages.filter((message) => message.role === "system");
+  const currentRequestIndex = messages.findLastIndex(
+    (message) => message.role === "user",
+  );
+  const currentRequest =
+    currentRequestIndex < 0 || messages[currentRequestIndex] === undefined
+      ? []
+      : [messages[currentRequestIndex]];
+  const history = messages.filter(
+    (message, index) =>
+      message.role !== "system" && index !== currentRequestIndex,
+  );
+  const groups = messageGroups(history);
+  const protectedMessages = [...systemMessages, ...currentRequest];
+  const protectedEstimate = estimate(protectedMessages);
+  assertContextFits(protectedEstimate);
+
+  let selectedHistory: T[][] = [];
+  let omittedMessageCount = 0;
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const candidateGroups = groups.slice(index);
+    const candidate = [
+      ...systemMessages,
+      ...candidateGroups.flat(),
+      ...currentRequest,
+    ];
+    const candidateEstimate = estimate(candidate);
+    if (candidateEstimate.fits) {
+      selectedHistory = candidateGroups;
+      continue;
+    }
+    omittedMessageCount = groups
+      .slice(0, index + 1)
+      .reduce((total, group) => total + group.length, 0);
+    break;
+  }
+
+  const selectedMessages = [
+    ...selectedHistory.flat(),
+    ...currentRequest,
+  ];
+  const selectedMessageSet = new Set<T>([
+    ...systemMessages,
+    ...selectedMessages,
+  ]);
+  const finalMessages = messages.filter((message) =>
+    selectedMessageSet.has(message),
+  );
+  return {
+    messages: finalMessages,
+    estimate: estimate(finalMessages),
+    omittedMessageCount,
+  };
 }
