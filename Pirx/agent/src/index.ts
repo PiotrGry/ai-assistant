@@ -113,6 +113,14 @@ async function main(): Promise<void> {
               `Kontekst: ${estimate === undefined ? "niedostępny" : `${estimate.estimatedInputTokens}/${estimate.inputBudgetTokens} tok`} ` +
               `| największe sekcje: ${largestSections}`,
             );
+            const resources = logger.resourceSummary;
+            if (resources !== undefined) {
+              console.log(
+                `Próbki zasobów: ${resources.sampleCount}, ` +
+                `VRAM peak zaobserwowany: ${resources.observedVramPeakMb === null ? "niedostępny" : `${resources.observedVramPeakMb} MiB`}, ` +
+                `GPU peak: ${resources.observedGpuUtilizationPeakPercent === null ? "niedostępny" : `${resources.observedGpuUtilizationPeakPercent}%`}`,
+              );
+            }
             console.log(`JSON: ${JSON.stringify(metrics)}`);
           }
           break;

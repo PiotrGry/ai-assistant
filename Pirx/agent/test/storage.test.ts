@@ -43,11 +43,35 @@ test("SQLite store creates the versioned durable schema and keeps relations", as
       status: "succeeded",
       payload: { prompt_eval_count: null },
     });
+    store.insertResourceSample({
+      id: "resource-summary-1",
+      sessionId: "session-1",
+      sampledAt: "2026-09-09T10:00:03.000Z",
+      source: "test",
+      payload: {
+        gpu: { vram_used_mb: 100, utilization_percent: 20 },
+      },
+    });
+    store.insertResourceSample({
+      id: "resource-summary-2",
+      sessionId: "session-1",
+      sampledAt: "2026-09-09T10:00:04.000Z",
+      source: "test",
+      payload: {
+        gpu: { vram_used_mb: 150, utilization_percent: 80 },
+      },
+    });
 
     assert.equal(store.count("run_environments"), 1);
     assert.equal(store.count("sessions"), 1);
     assert.equal(store.count("turns"), 1);
     assert.equal(store.count("operations"), 1);
+    assert.deepEqual(store.resourceSummary("session-1"), {
+      sampleCount: 2,
+      gpuSampleCount: 2,
+      observedVramPeakMb: 150,
+      observedGpuUtilizationPeakPercent: 80,
+    });
   } finally {
     store.close();
     await rm(directory, { recursive: true, force: true });

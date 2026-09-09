@@ -32,6 +32,7 @@ export {
   retentionDryRun,
 } from "./storage/maintenance.js";
 export type { RetentionReport } from "./storage/maintenance.js";
+export type { ResourceSummary } from "./storage/sqlite.js";
 export type {
   ResourceSampleRecord,
   ResourceSamplerOptions,

@@ -9,7 +9,7 @@ import { SqliteActionLedger } from "./action-ledger.js";
 import { SqliteOperationRecorder } from "./operation-recorder.js";
 import type { OperationRecorder } from "./operation-recorder.js";
 import { ResourceSampler } from "./resource-sampler.js";
-import { SqliteStore } from "./storage/sqlite.js";
+import { SqliteStore, type ResourceSummary } from "./storage/sqlite.js";
 
 export interface SessionTurn {
   readonly id: string;
@@ -154,6 +154,12 @@ export class SessionLogger {
 
   get lastMetrics(): TurnMetrics | undefined {
     return this.#lastMetrics;
+  }
+
+  get resourceSummary(): ResourceSummary | undefined {
+    return this.#store === undefined || this.#sessionId === undefined
+      ? undefined
+      : this.#store.resourceSummary(this.#sessionId);
   }
 
   beginTurn(prompt: string): SessionTurn {

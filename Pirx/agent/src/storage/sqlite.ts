@@ -108,6 +108,13 @@ export interface ResourceSampleRecord {
   readonly payload: Record<string, unknown>;
 }
 
+export interface ResourceSummary {
+  readonly sampleCount: number;
+  readonly gpuSampleCount: number;
+  readonly observedVramPeakMb: number | null;
+  readonly observedGpuUtilizationPeakPercent: number | null;
+}
+
 function json(value: unknown): string {
   return JSON.stringify(value);
 }
@@ -557,6 +564,50 @@ export class SqliteStore {
         record.gpuIndex ?? null,
         json(record.payload),
       );
+  }
+
+  resourceSummary(sessionId: string): ResourceSummary {
+    this.#assertOpen();
+    const rows = this.#database
+      .prepare(
+        `SELECT payload_json
+         FROM resource_samples
+         WHERE session_id = ?`,
+      )
+      .all(sessionId) as Array<{ payload_json: string }>;
+    let gpuSampleCount = 0;
+    let observedVramPeakMb: number | null = null;
+    let observedGpuUtilizationPeakPercent: number | null = null;
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload_json) as {
+        readonly gpu?: {
+          readonly vram_used_mb?: unknown;
+          readonly utilization_percent?: unknown;
+        } | null;
+      };
+      if (payload.gpu === undefined || payload.gpu === null) {
+        continue;
+      }
+      gpuSampleCount += 1;
+      const vram = payload.gpu.vram_used_mb;
+      if (typeof vram === "number" && Number.isFinite(vram)) {
+        observedVramPeakMb =
+          observedVramPeakMb === null ? vram : Math.max(observedVramPeakMb, vram);
+      }
+      const utilization = payload.gpu.utilization_percent;
+      if (typeof utilization === "number" && Number.isFinite(utilization)) {
+        observedGpuUtilizationPeakPercent =
+          observedGpuUtilizationPeakPercent === null
+            ? utilization
+            : Math.max(observedGpuUtilizationPeakPercent, utilization);
+      }
+    }
+    return {
+      sampleCount: rows.length,
+      gpuSampleCount,
+      observedVramPeakMb,
+      observedGpuUtilizationPeakPercent,
+    };
   }
 
   latestActionState(
