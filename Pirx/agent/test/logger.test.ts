@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -95,6 +96,20 @@ test("SessionLogger persists the environment, session and completed turn", async
     assert.equal(store.count("artifacts"), 1);
   } finally {
     store.close();
+  }
+
+  const database = new DatabaseSync(storageFile);
+  try {
+    const message = database
+      .prepare("SELECT content FROM messages WHERE role = 'tool'")
+      .get() as { content: string | null };
+    const artifact = database
+      .prepare("SELECT content FROM artifacts")
+      .get() as { content: string | null };
+    assert.equal(message.content, null);
+    assert.equal(artifact.content, null);
+  } finally {
+    database.close();
   }
 
   assert.match(

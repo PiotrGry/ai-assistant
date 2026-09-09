@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+export type StorageMode = "metrics_only" | "redacted" | "full_local";
+
 export interface AgentConfig {
   readonly model: string;
   readonly numCtx: number;
@@ -16,6 +18,7 @@ export interface AgentConfig {
   readonly promptFile: string;
   readonly logDir: string;
   readonly storagePath?: string;
+  readonly storageMode?: StorageMode;
   readonly resourceSampleIntervalMs?: number;
   readonly mcpServerEntry: string;
 
@@ -51,6 +54,15 @@ function finiteNumber(name: string, value: string): number {
   }
 
   return parsed;
+}
+
+function configuredStorageMode(value: string): StorageMode {
+  if (value === "metrics_only" || value === "redacted" || value === "full_local") {
+    return value;
+  }
+  throw new Error(
+    `PIRX_STORAGE_MODE musi być jednym z: metrics_only, redacted, full_local (otrzymano: ${value}).`,
+  );
 }
 
 function configuredTimeZone(environment: NodeJS.ProcessEnv): string {
@@ -124,6 +136,10 @@ export function loadConfig(
       environment.PIRX_STORAGE_FILE?.trim()
         ? "."
         : "pirx.sqlite",
+    ),
+
+    storageMode: configuredStorageMode(
+      environment.PIRX_STORAGE_MODE?.trim() ?? "redacted",
     ),
 
     resourceSampleIntervalMs: positiveInteger(

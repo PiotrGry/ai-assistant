@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFile, chmod, mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-import type { AgentConfig, SystemPrompt } from "./config.js";
+import type { AgentConfig, StorageMode, SystemPrompt } from "./config.js";
 import type { TurnMetrics } from "./agent.js";
 import type { Message } from "ollama";
 import { SqliteActionLedger } from "./action-ledger.js";
@@ -23,10 +23,22 @@ function sessionId(date: Date): string {
   return date.toISOString().replaceAll(/[-:]/gu, "").replace(/\.\d{3}Z$/u, "Z");
 }
 
+function contentHash(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+function contentReference(content: string): Record<string, unknown> {
+  return {
+    sha256: contentHash(content),
+    characters: Array.from(content).length,
+  };
+}
+
 export class SessionLogger {
   readonly transcriptFile: string;
   readonly metricsFile: string;
   readonly storageFile: string | undefined;
+  readonly storageMode: StorageMode;
   readonly actionLedger: SqliteActionLedger | undefined;
   readonly operationRecorder: OperationRecorder | undefined;
   readonly #store: SqliteStore | undefined;
@@ -44,10 +56,12 @@ export class SessionLogger {
     actionLedger: SqliteActionLedger | undefined,
     operationRecorder: OperationRecorder | undefined,
     resourceSampler: ResourceSampler | undefined,
+    storageMode: StorageMode,
   ) {
     this.transcriptFile = transcriptFile;
     this.metricsFile = metricsFile;
     this.storageFile = store?.filename;
+    this.storageMode = storageMode;
     this.#store = store;
     this.#sessionId = sessionId;
     this.actionLedger = actionLedger;
@@ -88,6 +102,7 @@ export class SessionLogger {
             time_zone: config.timeZone,
             prompt_file: config.promptFile,
             prompt_sha256: prompt.sha256,
+            storage_mode: config.storageMode ?? "redacted",
           },
         });
         store.insertSession({
@@ -117,6 +132,7 @@ export class SessionLogger {
             intervalMs: config.resourceSampleIntervalMs,
             sessionId: databaseSessionId,
           }),
+      config.storageMode ?? "redacted",
     );
     const header = [
       "# Rozmowa z Pirxem",
@@ -159,8 +175,14 @@ export class SessionLogger {
         sequence: turn.sequence,
         startedAt: new Date().toISOString(),
         status: "started",
-        userPrompt: prompt,
-        payload: { schema_version: 1 },
+        userPrompt: this.storageMode === "full_local" ? prompt : "",
+        payload: {
+          schema_version: 1,
+          storage_mode: this.storageMode,
+          ...(this.storageMode === "full_local"
+            ? {}
+            : { user_prompt: contentReference(prompt) }),
+        },
       });
     }
     this.#turnSequence += 1;
@@ -185,34 +207,47 @@ export class SessionLogger {
       turn !== undefined
     ) {
       const createdAt = new Date().toISOString();
-      for (const [sequence, message] of messages.entries()) {
-        this.#store.insertMessage({
-          id: randomUUID(),
-          sessionId: this.#sessionId,
-          turnId: turn.id,
-          sequence,
-          role: message.role,
-          ...(message.content === undefined ? {} : { content: message.content }),
-          ...(message.tool_name === undefined
-            ? {}
-            : { toolName: message.tool_name }),
-          payload: message as unknown as Record<string, unknown>,
-          createdAt,
-        });
-        if (message.role === "tool") {
-          this.#store.insertArtifact({
+      if (this.storageMode !== "metrics_only") {
+        for (const [sequence, message] of messages.entries()) {
+          const content = message.content ?? "";
+          const payload =
+            this.storageMode === "full_local"
+              ? (message as unknown as Record<string, unknown>)
+              : {
+                  schema_version: 1,
+                  content: contentReference(content),
+                };
+          this.#store.insertMessage({
             id: randomUUID(),
             sessionId: this.#sessionId,
             turnId: turn.id,
-            kind: "mcp_tool_result",
-            source: message.tool_name ?? "unknown",
-            contentHash: createHash("sha256")
-              .update(message.content ?? "")
-              .digest("hex"),
-            content: message.content,
-            payload: { schema_version: 1 },
+            sequence,
+            role: message.role,
+            ...(this.storageMode === "full_local" ? { content } : {}),
+            ...(message.tool_name === undefined
+              ? {}
+              : { toolName: message.tool_name }),
+            payload,
             createdAt,
           });
+          if (message.role === "tool") {
+            this.#store.insertArtifact({
+              id: randomUUID(),
+              sessionId: this.#sessionId,
+              turnId: turn.id,
+              kind: "mcp_tool_result",
+              source: message.tool_name ?? "unknown",
+              contentHash: contentHash(content),
+              ...(this.storageMode === "full_local" ? { content } : {}),
+              payload: {
+                schema_version: 1,
+                ...(this.storageMode === "full_local"
+                  ? {}
+                  : { content: contentReference(content) }),
+              },
+              createdAt,
+            });
+          }
         }
       }
     } else if (this.#store !== undefined && this.#sessionId !== undefined) {
@@ -222,10 +257,16 @@ export class SessionLogger {
         sequence: this.#turnSequence,
         startedAt: metrics.timestamp,
         status: "completed",
-        userPrompt: prompt,
+        userPrompt: this.storageMode === "full_local" ? prompt : "",
         payload: {
           schema_version: 1,
-          response,
+          storage_mode: this.storageMode,
+          ...(this.storageMode === "full_local"
+            ? { response }
+            : {
+                user_prompt: contentReference(prompt),
+                response: contentReference(response),
+              }),
           metrics,
         },
       });
@@ -240,7 +281,10 @@ export class SessionLogger {
     ) {
       this.#store.finishTurn(turn.id, new Date().toISOString(), "completed", {
         schema_version: 1,
-        response,
+        storage_mode: this.storageMode,
+        ...(this.storageMode === "full_local"
+          ? { response }
+          : { response: contentReference(response) }),
         metrics,
       });
     }

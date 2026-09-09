@@ -20,3 +20,15 @@ test("agent configuration rejects an invalid timezone before startup", () => {
     /prawidłową strefą IANA/u,
   );
 });
+
+test("agent configuration exposes explicit storage privacy modes", () => {
+  assert.equal(loadConfig({}).storageMode, "redacted");
+  assert.equal(
+    loadConfig({ PIRX_STORAGE_MODE: "full_local" }).storageMode,
+    "full_local",
+  );
+  assert.throws(
+    () => loadConfig({ PIRX_STORAGE_MODE: "secret_dump" }),
+    /PIRX_STORAGE_MODE musi być jednym z/u,
+  );
+});

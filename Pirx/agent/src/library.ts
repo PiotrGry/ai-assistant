@@ -7,7 +7,7 @@ export type {
   TurnMetrics,
 } from "./agent.js";
 export { loadConfig } from "./config.js";
-export type { AgentConfig, SystemPrompt } from "./config.js";
+export type { AgentConfig, StorageMode, SystemPrompt } from "./config.js";
 export { parseOllamaModelNames } from "./ollama-models.js";
 export { mutationId, SqliteActionLedger } from "./action-ledger.js";
 export type {
