@@ -16,6 +16,7 @@ export interface AgentConfig {
   readonly promptFile: string;
   readonly logDir: string;
   readonly storagePath?: string;
+  readonly resourceSampleIntervalMs?: number;
   readonly mcpServerEntry: string;
 
   readonly maxToolIterations: number;
@@ -123,6 +124,11 @@ export function loadConfig(
       environment.PIRX_STORAGE_FILE?.trim()
         ? "."
         : "pirx.sqlite",
+    ),
+
+    resourceSampleIntervalMs: positiveInteger(
+      "PIRX_RESOURCE_SAMPLE_INTERVAL_MS",
+      environment.PIRX_RESOURCE_SAMPLE_INTERVAL_MS ?? "1000",
     ),
 
     mcpServerEntry: resolve(

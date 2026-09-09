@@ -7,6 +7,7 @@ import type { TurnMetrics } from "./agent.js";
 import { SqliteActionLedger } from "./action-ledger.js";
 import { SqliteOperationRecorder } from "./operation-recorder.js";
 import type { OperationRecorder } from "./operation-recorder.js";
+import { ResourceSampler } from "./resource-sampler.js";
 import { SqliteStore } from "./storage/sqlite.js";
 
 export interface SessionTurn {
@@ -28,6 +29,7 @@ export class SessionLogger {
   readonly actionLedger: SqliteActionLedger | undefined;
   readonly operationRecorder: OperationRecorder | undefined;
   readonly #store: SqliteStore | undefined;
+  readonly #resourceSampler: ResourceSampler | undefined;
   readonly #sessionId: string | undefined;
   #lastMetrics: TurnMetrics | undefined;
   #turnSequence = 0;
@@ -40,6 +42,7 @@ export class SessionLogger {
     sessionId: string | undefined,
     actionLedger: SqliteActionLedger | undefined,
     operationRecorder: OperationRecorder | undefined,
+    resourceSampler: ResourceSampler | undefined,
   ) {
     this.transcriptFile = transcriptFile;
     this.metricsFile = metricsFile;
@@ -48,6 +51,7 @@ export class SessionLogger {
     this.#sessionId = sessionId;
     this.actionLedger = actionLedger;
     this.operationRecorder = operationRecorder;
+    this.#resourceSampler = resourceSampler;
   }
 
   static async create(config: AgentConfig, prompt: SystemPrompt): Promise<SessionLogger> {
@@ -104,6 +108,14 @@ export class SessionLogger {
       databaseSessionId,
       store === undefined ? undefined : new SqliteActionLedger(store),
       store === undefined ? undefined : new SqliteOperationRecorder(store),
+      store === undefined ||
+      databaseSessionId === undefined ||
+      config.resourceSampleIntervalMs === undefined
+        ? undefined
+        : new ResourceSampler(store, {
+            intervalMs: config.resourceSampleIntervalMs,
+            sessionId: databaseSessionId,
+          }),
     );
     const header = [
       "# Rozmowa z Pirxem",
@@ -118,6 +130,7 @@ export class SessionLogger {
 
     await writeFile(logger.transcriptFile, header, { encoding: "utf8", mode: 0o600 });
     await writeFile(logger.metricsFile, "", { encoding: "utf8", mode: 0o600 });
+    logger.#resourceSampler?.start();
     return logger;
   }
 
@@ -150,6 +163,7 @@ export class SessionLogger {
       });
     }
     this.#turnSequence += 1;
+    this.#resourceSampler?.setTurnId(turn.id);
     return turn;
   }
 
@@ -192,6 +206,7 @@ export class SessionLogger {
     await appendFile(this.transcriptFile, transcript, "utf8");
     await appendFile(this.metricsFile, `${JSON.stringify(metrics)}\n`, "utf8");
     this.#lastMetrics = metrics;
+    this.#resourceSampler?.setTurnId(undefined);
   }
 
   async failTurn(turn: SessionTurn, error: unknown): Promise<void> {
@@ -204,6 +219,7 @@ export class SessionLogger {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+    this.#resourceSampler?.setTurnId(undefined);
   }
 
   async notePromptReload(prompt: SystemPrompt): Promise<void> {
@@ -222,6 +238,7 @@ export class SessionLogger {
       return;
     }
     this.#closed = true;
+    await this.#resourceSampler?.stop();
     if (this.#store !== undefined && this.#sessionId !== undefined) {
       try {
         this.#store.finishSession(
