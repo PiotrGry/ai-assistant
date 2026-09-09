@@ -21,10 +21,20 @@ async function main(): Promise<void> {
   });
 
   try {
-    const { waitUntilExit } = render(<App agent={agent} events={events} />, {
+    const instance = render(<App agent={agent} events={events} />, {
       exitOnCtrlC: false,
     });
-    await waitUntilExit();
+    const onResize = (): void => {
+      // tmux can resize before Ink has rendered the new React layout. Clear
+      // the old frame so log-update never combines two different dimensions.
+      instance.clear();
+    };
+    process.stdout.on("resize", onResize);
+    try {
+      await instance.waitUntilExit();
+    } finally {
+      process.stdout.off("resize", onResize);
+    }
   } finally {
     await agent.close();
   }

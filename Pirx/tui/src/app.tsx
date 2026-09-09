@@ -227,8 +227,6 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
   return (
     <Box
       flexDirection="column"
-      width={layout.columns}
-      height={layout.rows}
       paddingX={1}
       overflow="hidden"
     >
@@ -250,7 +248,6 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
         <Box
           flexDirection="column"
           width={layout.contentWidth}
-          height={Math.max(3, layout.rows - (layout.tiny ? 3 : 5))}
           overflow="hidden"
           borderStyle="round"
           borderColor="magenta"
