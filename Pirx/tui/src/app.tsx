@@ -7,6 +7,7 @@ import { Composer } from "./composer.js";
 import type { TuiEvent } from "./events.js";
 import { TuiEventBus } from "./events.js";
 import { isExitCommand } from "./input-state.js";
+import { calculateTuiLayout } from "./layout.js";
 
 type ChatItem =
   | { readonly kind: "user" | "assistant"; readonly content: string }
@@ -63,6 +64,10 @@ function renderItem(item: ChatItem, index: number): React.JSX.Element {
 export function App({ agent, events }: AppProps): React.JSX.Element {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const [terminalSize, setTerminalSize] = useState({
+    rows: stdout.rows ?? 24,
+    columns: stdout.columns ?? 80,
+  });
   const [history, setHistory] = useState<ChatItem[]>([]);
   const [clearToken, setClearToken] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -73,6 +78,21 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
   const [modelIndex, setModelIndex] = useState(0);
   const [modelLoading, setModelLoading] = useState(false);
   const [modelError, setModelError] = useState<string | undefined>();
+
+  useEffect(() => {
+    const updateTerminalSize = (): void => {
+      setTerminalSize({
+        rows: stdout.rows ?? 24,
+        columns: stdout.columns ?? 80,
+      });
+    };
+
+    updateTerminalSize();
+    stdout.on("resize", updateTerminalSize);
+    return () => {
+      stdout.off("resize", updateTerminalSize);
+    };
+  }, [stdout]);
 
   useEffect(() => events.subscribe((event: TuiEvent) => {
     if (event.type === "tool-started") {
@@ -186,8 +206,13 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
     }).finally(() => setBusy(false));
   };
 
-  const rows = stdout.rows ?? 24;
-  const visibleItems = history.slice(-Math.max(4, rows - 9));
+  const layout = calculateTuiLayout(terminalSize.rows, terminalSize.columns);
+  const visibleItems = history.slice(-layout.historyItems);
+  const modelStart = Math.min(
+    Math.max(0, modelIndex - layout.modelItems + 1),
+    Math.max(0, models.length - layout.modelItems),
+  );
+  const visibleModels = models.slice(modelStart, modelStart + layout.modelItems);
   const context = agent.lastContextTokens === undefined
     ? "prompt ctx —"
     : `prompt ctx ${agent.lastContextTokens}/${agent.contextSize}`;
@@ -198,36 +223,66 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
       : `${lastMetrics.generation_tokens_per_second.toFixed(1)} tok/s`;
 
   return (
-    <Box flexDirection="column" height={Math.max(10, rows)} paddingX={1}>
-      <Box borderStyle="round" borderColor="cyan" paddingX={1}>
+    <Box
+      flexDirection="column"
+      width={layout.columns}
+      height={layout.rows}
+      paddingX={1}
+      overflow="hidden"
+    >
+      <Box width={layout.contentWidth} borderStyle="round" borderColor="cyan" paddingX={1}>
         <Text bold color="cyan">Pirx</Text><Text color="gray"> · local chat</Text>
       </Box>
 
-      <Box flexDirection="column" flexGrow={1} overflow="hidden" paddingY={1}>
+      <Box flexDirection="column" width={layout.contentWidth} flexGrow={1} overflow="hidden" paddingY={1}>
         {visibleItems.length === 0 ? <Text color="gray">Ask Pirx something. Ctrl+O switches the model.</Text> : null}
         {visibleItems.map(renderItem)}
         {busy ? <Text color="gray">Pirx is thinking…</Text> : null}
       </Box>
 
       {selectorOpen ? (
-        <Box flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}>
+        <Box
+          flexDirection="column"
+          width={layout.contentWidth}
+          height={Math.max(5, layout.rows - 5)}
+          overflow="hidden"
+          borderStyle="round"
+          borderColor="magenta"
+          paddingX={1}
+        >
           <Text bold color="magenta">Select model {modelLoading ? "(loading…)" : ""}</Text>
           {modelError ? <Text color="red">{modelError}</Text> : null}
           {models.length === 0 && !modelLoading && !modelError ? <Text color="gray">No installed Ollama models found.</Text> : null}
-          {models.map((model, index) => (
+          {visibleModels.map((model, offset) => {
+            const index = modelStart + offset;
+            return (
             <Text key={model} {...(index === modelIndex ? { color: "cyan" } : {})}>
               {index === modelIndex ? "› " : "  "}{model}{model === agent.model ? " · current" : ""}
             </Text>
-          ))}
+            );
+          })}
+          {models.length > visibleModels.length ? <Text color="gray">… {models.length - visibleModels.length} more</Text> : null}
           <Text color="gray">↑/↓ select · Enter apply · Esc close</Text>
         </Box>
       ) : (
-        <Composer clearToken={clearToken} disabled={busy} onSubmit={submit} />
+        <Composer
+          clearToken={clearToken}
+          disabled={busy}
+          onSubmit={submit}
+          width={layout.contentWidth}
+        />
       )}
 
-      <Box justifyContent="space-between" paddingTop={1}>
-        <Text color={notice ? "yellow" : "gray"}>{notice ?? (busy ? "working…" : "Enter send · Shift+Enter newline · Ctrl+O models")}</Text>
-        <Text color="gray">{agent.model} | MCP {agent.mcpAvailable ? "●" : "○"} | {context} | {speed}</Text>
+      <Box
+        flexDirection={layout.compact ? "column" : "row"}
+        width={layout.contentWidth}
+        justifyContent={layout.compact ? undefined : "space-between"}
+        paddingTop={1}
+      >
+        <Text wrap="truncate-end" color={notice ? "yellow" : "gray"}>
+          {notice ?? (busy ? "working…" : "Enter send · Shift+Enter newline · Ctrl+O models")}
+        </Text>
+        <Text wrap="truncate-end" color="gray">{agent.model} | MCP {agent.mcpAvailable ? "●" : "○"} | {context} | {speed}</Text>
       </Box>
     </Box>
   );

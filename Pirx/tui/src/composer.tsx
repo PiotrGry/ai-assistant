@@ -7,6 +7,7 @@ interface ComposerProps {
   readonly clearToken: number;
   readonly disabled: boolean;
   readonly onSubmit: (value: string) => void;
+  readonly width: number;
 }
 
 function cursorPosition(value: string, cursor: number): { line: number; column: number } {
@@ -14,7 +15,7 @@ function cursorPosition(value: string, cursor: number): { line: number; column: 
   return { line: lines.length - 1, column: lines.at(-1)?.length ?? 0 };
 }
 
-export function Composer({ clearToken, disabled, onSubmit }: ComposerProps): React.JSX.Element {
+export function Composer({ clearToken, disabled, onSubmit, width }: ComposerProps): React.JSX.Element {
   const [state, setState] = useState<ComposerState>({ value: "", cursor: 0 });
   const [lastClearToken, setLastClearToken] = useState(clearToken);
 
@@ -66,7 +67,14 @@ export function Composer({ clearToken, disabled, onSubmit }: ComposerProps): Rea
   const lines = state.value.split("\n");
 
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor={disabled ? "gray" : "cyan"} paddingX={1}>
+    <Box
+      flexDirection="column"
+      width={width}
+      borderStyle="single"
+      borderColor={disabled ? "gray" : "cyan"}
+      paddingX={1}
+      overflow="hidden"
+    >
       {state.value.length === 0 ? <Text color="gray">› type a message…</Text> : lines.map((line, index) => {
         const isCursorLine = index === position.line;
         const cursorColumn = isCursorLine ? position.column : -1;
@@ -76,7 +84,7 @@ export function Composer({ clearToken, disabled, onSubmit }: ComposerProps): Rea
           : <Text>{line}</Text>;
 
         return (
-          <Text key={index}>
+          <Text key={index} wrap="wrap">
             {index === 0 ? <Text color="cyan">› </Text> : <Text>  </Text>}
             {rendered}
           </Text>
