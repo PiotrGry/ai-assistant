@@ -70,14 +70,20 @@ function isConnectionFailure(error: unknown): boolean {
 export class PirxMcpClient {
   readonly #serverEntry: string;
   readonly #toolTimeoutMs: number;
+  readonly #maxToolResultCharacters: number;
 
   #client: Client | undefined;
   #tools: ListedMcpTool[] = [];
   #unavailableReason: string | undefined;
 
-  constructor(serverEntry: string, toolTimeoutMs: number) {
+  constructor(
+    serverEntry: string,
+    toolTimeoutMs: number,
+    maxToolResultCharacters = 12_000,
+  ) {
     this.#serverEntry = serverEntry;
     this.#toolTimeoutMs = toolTimeoutMs;
+    this.#maxToolResultCharacters = maxToolResultCharacters;
   }
 
   get toolNames(): readonly string[] {
@@ -182,7 +188,7 @@ export class PirxMcpClient {
       );
 
       return {
-        text: toolResultToText(result),
+        text: toolResultToText(result, this.#maxToolResultCharacters),
         isError: result.isError === true,
         serverUnavailable: false,
       };

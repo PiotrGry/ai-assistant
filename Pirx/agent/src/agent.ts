@@ -340,6 +340,7 @@ export class PirxAgent {
     this.#mcp = new PirxMcpClient(
       config.mcpServerEntry,
       config.toolTimeoutMs,
+      config.maxToolResultCharacters,
     );
     this.#messages = [{ role: "system", content: prompt.content }];
     this.#currentModel = config.model;

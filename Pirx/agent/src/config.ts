@@ -14,6 +14,7 @@ export interface AgentConfig {
   readonly temperature: number;
   readonly maxOutputTokens?: number;
   readonly contextSafetyMarginTokens?: number;
+  readonly maxToolResultCharacters?: number;
   readonly timeZone: string;
   readonly promptFile: string;
   readonly logDir: string;
@@ -116,6 +117,11 @@ export function loadConfig(
     contextSafetyMarginTokens: positiveInteger(
       "PIRX_CONTEXT_SAFETY_MARGIN_TOKENS",
       environment.PIRX_CONTEXT_SAFETY_MARGIN_TOKENS ?? "512",
+    ),
+
+    maxToolResultCharacters: positiveInteger(
+      "PIRX_MAX_TOOL_RESULT_CHARACTERS",
+      environment.PIRX_MAX_TOOL_RESULT_CHARACTERS ?? "12000",
     ),
 
     timeZone: configuredTimeZone(environment),
