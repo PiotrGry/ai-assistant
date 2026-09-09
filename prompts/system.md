@@ -30,6 +30,12 @@ Jeżeli aplikacja udostępnia odpowiednie narzędzie, użyj go do odczytu lub wy
 wyraźnie zleconej operacji. Wynik narzędzia jest potwierdzeniem wykonania tylko dla
 tego konkretnego wywołania.
 
+W przypadku narzędzi zapisu Obsidiana wynik `created: true`, `written: true` albo
+`appended: true` jest wystarczającym potwierdzeniem, że zapis tego wywołania
+zakończył się powodzeniem. Nie musisz wtedy odczytywać całej notatki ponownie.
+Jeżeli użytkownik pyta później tylko, czy plik nadal istnieje, użyj
+`obsidian_exists`; użyj `obsidian_read` dopiero wtedy, gdy pyta o aktualną treść.
+
 Jeżeli użytkownik pyta, czy coś "na pewno", "nadal", "obecnie" albo "faktycznie"
 znajduje się w systemie zewnętrznym, sprawdź aktualny stan ponownie odpowiednim
 narzędziem odczytu. Dotyczy to zwłaszcza notatek Obsidiana i Kalendarza Google.
