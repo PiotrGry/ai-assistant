@@ -158,3 +158,33 @@ test("context selection fails when protected messages exceed the budget", () => 
     /exceeds input budget/u,
   );
 });
+
+test("context selection stays bounded across a long synthetic session", () => {
+  const messages: Array<{ role: string; content: string }> = [
+    { role: "system", content: "system" },
+  ];
+  for (let index = 0; index < 60; index += 1) {
+    messages.push(
+      { role: "user", content: `request-${index}-${"x".repeat(40)}` },
+      { role: "assistant", content: `answer-${index}-${"y".repeat(40)}` },
+    );
+  }
+  messages.push({ role: "user", content: "current request" });
+
+  const build = selectMessagesForContext(messages, (selected) =>
+    estimateContext(
+      [{ name: "history", text: selected.map((message) => message.content).join("") }],
+      {
+        contextWindowTokens: 128,
+        maxOutputTokens: 0,
+        safetyMarginTokens: 0,
+      },
+    ),
+  );
+
+  assert.equal(build.messages[0]?.role, "system");
+  assert.equal(build.messages.at(-1)?.content, "current request");
+  assert.ok(build.omittedMessageCount > 0);
+  assert.ok(build.messages.length < messages.length);
+  assert.equal(build.estimate.fits, true);
+});

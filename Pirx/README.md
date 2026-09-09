@@ -48,7 +48,35 @@ Agent domyślnie używa modelu `hf.co/google/gemma-4-12B-it-qat-q4_0-gguf` i Oll
 - `OLLAMA_KEEP_ALIVE`,
 - `OLLAMA_BASE_URL`,
 - `OLLAMA_TEMPERATURE`,
+- `OLLAMA_MAX_OUTPUT_TOKENS`,
 - `ADA_PROMPT_FILE`.
+
+Context and storage controls:
+
+- `PIRX_CONTEXT_SAFETY_MARGIN_TOKENS` — reserved input margin (default `512`),
+- `PIRX_MAX_TOOL_RESULT_CHARACTERS` — deterministic MCP result limit (default `12000`),
+- `PIRX_STORAGE_FILE` — SQLite path (default `$XDG_DATA_HOME/pirx/pirx.sqlite` or `~/.local/share/pirx/pirx.sqlite`),
+- `PIRX_STORAGE_MODE` — `redacted` (default), `metrics_only`, or `full_local`,
+- `PIRX_RESOURCE_SAMPLE_INTERVAL_MS` — resource sampling interval (default `1000`).
+
+The SQLite store uses WAL and `synchronous=FULL`. It records sessions, turns,
+operations, context-build references, ordered messages, tool-result artifacts,
+action transitions, and resource samples. `redacted` stores hashes and sizes
+instead of message/artifact bodies; `metrics_only` skips message and artifact
+archival; `full_local` keeps the local bodies. The existing Markdown transcript
+and JSONL metrics files remain local files outside Git.
+
+The library exposes `backupDatabase`, `restoreDatabase`,
+`exportDatabaseJsonl`, `retentionDryRun`, and `pruneResourceSamples` for
+maintenance. Retention only targets old resource samples; action confirmations,
+turns, messages, and artifacts are not deleted by that operation. Backups use
+SQLite's online backup API and are integrity-checked before restore.
+
+The `/stats` command reports full turn duration, backend prefill/decode values,
+the estimated context budget, largest context sections, and observed resource
+peaks. GPU values are sampled observations, not guaranteed maxima. Missing
+backend fields or unavailable GPU data are reported as unavailable rather than
+being converted to zero or inferred from the machine name.
 
 Bezpieczniki pętli narzędziowej są konfigurowalne przez:
 
