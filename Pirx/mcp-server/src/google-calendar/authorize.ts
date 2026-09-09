@@ -64,7 +64,44 @@ export async function openBrowser(
 }
 
 export interface GoogleAuthorizationOptions {
-  readonly openUrl?: (url: string) => Promise<void>;
+  readonly openUrl?: ((url: string) => Promise<void>) | false;
+  readonly onRedirectUri?: (redirectUri: string) => void;
+  readonly readCallbackUrl?: () => Promise<string | undefined>;
+}
+
+export function parseAuthorizationCallback(
+  rawUrl: string,
+  expectedState: string,
+): string {
+  let url: URL;
+  try {
+    url = new URL(rawUrl.trim());
+  } catch (error: unknown) {
+    throw new CalendarError("authentication", "The pasted Google OAuth callback is not a valid URL.", {
+      cause: error,
+    });
+  }
+  if (url.pathname !== "/oauth2/callback") {
+    throw new CalendarError(
+      "authentication",
+      "The pasted URL is not a Pirx Google OAuth callback URL.",
+    );
+  }
+  if (url.searchParams.get("state") !== expectedState) {
+    throw new CalendarError("authentication", "Google OAuth state did not match.");
+  }
+  const oauthError = url.searchParams.get("error");
+  if (oauthError !== null) {
+    throw new CalendarError(
+      "authentication",
+      `Google authorization was not completed (${oauthError}).`,
+    );
+  }
+  const code = url.searchParams.get("code");
+  if (code === null || code.length === 0) {
+    throw new CalendarError("authentication", "Google OAuth callback had no code.");
+  }
+  return code;
 }
 
 export async function authorizeGoogleCalendar(
@@ -88,21 +125,13 @@ export async function authorizeGoogleCalendar(
         response.end("Not found");
         return;
       }
-      const state = url.searchParams.get("state");
-      const code = url.searchParams.get("code");
-      const oauthError = url.searchParams.get("error");
-      if (expectedState === undefined || state !== expectedState) {
-        throw new CalendarError("authentication", "Google OAuth state did not match.");
+      if (expectedState === undefined) {
+        throw new CalendarError("authentication", "Google OAuth callback arrived too early.");
       }
-      if (oauthError !== null) {
-        throw new CalendarError(
-          "authentication",
-          `Google authorization was not completed (${oauthError}).`,
-        );
-      }
-      if (code === null || code.length === 0) {
-        throw new CalendarError("authentication", "Google OAuth callback had no code.");
-      }
+      const code = parseAuthorizationCallback(
+        new URL(request.url ?? "/", "http://127.0.0.1").toString(),
+        expectedState,
+      );
 
       response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
       response.end("Google Calendar authorization completed. You can close this tab.");
@@ -120,18 +149,22 @@ export async function authorizeGoogleCalendar(
   try {
     const port = await listenLoopback(server);
     const redirectUri = `http://127.0.0.1:${port}/oauth2/callback`;
+    options.onRedirectUri?.(redirectUri);
     const provider = new GoogleOAuthTokenProvider(config);
     const authorization = await provider.createAuthorizationRequest(redirectUri);
-    expectedState = authorization.state;
+    const authorizationState = authorization.state;
+    expectedState = authorizationState;
 
     writeMessage("Open this URL in a browser to authorize Google Calendar:");
     writeMessage(authorization.url);
-    try {
-      await (options.openUrl ?? openBrowser)(authorization.url);
-      writeMessage("A browser window was opened. Complete Google authorization there.");
-    } catch (error: unknown) {
-      const detail = error instanceof Error ? error.message : String(error);
-      writeMessage(`Could not open a browser automatically (${detail}). Use the URL above.`);
+    if (options.openUrl !== false) {
+      try {
+        await (options.openUrl ?? openBrowser)(authorization.url);
+        writeMessage("A browser window was opened. Complete Google authorization there.");
+      } catch (error: unknown) {
+        const detail = error instanceof Error ? error.message : String(error);
+        writeMessage(`Could not open a browser automatically (${detail}). Use the URL above.`);
+      }
     }
 
     const timeout = new Promise<never>((_, reject) => {
@@ -144,7 +177,19 @@ export async function authorizeGoogleCalendar(
         );
       }, config.authorizationTimeoutMs);
     });
-    const code = await Promise.race([codePromise, timeout]);
+    const callbackUrlCode = options.readCallbackUrl === undefined
+      ? undefined
+      : options.readCallbackUrl().then((value) => {
+          if (value === undefined || value.trim().length === 0) {
+            throw new CalendarError("authentication", "No Google OAuth callback URL was provided.");
+          }
+          return parseAuthorizationCallback(value, authorizationState);
+        });
+    const code = await Promise.race([
+      codePromise,
+      timeout,
+      ...(callbackUrlCode === undefined ? [] : [callbackUrlCode]),
+    ]);
     await provider.exchangeAuthorizationCode(
       code,
       authorization.codeVerifier,
