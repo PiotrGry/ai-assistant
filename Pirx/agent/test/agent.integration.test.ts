@@ -78,6 +78,7 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
 
     sendJson(response, {
       ...common,
+      eval_count: undefined,
       message: {
         role: "assistant",
         content: "Narzędzie odpowiedziało: Hello, Piotr!",
@@ -165,6 +166,8 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
   assert.equal(turn.metrics.model_calls, 2);
   assert.equal(turn.metrics.tool_calls, 1);
   assert.equal(turn.metrics.input_tokens, 20);
+  assert.equal(turn.metrics.output_tokens, null);
+  assert.equal(turn.metrics.generation_tokens_per_second, null);
   assert.equal(turn.metrics.time_zone, "Europe/Warsaw");
   assert.equal(requests.length, 2);
   assert.equal(contextBuilds.length, 2);

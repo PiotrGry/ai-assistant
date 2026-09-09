@@ -30,12 +30,12 @@ export interface TurnMetrics {
   readonly system_prompt_sha256: string;
   readonly prompt: string;
   readonly response: string;
-  readonly input_tokens: number;
-  readonly output_tokens: number;
-  readonly total_seconds: number;
-  readonly load_seconds: number;
-  readonly prompt_tokens_per_second: number;
-  readonly generation_tokens_per_second: number;
+  readonly input_tokens: number | null;
+  readonly output_tokens: number | null;
+  readonly total_seconds: number | null;
+  readonly load_seconds: number | null;
+  readonly prompt_tokens_per_second: number | null;
+  readonly generation_tokens_per_second: number | null;
   readonly done_reason: string | null;
   readonly model_calls: number;
   readonly tool_calls: number;
@@ -72,12 +72,12 @@ export interface AgentDependencies {
 }
 
 interface Totals {
-  totalDuration: number;
-  loadDuration: number;
-  promptEvalCount: number;
-  promptEvalDuration: number;
-  evalCount: number;
-  evalDuration: number;
+  totalDuration: number | null;
+  loadDuration: number | null;
+  promptEvalCount: number | null;
+  promptEvalDuration: number | null;
+  evalCount: number | null;
+  evalDuration: number | null;
   modelCalls: number;
   toolCalls: number;
   doneReason: string | null;
@@ -86,14 +86,39 @@ interface Totals {
 }
 
 function addMetrics(totals: Totals, response: ResponseWithMetrics): void {
-  totals.totalDuration += response.total_duration ?? 0;
-  totals.loadDuration += response.load_duration ?? 0;
-  totals.promptEvalCount += response.prompt_eval_count ?? 0;
-  totals.promptEvalDuration += response.prompt_eval_duration ?? 0;
-  totals.evalCount += response.eval_count ?? 0;
-  totals.evalDuration += response.eval_duration ?? 0;
+  totals.totalDuration = addBackendMetric(
+    totals.totalDuration,
+    response.total_duration,
+  );
+  totals.loadDuration = addBackendMetric(
+    totals.loadDuration,
+    response.load_duration,
+  );
+  totals.promptEvalCount = addBackendMetric(
+    totals.promptEvalCount,
+    response.prompt_eval_count,
+  );
+  totals.promptEvalDuration = addBackendMetric(
+    totals.promptEvalDuration,
+    response.prompt_eval_duration,
+  );
+  totals.evalCount = addBackendMetric(totals.evalCount, response.eval_count);
+  totals.evalDuration = addBackendMetric(
+    totals.evalDuration,
+    response.eval_duration,
+  );
   totals.modelCalls += 1;
   totals.doneReason = response.done_reason ?? null;
+}
+
+function addBackendMetric(
+  current: number | null,
+  value: number | undefined,
+): number | null {
+  if (current === null || value === undefined) {
+    return null;
+  }
+  return current + value;
 }
 
 function messageText(message: Message): string {
@@ -186,8 +211,18 @@ function contextSections(
   ];
 }
 
-function tokensPerSecond(tokens: number, durationNanoseconds: number): number {
-  return durationNanoseconds > 0 ? tokens / (durationNanoseconds / 1_000_000_000) : 0;
+function tokensPerSecond(
+  tokens: number | null,
+  durationNanoseconds: number | null,
+): number | null {
+  if (tokens === null || durationNanoseconds === null || durationNanoseconds <= 0) {
+    return null;
+  }
+  return tokens / (durationNanoseconds / 1_000_000_000);
+}
+
+function secondsFromNanoseconds(value: number | null): number | null {
+  return value === null ? null : value / 1_000_000_000;
 }
 
 function normalizeArguments(value: unknown): Record<string, unknown> {
@@ -706,8 +741,8 @@ export class PirxAgent {
           response: finalContent,
           input_tokens: totals.promptEvalCount,
           output_tokens: totals.evalCount,
-          total_seconds: totals.totalDuration / 1_000_000_000,
-          load_seconds: totals.loadDuration / 1_000_000_000,
+          total_seconds: secondsFromNanoseconds(totals.totalDuration),
+          load_seconds: secondsFromNanoseconds(totals.loadDuration),
           prompt_tokens_per_second: tokensPerSecond(
             totals.promptEvalCount,
             totals.promptEvalDuration,
