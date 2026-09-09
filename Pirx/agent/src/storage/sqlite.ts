@@ -257,6 +257,24 @@ export class SqliteStore {
       );
   }
 
+  finishSession(
+    id: string,
+    endedAt: string,
+    status: "completed" | "failed",
+  ): void {
+    this.#assertOpen();
+    const result = this.#database
+      .prepare(
+        `UPDATE sessions
+         SET ended_at = ?, status = ?
+         WHERE id = ? AND status = 'active'`,
+      )
+      .run(endedAt, status, id);
+    if (result.changes !== 1) {
+      throw new Error(`Active SQLite session not found: ${id}`);
+    }
+  }
+
   count(table: "run_environments" | "sessions" | "turns" | "operations"): number {
     this.#assertOpen();
     const row = this.#database

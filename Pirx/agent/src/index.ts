@@ -136,6 +136,7 @@ async function main(): Promise<void> {
     }
   } finally {
     readline.close();
+    await logger.close();
     await agent.close();
     console.log("\nSesja zakończona.");
     console.log(`Rozmowa: ${logger.transcriptFile}`);

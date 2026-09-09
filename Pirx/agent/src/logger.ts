@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { appendFile, chmod, mkdir, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import type { AgentConfig, SystemPrompt } from "./config.js";
 import type { TurnMetrics } from "./agent.js";
+import { SqliteStore } from "./storage/sqlite.js";
 
 function sessionId(date: Date): string {
   return date.toISOString().replaceAll(/[-:]/gu, "").replace(/\.\d{3}Z$/u, "Z");
@@ -11,21 +13,78 @@ function sessionId(date: Date): string {
 export class SessionLogger {
   readonly transcriptFile: string;
   readonly metricsFile: string;
+  readonly storageFile: string | undefined;
+  readonly #store: SqliteStore | undefined;
+  readonly #sessionId: string | undefined;
   #lastMetrics: TurnMetrics | undefined;
+  #turnSequence = 0;
+  #closed = false;
 
-  private constructor(transcriptFile: string, metricsFile: string) {
+  private constructor(
+    transcriptFile: string,
+    metricsFile: string,
+    store: SqliteStore | undefined,
+    sessionId: string | undefined,
+  ) {
     this.transcriptFile = transcriptFile;
     this.metricsFile = metricsFile;
+    this.storageFile = store?.filename;
+    this.#store = store;
+    this.#sessionId = sessionId;
   }
 
   static async create(config: AgentConfig, prompt: SystemPrompt): Promise<SessionLogger> {
     await mkdir(config.logDir, { recursive: true, mode: 0o700 });
     await chmod(config.logDir, 0o700).catch(() => undefined);
 
-    const id = sessionId(new Date());
+    const startedAt = new Date().toISOString();
+    const id = sessionId(new Date(startedAt));
+    let store: SqliteStore | undefined;
+    let databaseSessionId: string | undefined;
+
+    if (config.storagePath !== undefined) {
+      await mkdir(dirname(config.storagePath), { recursive: true, mode: 0o700 });
+      await chmod(dirname(config.storagePath), 0o700).catch(() => undefined);
+      store = SqliteStore.open({ filename: config.storagePath });
+      databaseSessionId = randomUUID();
+      try {
+        const environmentId = randomUUID();
+        store.insertRunEnvironment({
+          id: environmentId,
+          createdAt: startedAt,
+          payload: {
+            schema_version: 1,
+            node_version: process.version,
+            model: config.model,
+            base_url: config.baseUrl,
+            num_ctx: config.numCtx,
+            keep_alive: config.keepAlive,
+            temperature: config.temperature,
+            max_output_tokens: config.maxOutputTokens ?? null,
+            context_safety_margin_tokens:
+              config.contextSafetyMarginTokens ?? null,
+            time_zone: config.timeZone,
+            prompt_file: config.promptFile,
+            prompt_sha256: prompt.sha256,
+          },
+        });
+        store.insertSession({
+          id: databaseSessionId,
+          environmentId,
+          startedAt,
+          status: "active",
+        });
+      } catch (error) {
+        store.close();
+        throw error;
+      }
+    }
+
     const logger = new SessionLogger(
       resolve(config.logDir, `session_${id}.md`),
       resolve(config.logDir, `session_${id}.jsonl`),
+      store,
+      databaseSessionId,
     );
     const header = [
       "# Rozmowa z Pirxem",
@@ -34,7 +93,7 @@ export class SessionLogger {
       `- Kontekst: \`${config.numCtx}\``,
       `- Strefa czasowa: \`${config.timeZone}\``,
       `- System prompt: \`${config.promptFile}\` (sha256: \`${prompt.sha256}\`)`,
-      `- Start: \`${new Date().toISOString()}\``,
+      `- Start: \`${startedAt}\``,
       "",
     ].join("\n");
 
@@ -48,19 +107,57 @@ export class SessionLogger {
   }
 
   async saveTurn(prompt: string, response: string, metrics: TurnMetrics): Promise<void> {
+    if (this.#closed) {
+      throw new Error("Session logger is closed.");
+    }
     const transcript = `## Ty\n\n${prompt}\n\n## Pirx\n\n${response}\n\n`;
-    await Promise.all([
-      appendFile(this.transcriptFile, transcript, "utf8"),
-      appendFile(this.metricsFile, `${JSON.stringify(metrics)}\n`, "utf8"),
-    ]);
+    if (this.#store !== undefined && this.#sessionId !== undefined) {
+      this.#store.insertTurn({
+        id: randomUUID(),
+        sessionId: this.#sessionId,
+        sequence: this.#turnSequence,
+        startedAt: metrics.timestamp,
+        status: "completed",
+        userPrompt: prompt,
+        payload: {
+          schema_version: 1,
+          response,
+          metrics,
+        },
+      });
+    }
+    this.#turnSequence += 1;
+    await appendFile(this.transcriptFile, transcript, "utf8");
+    await appendFile(this.metricsFile, `${JSON.stringify(metrics)}\n`, "utf8");
     this.#lastMetrics = metrics;
   }
 
   async notePromptReload(prompt: SystemPrompt): Promise<void> {
+    if (this.#closed) {
+      throw new Error("Session logger is closed.");
+    }
     await appendFile(
       this.transcriptFile,
       `> System prompt wczytany ponownie (sha256: \`${prompt.sha256}\`). Historia wyczyszczona.\n\n`,
       "utf8",
     );
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) {
+      return;
+    }
+    this.#closed = true;
+    if (this.#store !== undefined && this.#sessionId !== undefined) {
+      try {
+        this.#store.finishSession(
+          this.#sessionId,
+          new Date().toISOString(),
+          "completed",
+        );
+      } finally {
+        this.#store.close();
+      }
+    }
   }
 }

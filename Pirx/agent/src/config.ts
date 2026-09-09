@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,6 +15,7 @@ export interface AgentConfig {
   readonly timeZone: string;
   readonly promptFile: string;
   readonly logDir: string;
+  readonly storagePath?: string;
   readonly mcpServerEntry: string;
 
   readonly maxToolIterations: number;
@@ -110,6 +112,18 @@ export function loadConfig(
       resolve(repositoryDirectory, "prompts", "system.md"),
 
     logDir: resolve(repositoryDirectory, "logs"),
+
+    storagePath: resolve(
+      environment.PIRX_STORAGE_FILE?.trim() ||
+        resolve(
+          environment.XDG_DATA_HOME?.trim() ||
+            resolve(homedir(), ".local", "share"),
+          "pirx",
+        ),
+      environment.PIRX_STORAGE_FILE?.trim()
+        ? "."
+        : "pirx.sqlite",
+    ),
 
     mcpServerEntry: resolve(
       pirxDirectory,
