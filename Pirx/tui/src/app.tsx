@@ -6,19 +6,9 @@ import type { ChatTurn, PirxAgent, TurnMetrics } from "@pirx/agent";
 import { Composer } from "./composer.js";
 import type { TuiEvent } from "./events.js";
 import { TuiEventBus } from "./events.js";
+import { buildHistoryLines, type ChatItem } from "./history.js";
 import { isExitCommand } from "./input-state.js";
 import { calculateTuiLayout } from "./layout.js";
-
-type ChatItem =
-  | { readonly kind: "user" | "assistant"; readonly content: string }
-  | { readonly kind: "error"; readonly content: string }
-  | {
-      readonly kind: "tool";
-      readonly name: string;
-      readonly status: "running" | "done" | "error";
-      readonly durationMs?: number;
-      readonly detail?: string;
-    };
 
 interface AppProps {
   readonly agent: PirxAgent;
@@ -32,33 +22,6 @@ function errorMessage(error: unknown): string {
 function compactDetail(value: string): string {
   const firstLine = value.split("\n", 1)[0] ?? value;
   return firstLine.length > 140 ? `${firstLine.slice(0, 137)}…` : firstLine;
-}
-
-function toolStatus(item: Extract<ChatItem, { kind: "tool" }>): string {
-  if (item.status === "running") return "…";
-  const duration = item.durationMs === undefined ? "" : ` ${Math.round(item.durationMs)} ms`;
-  return item.status === "error" ? `✕${duration}` : `✓${duration}`;
-}
-
-function renderItem(item: ChatItem, index: number): React.JSX.Element {
-  if (item.kind === "tool") {
-    return (
-      <Text key={`${item.kind}-${item.name}-${index}`} color={item.status === "error" ? "red" : "yellow"}>
-        [{item.status === "error" ? "tool error" : "tool"}] {item.name} {toolStatus(item)}
-        {item.detail === undefined ? "" : ` — ${item.detail}`}
-      </Text>
-    );
-  }
-
-  const label = item.kind === "user" ? "You" : item.kind === "assistant" ? "Pirx" : "Pirx error";
-  return (
-    <Box key={`${item.kind}-${index}`} flexDirection="column" marginBottom={1}>
-      <Text bold color={item.kind === "error" ? "red" : item.kind === "user" ? "cyan" : "green"}>
-        {label}:
-      </Text>
-      {item.kind === "error" ? <Text color="red">{item.content}</Text> : <Text>{item.content}</Text>}
-    </Box>
-  );
 }
 
 export function App({ agent, events }: AppProps): React.JSX.Element {
@@ -81,11 +44,12 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
   const [historyScroll, setHistoryScroll] = useState(0);
 
   const layout = calculateTuiLayout(terminalSize.rows, terminalSize.columns);
-  const maxHistoryScroll = Math.max(0, history.length - layout.historyItems);
+  const historyLines = buildHistoryLines(history, layout.contentWidth);
+  const maxHistoryScroll = Math.max(0, historyLines.length - layout.historyRows);
   const effectiveHistoryScroll = Math.min(historyScroll, maxHistoryScroll);
-  const historyEnd = history.length - effectiveHistoryScroll;
-  const visibleItems = history.slice(
-    Math.max(0, historyEnd - layout.historyItems),
+  const historyEnd = historyLines.length - effectiveHistoryScroll;
+  const visibleHistoryLines = historyLines.slice(
+    Math.max(0, historyEnd - layout.historyRows),
     historyEnd,
   );
 
@@ -174,11 +138,19 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
     }
 
     if (key.pageUp) {
-      setHistoryScroll((current) => Math.min(maxHistoryScroll, current + layout.historyItems));
+      setHistoryScroll((current) => Math.min(maxHistoryScroll, current + layout.historyRows));
       return;
     }
     if (key.pageDown) {
-      setHistoryScroll((current) => Math.max(0, current - layout.historyItems));
+      setHistoryScroll((current) => Math.max(0, current - layout.historyRows));
+      return;
+    }
+    if (key.ctrl && key.upArrow) {
+      setHistoryScroll((current) => Math.min(maxHistoryScroll, current + 3));
+      return;
+    }
+    if (key.ctrl && key.downArrow) {
+      setHistoryScroll((current) => Math.max(0, current - 3));
       return;
     }
     if (selectorOpen) {
@@ -247,7 +219,7 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
     : lastMetrics.generation_tokens_per_second === null
       ? "—"
       : `${lastMetrics.generation_tokens_per_second.toFixed(1)} tok/s`;
-  const hint = notice ?? (busy ? "working…" : "Enter send · Shift+Enter newline · Ctrl+O models");
+  const hint = notice ?? (busy ? "working…" : "Enter send · PgUp/PgDn scroll · Ctrl+O models");
   const runtimeStatus = `${agent.model} | MCP ${agent.mcpAvailable ? "●" : "○"} | ${context} | ${speed}`;
 
   return (
@@ -276,8 +248,21 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
         overflow="hidden"
         paddingY={1}
       >
-        {visibleItems.length === 0 ? <Text color="gray">Ask Pirx something. Ctrl+O switches the model.</Text> : null}
-        {visibleItems.map(renderItem)}
+        {visibleHistoryLines.length === 0 ? <Text color="gray">Ask Pirx something. Ctrl+O switches the model.</Text> : null}
+        {visibleHistoryLines.map((line) => (
+          <Text
+            key={line.key}
+            {...(line.kind === "error"
+              ? { color: "red" }
+              : line.kind === "user"
+                ? { color: "cyan" }
+                : line.kind === "tool"
+                  ? { color: "yellow" }
+                  : {})}
+          >
+            {line.text}
+          </Text>
+        ))}
         {effectiveHistoryScroll > 0 ? <Text color="gray">↑ older messages · PageUp/PageDown scroll</Text> : null}
         {busy ? <Text color="gray">Pirx is thinking…</Text> : null}
       </Box>

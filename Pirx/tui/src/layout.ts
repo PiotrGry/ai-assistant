@@ -4,6 +4,7 @@ export interface TuiLayout {
   readonly contentWidth: number;
   readonly compact: boolean;
   readonly tiny: boolean;
+  readonly historyRows: number;
   readonly historyItems: number;
   readonly modelItems: number;
 }
@@ -25,6 +26,7 @@ export function calculateTuiLayout(
     contentWidth: Math.max(1, terminalColumns - 2),
     compact,
     tiny,
+    historyRows: tiny ? 1 : Math.max(1, terminalRows - (compact ? 9 : 8)),
     historyItems: tiny ? 1 : Math.max(2, terminalRows - (compact ? 8 : 9)),
     modelItems: tiny ? 1 : Math.max(1, terminalRows - 9),
   };

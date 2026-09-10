@@ -28,6 +28,7 @@ export function Composer({ clearToken, disabled, onSubmit, width }: ComposerProp
 
   useInput((input, key) => {
     if (disabled) return;
+    if (key.ctrl && (key.upArrow || key.downArrow)) return;
 
     // Ink 5 reports line-feed Enter as a non-alphanumeric key with an empty
     // input string. Normalize that form so Enter remains distinct from the
