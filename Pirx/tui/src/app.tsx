@@ -78,6 +78,16 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
   const [modelIndex, setModelIndex] = useState(0);
   const [modelLoading, setModelLoading] = useState(false);
   const [modelError, setModelError] = useState<string | undefined>();
+  const [historyScroll, setHistoryScroll] = useState(0);
+
+  const layout = calculateTuiLayout(terminalSize.rows, terminalSize.columns);
+  const maxHistoryScroll = Math.max(0, history.length - layout.historyItems);
+  const effectiveHistoryScroll = Math.min(historyScroll, maxHistoryScroll);
+  const historyEnd = history.length - effectiveHistoryScroll;
+  const visibleItems = history.slice(
+    Math.max(0, historyEnd - layout.historyItems),
+    historyEnd,
+  );
 
   useEffect(() => {
     const updateTerminalSize = (): void => {
@@ -93,6 +103,16 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
       stdout.off("resize", updateTerminalSize);
     };
   }, [stdout]);
+
+  useEffect(() => {
+    setHistoryScroll(0);
+  }, [history.length]);
+
+  useEffect(() => {
+    if (historyScroll > maxHistoryScroll) {
+      setHistoryScroll(maxHistoryScroll);
+    }
+  }, [historyScroll, maxHistoryScroll]);
 
   useEffect(() => events.subscribe((event: TuiEvent) => {
     if (event.type === "tool-started") {
@@ -153,6 +173,14 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
       return;
     }
 
+    if (key.pageUp) {
+      setHistoryScroll((current) => Math.min(maxHistoryScroll, current + layout.historyItems));
+      return;
+    }
+    if (key.pageDown) {
+      setHistoryScroll((current) => Math.max(0, current - layout.historyItems));
+      return;
+    }
     if (selectorOpen) {
       if (key.escape) {
         setSelectorOpen(false);
@@ -206,8 +234,6 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
     }).finally(() => setBusy(false));
   };
 
-  const layout = calculateTuiLayout(terminalSize.rows, terminalSize.columns);
-  const visibleItems = history.slice(-layout.historyItems);
   const modelStart = Math.min(
     Math.max(0, modelIndex - layout.modelItems + 1),
     Math.max(0, models.length - layout.modelItems),
@@ -227,6 +253,7 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
   return (
     <Box
       flexDirection="column"
+      height={layout.rows}
       paddingX={1}
       overflow="hidden"
     >
@@ -241,6 +268,7 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
       <Box flexDirection="column" width={layout.contentWidth} flexGrow={1} overflow="hidden" paddingY={1}>
         {visibleItems.length === 0 ? <Text color="gray">Ask Pirx something. Ctrl+O switches the model.</Text> : null}
         {visibleItems.map(renderItem)}
+        {effectiveHistoryScroll > 0 ? <Text color="gray">↑ older messages · PageUp/PageDown scroll</Text> : null}
         {busy ? <Text color="gray">Pirx is thinking…</Text> : null}
       </Box>
 
