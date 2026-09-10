@@ -101,6 +101,45 @@ test("GraphQL transport returns only data and never raw GraphQL errors", async (
   assert.deepEqual(result.outcome === "success" ? result.value : undefined, { repository: { name: "ai-assistant" } });
 });
 
+test("transport maps authorization, target, rate-limit, and server statuses explicitly", async () => {
+  const cases = [
+    [401, "authentication", "permanent_error"],
+    [403, "forbidden", "permanent_error"],
+    [404, "not_found", "permanent_error"],
+    [429, "rate_limited", "rate_limited"],
+    [503, "retryable", "retryable_error"],
+  ] as const;
+  for (const [status, code, outcome] of cases) {
+    const transport = new GitHubTransport(config, { fetch: async () => response({}, status) });
+    const result = await transport.restRead<unknown>({ method: "GET", path: "/status" }, { correlationId: `status-${status}` });
+    assert.equal(result.outcome, outcome);
+    assert.equal(errorCode(result), code);
+  }
+});
+
+test("GraphQL errors and malformed success bodies are sanitized", async () => {
+  const graphql = new GitHubTransport(config, {
+    fetch: async () => response({ errors: [{ message: "secret-token" }] }),
+  });
+  const graphqlResult = await graphql.graphqlRead<unknown>({ query: "query { viewer { login } }" }, { correlationId: "graphql-error" });
+  assert.equal(errorCode(graphqlResult), "graphql_error");
+  assert.doesNotMatch(JSON.stringify(graphqlResult), /secret-token/u);
+
+  const malformed = new GitHubTransport(config, { fetch: async () => new Response("not-json", { status: 200 }) });
+  const malformedResult = await malformed.restRead<unknown>({ method: "GET", path: "/malformed" }, { correlationId: "malformed" });
+  assert.equal(errorCode(malformedResult), "malformed_response");
+});
+
+test("transport parses Retry-After HTTP-date metadata", async () => {
+  const retryAt = new Date(Date.now() + 2_000).toUTCString();
+  const transport = new GitHubTransport(config, {
+    fetch: async () => response({}, 429, { "retry-after": retryAt }),
+  });
+  const result = await transport.restRead<unknown>({ method: "GET", path: "/date-rate" }, { correlationId: "date-rate" });
+  const delay = result.response?.rateLimit.retryAfterMs;
+  assert.ok(delay !== undefined && delay > 0 && delay <= 2_000);
+});
+
 test("transport normalizes rate limits and avoids leaking response bodies", async () => {
   const fetch: GitHubFetch = async () => response({ message: "secret-token should not escape" }, 429, {
     "retry-after": "2",
@@ -322,6 +361,75 @@ test("retry policy honors secondary delay, caps malformed metadata, and does not
   assert.equal(decision.reason, "max_attempts_exhausted");
   assert.equal(decision.attempts, 2);
   assert.deepEqual(sleeps, [10]);
+});
+
+test("retry policy uses Retry-After, caps jitter, and stops at total delay bounds", async () => {
+  const sleeps: number[] = [];
+  let attempts = 0;
+  const secondary = await executeWithGitHubRetry(
+    {
+      operation: "read",
+      correlationId: "retry-after",
+      execute: async () => {
+        attempts += 1;
+        return attempts === 1
+          ? { outcome: "rate_limited", correlationId: "retry-after", remoteOutcome: "not_accepted", error: { code: "rate_limited", message: "limited" }, response: { status: 429, rateLimit: { retryAfterMs: 25_000 } } } as const
+          : { outcome: "success", value: true, correlationId: "retry-after", remoteOutcome: "accepted" } as const;
+      },
+    },
+    { maxTotalDelayMs: 30_000, sleep: async (delay) => { sleeps.push(delay); } },
+  );
+  assert.equal(secondary.reason, "success");
+  assert.deepEqual(sleeps, [25_000]);
+
+  sleeps.length = 0;
+  const jitter = await executeWithGitHubRetry(
+    {
+      operation: "read",
+      correlationId: "jitter",
+      execute: async () => ({ outcome: "retryable_error", correlationId: "jitter", remoteOutcome: "not_accepted", error: { code: "retryable", message: "temporary" } } as const),
+    },
+    { maxAttempts: 2, maxTotalDelayMs: 2_000, baseDelayMs: 1_000, maxDelayMs: 1_200, jitterRatio: 1, random: () => 1, sleep: async (delay) => { sleeps.push(delay); } },
+  );
+  assert.equal(jitter.reason, "max_attempts_exhausted");
+  assert.deepEqual(sleeps, [1_200]);
+
+  sleeps.length = 0;
+  const bounded = await executeWithGitHubRetry(
+    {
+      operation: "read",
+      correlationId: "delay-bound",
+      execute: async () => ({ outcome: "rate_limited", correlationId: "delay-bound", remoteOutcome: "not_accepted", error: { code: "rate_limited", message: "limited" }, response: { status: 429, rateLimit: { retryAfterMs: 500 } } } as const),
+    },
+    { maxAttempts: 2, maxTotalDelayMs: 100, sleep: async (delay) => { sleeps.push(delay); } },
+  );
+  assert.equal(bounded.reason, "total_delay_bound_exhausted");
+  assert.deepEqual(sleeps, []);
+});
+
+test("retry policy does not retry permanent 4xx or repeated server failures beyond the bound", async () => {
+  let permanentAttempts = 0;
+  const permanent = await executeWithGitHubRetry(
+    {
+      operation: "read",
+      execute: async () => {
+        permanentAttempts += 1;
+        return { outcome: "permanent_error", correlationId: "permanent", remoteOutcome: "not_accepted", error: { code: "forbidden", message: "forbidden" } } as const;
+      },
+    },
+  );
+  assert.equal(permanent.reason, "non_retryable_outcome");
+  assert.equal(permanentAttempts, 1);
+
+  const repeated = await executeWithGitHubRetry(
+    {
+      operation: "read",
+      execute: async () => ({ outcome: "retryable_error", correlationId: "repeated", remoteOutcome: "not_accepted", error: { code: "retryable", message: "503" } } as const),
+    },
+    { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1, maxTotalDelayMs: 2, jitterRatio: 0, sleep: async () => undefined },
+  );
+  assert.equal(repeated.reason, "max_attempts_exhausted");
+  assert.equal(repeated.attempts, 3);
 });
 
 test("retry policy retries only safe writes and stops uncertain mutations", async () => {

@@ -120,11 +120,14 @@ function graphQlBody<T>(response: Response, text: string, correlationId: string,
   } catch {
     return failure("permanent_error", "malformed_response", "GitHub returned malformed GraphQL JSON.", correlationId, mutation ? "unknown" : "not_accepted", metadata(response));
   }
-  if (typeof body !== "object" || body === null || !("data" in body)) {
+  if (typeof body !== "object" || body === null) {
     return failure("permanent_error", "malformed_response", "GitHub returned an invalid GraphQL response.", correlationId, mutation ? "unknown" : "not_accepted", metadata(response));
   }
   if ("errors" in body && Array.isArray(body.errors) && body.errors.length > 0) {
     return failure("permanent_error", "graphql_error", "GitHub GraphQL returned an operation error.", correlationId, "not_accepted", metadata(response));
+  }
+  if (!("data" in body)) {
+    return failure("permanent_error", "malformed_response", "GitHub returned an invalid GraphQL response.", correlationId, mutation ? "unknown" : "not_accepted", metadata(response));
   }
   return responseResult(response, (body as { data: T }).data, correlationId, mutation);
 }
