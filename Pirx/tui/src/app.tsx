@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Box, Text, useApp, useInput, useStdout } from "ink";
+import { Box, Text, useApp, useInput, useStdin, useStdout } from "ink";
 
 import type { ChatTurn, PirxAgent, TurnMetrics } from "@pirx/agent";
 
@@ -26,6 +26,7 @@ function compactDetail(value: string): string {
 
 export function App({ agent, events }: AppProps): React.JSX.Element {
   const { exit } = useApp();
+  const { stdin } = useStdin();
   const { stdout } = useStdout();
   const [terminalSize, setTerminalSize] = useState({
     rows: stdout.rows ?? 24,
@@ -42,6 +43,8 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
   const [modelLoading, setModelLoading] = useState(false);
   const [modelError, setModelError] = useState<string | undefined>();
   const [historyScroll, setHistoryScroll] = useState(0);
+  const [vimMode, setVimMode] = useState<"insert" | "normal">("insert");
+  const [pendingVimG, setPendingVimG] = useState(false);
 
   const layout = calculateTuiLayout(terminalSize.rows, terminalSize.columns);
   const historyLines = buildHistoryLines(history, layout.contentWidth);
@@ -77,6 +80,41 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
       setHistoryScroll(maxHistoryScroll);
     }
   }, [historyScroll, maxHistoryScroll]);
+
+  useEffect(() => {
+    if (stdin.isTTY !== true) return;
+
+    const enableMouse = "\u001B[?1000h\u001B[?1006h";
+    const disableMouse = "\u001B[?1006l\u001B[?1000l";
+    stdout.write(enableMouse);
+    let buffer = "";
+    const mousePattern = /\u001B\[<(\d+);\d+;\d+[mM]/g;
+    const onData = (chunk: Buffer | string): void => {
+      buffer += chunk.toString();
+      let consumed = 0;
+      let match: RegExpExecArray | null;
+      while ((match = mousePattern.exec(buffer)) !== null) {
+        consumed = mousePattern.lastIndex;
+        const button = Number(match[1]);
+        if (button === 64) {
+          setHistoryScroll((current) => Math.min(maxHistoryScroll, current + 3));
+        } else if (button === 65) {
+          setHistoryScroll((current) => Math.max(0, current - 3));
+        }
+      }
+      buffer = buffer.slice(consumed);
+      const incompleteStart = buffer.lastIndexOf("\u001B[<");
+      buffer = incompleteStart === -1 ? "" : buffer.slice(incompleteStart);
+      if (buffer.length > 64) buffer = "";
+      mousePattern.lastIndex = 0;
+    };
+
+    stdin.on("data", onData);
+    return () => {
+      stdin.off("data", onData);
+      stdout.write(disableMouse);
+    };
+  }, [maxHistoryScroll, stdin, stdout]);
 
   useEffect(() => events.subscribe((event: TuiEvent) => {
     if (event.type === "tool-started") {
@@ -134,6 +172,56 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
       exit();
+      return;
+    }
+
+    const scrollBy = (delta: number): void => {
+      setHistoryScroll((current) => Math.min(maxHistoryScroll, Math.max(0, current + delta)));
+    };
+
+    if (key.escape) {
+      setPendingVimG(false);
+      if (selectorOpen) {
+        setSelectorOpen(false);
+        return;
+      }
+      setVimMode("normal");
+      return;
+    }
+
+    if (vimMode === "normal") {
+      if (input === "i" || input === "a") {
+        setVimMode("insert");
+        setPendingVimG(false);
+        return;
+      }
+      if (input === "g") {
+        if (pendingVimG) setHistoryScroll(maxHistoryScroll);
+        setPendingVimG(!pendingVimG);
+        return;
+      }
+      if (input === "G") {
+        setHistoryScroll(0);
+        setPendingVimG(false);
+        return;
+      }
+      if (input === "k" || key.upArrow) {
+        scrollBy(1);
+        return;
+      }
+      if (input === "j" || key.downArrow) {
+        scrollBy(-1);
+        return;
+      }
+      if (input === "u" || key.pageUp) {
+        scrollBy(layout.historyRows);
+        return;
+      }
+      if (input === "d" || key.pageDown) {
+        scrollBy(-layout.historyRows);
+        return;
+      }
+      setPendingVimG(false);
       return;
     }
 
@@ -219,7 +307,13 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
     : lastMetrics.generation_tokens_per_second === null
       ? "—"
       : `${lastMetrics.generation_tokens_per_second.toFixed(1)} tok/s`;
-  const hint = notice ?? (busy ? "working…" : "Enter send · PgUp/PgDn scroll · Ctrl+O models");
+  const hint = notice ?? (
+    vimMode === "normal"
+      ? "NORMAL · j/k scroll · u/d page · gg top · G bottom · i insert"
+      : busy
+        ? "working…"
+        : "INSERT · Esc normal · PgUp/PgDn or mouse scroll · Ctrl+O models"
+  );
   const runtimeStatus = `${agent.model} | MCP ${agent.mcpAvailable ? "●" : "○"} | ${context} | ${speed}`;
 
   return (
@@ -252,6 +346,7 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
         {visibleHistoryLines.map((line) => (
           <Text
             key={line.key}
+            {...(line.emphasis ? { bold: true } : {})}
             {...(line.kind === "error"
               ? { color: "red" }
               : line.kind === "user"
@@ -295,7 +390,7 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
         ) : (
           <Composer
             clearToken={clearToken}
-            disabled={busy}
+            disabled={busy || vimMode === "normal"}
             onSubmit={submit}
             width={layout.contentWidth}
           />

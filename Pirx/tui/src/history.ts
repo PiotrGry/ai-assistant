@@ -13,6 +13,7 @@ export interface HistoryLine {
   readonly key: string;
   readonly kind: ChatItem["kind"];
   readonly text: string;
+  readonly emphasis?: boolean;
 }
 
 function wrapText(value: string, width: number): string[] {
@@ -40,6 +41,14 @@ function toolText(item: Extract<ChatItem, { readonly kind: "tool" }>): string {
   return item.detail === undefined ? prefix : `${prefix} — ${item.detail}`;
 }
 
+function messageLabel(item: Exclude<ChatItem, { readonly kind: "tool" }>): string {
+  return item.kind === "user" ? "You" : item.kind === "assistant" ? "Pirx" : "Pirx error";
+}
+
+function messageColorKind(item: Exclude<ChatItem, { readonly kind: "tool" }>): ChatItem["kind"] {
+  return item.kind;
+}
+
 export function buildHistoryLines(items: readonly ChatItem[], width: number): HistoryLine[] {
   const lines: HistoryLine[] = [];
 
@@ -55,25 +64,28 @@ export function buildHistoryLines(items: readonly ChatItem[], width: number): Hi
       return;
     }
 
-    const label = item.kind === "user" ? "You:" : item.kind === "assistant" ? "Pirx:" : "Pirx error:";
+    const label = messageLabel(item);
+    const headerWidth = Math.max(1, width - label.length - 5);
     lines.push({
       key: `history-${itemIndex}-label`,
-      kind: item.kind,
-      text: label,
+      kind: messageColorKind(item),
+      text: `┌─ ${label} ${"─".repeat(headerWidth)}┐`,
+      emphasis: true,
     });
     const contentLines = wrapText(item.content, Math.max(1, width - 2));
     contentLines.forEach((text, lineIndex) => {
       lines.push({
         key: `history-${itemIndex}-content-${lineIndex}`,
         kind: item.kind,
-        text: `  ${text}`,
+        text: `│ ${text}`,
       });
     });
     lines.push({
-      key: `history-${itemIndex}-spacing`,
+      key: `history-${itemIndex}-footer`,
       kind: item.kind,
-      text: "",
+      text: `└${"─".repeat(Math.max(1, width - 2))}┘`,
     });
+    lines.push({ key: `history-${itemIndex}-spacing`, kind: item.kind, text: "" });
   });
 
   return lines;
