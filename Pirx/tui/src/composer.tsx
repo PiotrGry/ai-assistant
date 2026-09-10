@@ -78,7 +78,13 @@ export function Composer({ clearToken, disabled, onSubmit, width }: ComposerProp
       paddingX={1}
       overflow="hidden"
     >
-      {state.value.length === 0 ? <Text color="gray">› type a message…</Text> : lines.map((line, index) => {
+      {state.value.length === 0 ? (
+        <Text>
+          <Text color="cyan">› </Text>
+          {!disabled ? <Text inverse> </Text> : null}
+          <Text color="gray">type a message…</Text>
+        </Text>
+      ) : lines.map((line, index) => {
         const isCursorLine = index === position.line;
         const cursorColumn = isCursorLine ? position.column : -1;
         const cursorChar = cursorColumn >= 0 ? line[cursorColumn] ?? " " : "";
