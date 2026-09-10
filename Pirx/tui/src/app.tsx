@@ -314,7 +314,7 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
         ? "working…"
         : "INSERT · Esc normal · PgUp/PgDn or mouse scroll · Ctrl+O models"
   );
-  const runtimeStatus = `${agent.model} | MCP ${agent.mcpAvailable ? "●" : "○"} | ${context} | ${speed}`;
+  const mcpColor = agent.mcpAvailable ? "green" : "red";
 
   return (
     <Box
@@ -325,10 +325,23 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
     >
       <Box width={layout.contentWidth} flexShrink={0}>
         {layout.tiny ? (
-          <Text bold color="cyan">Pirx</Text>
+          <Text bold color="cyan">◆ Pirx</Text>
         ) : (
-          <Box width={layout.contentWidth} borderStyle="round" borderColor="cyan" paddingX={1}>
-            <Text bold color="cyan">Pirx</Text><Text color="gray"> · local chat</Text>
+          <Box
+            width={layout.contentWidth}
+            borderStyle="round"
+            borderColor="cyan"
+            paddingX={1}
+            justifyContent="space-between"
+          >
+            <Box>
+              <Text bold color="cyan">◆ Pirx</Text>
+              <Text color="gray">  local chat</Text>
+            </Box>
+            <Box>
+              <Text color="gray">{agent.model}  </Text>
+              <Text color={mcpColor}>● MCP</Text>
+            </Box>
           </Box>
         )}
       </Box>
@@ -359,7 +372,7 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
           </Text>
         ))}
         {effectiveHistoryScroll > 0 ? <Text color="gray">↑ older messages · PageUp/PageDown scroll</Text> : null}
-        {busy ? <Text color="gray">Pirx is thinking…</Text> : null}
+        {busy ? <Text color="yellow">◌ Pirx is thinking…</Text> : null}
       </Box>
 
       <Box flexDirection="column" width={layout.contentWidth} flexShrink={0}>
@@ -408,8 +421,12 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
             justifyContent={layout.compact ? undefined : "space-between"}
             paddingTop={1}
           >
-            <Text wrap="truncate-end" color={notice ? "yellow" : "gray"}>{hint}</Text>
-            <Text wrap="truncate-end" color="gray">{runtimeStatus}</Text>
+            <Text wrap="truncate-end" color={notice ? "yellow" : "gray"}>
+              {notice ? "⚠ " : vimMode === "normal" ? "▸ " : busy ? "◌ " : "› "}{hint}
+            </Text>
+            <Text wrap="truncate-end" color="gray">
+              {context}  ·  <Text color="magenta">{speed} tok/s</Text>
+            </Text>
           </Box>
         )}
       </Box>
