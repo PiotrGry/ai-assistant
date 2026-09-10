@@ -70,6 +70,7 @@ export function Composer({ clearToken, disabled, onSubmit, width }: ComposerProp
     <Box
       flexDirection="column"
       width={width}
+      flexShrink={0}
       borderStyle="single"
       borderColor={disabled ? "gray" : "cyan"}
       paddingX={1}

@@ -257,68 +257,82 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
       paddingX={1}
       overflow="hidden"
     >
-      {layout.tiny ? (
-        <Text bold color="cyan">Pirx</Text>
-      ) : (
-        <Box width={layout.contentWidth} borderStyle="round" borderColor="cyan" paddingX={1}>
-          <Text bold color="cyan">Pirx</Text><Text color="gray"> · local chat</Text>
-        </Box>
-      )}
+      <Box width={layout.contentWidth} flexShrink={0}>
+        {layout.tiny ? (
+          <Text bold color="cyan">Pirx</Text>
+        ) : (
+          <Box width={layout.contentWidth} borderStyle="round" borderColor="cyan" paddingX={1}>
+            <Text bold color="cyan">Pirx</Text><Text color="gray"> · local chat</Text>
+          </Box>
+        )}
+      </Box>
 
-      <Box flexDirection="column" width={layout.contentWidth} flexGrow={1} overflow="hidden" paddingY={1}>
+      <Box
+        flexDirection="column"
+        width={layout.contentWidth}
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={1}
+        overflow="hidden"
+        paddingY={1}
+      >
         {visibleItems.length === 0 ? <Text color="gray">Ask Pirx something. Ctrl+O switches the model.</Text> : null}
         {visibleItems.map(renderItem)}
         {effectiveHistoryScroll > 0 ? <Text color="gray">↑ older messages · PageUp/PageDown scroll</Text> : null}
         {busy ? <Text color="gray">Pirx is thinking…</Text> : null}
       </Box>
 
-      {selectorOpen ? (
-        <Box
-          flexDirection="column"
-          width={layout.contentWidth}
-          overflow="hidden"
-          borderStyle="round"
-          borderColor="magenta"
-          paddingX={1}
-        >
-          <Text bold color="magenta">Select model {modelLoading ? "(loading…)" : ""}</Text>
-          {modelError ? <Text color="red">{modelError}</Text> : null}
-          {models.length === 0 && !modelLoading && !modelError ? <Text color="gray">No installed Ollama models found.</Text> : null}
-          {visibleModels.map((model, offset) => {
-            const index = modelStart + offset;
-            return (
-            <Text key={model} {...(index === modelIndex ? { color: "cyan" } : {})}>
-              {index === modelIndex ? "› " : "  "}{model}{model === agent.model ? " · current" : ""}
-            </Text>
-            );
-          })}
-          {models.length > visibleModels.length ? <Text color="gray">… {models.length - visibleModels.length} more</Text> : null}
-          <Text color="gray">↑/↓ select · Enter apply · Esc close</Text>
-        </Box>
-      ) : (
-        <Composer
-          clearToken={clearToken}
-          disabled={busy}
-          onSubmit={submit}
-          width={layout.contentWidth}
-        />
-      )}
+      <Box flexDirection="column" width={layout.contentWidth} flexShrink={0}>
+        {selectorOpen ? (
+          <Box
+            flexDirection="column"
+            width={layout.contentWidth}
+            flexShrink={0}
+            overflow="hidden"
+            borderStyle="round"
+            borderColor="magenta"
+            paddingX={1}
+          >
+            <Text bold color="magenta">Select model {modelLoading ? "(loading…)" : ""}</Text>
+            {modelError ? <Text color="red">{modelError}</Text> : null}
+            {models.length === 0 && !modelLoading && !modelError ? <Text color="gray">No installed Ollama models found.</Text> : null}
+            {visibleModels.map((model, offset) => {
+              const index = modelStart + offset;
+              return (
+              <Text key={model} {...(index === modelIndex ? { color: "cyan" } : {})}>
+                {index === modelIndex ? "› " : "  "}{model}{model === agent.model ? " · current" : ""}
+              </Text>
+              );
+            })}
+            {models.length > visibleModels.length ? <Text color="gray">… {models.length - visibleModels.length} more</Text> : null}
+            <Text color="gray">↑/↓ select · Enter apply · Esc close</Text>
+          </Box>
+        ) : (
+          <Composer
+            clearToken={clearToken}
+            disabled={busy}
+            onSubmit={submit}
+            width={layout.contentWidth}
+          />
+        )}
 
-      {layout.tiny ? (
-        <Box width={layout.contentWidth}>
-          <Text wrap="truncate-end" color={notice ? "yellow" : "gray"}>{hint}</Text>
-        </Box>
-      ) : (
-        <Box
-          flexDirection={layout.compact ? "column" : "row"}
-          width={layout.contentWidth}
-          justifyContent={layout.compact ? undefined : "space-between"}
-          paddingTop={1}
-        >
-          <Text wrap="truncate-end" color={notice ? "yellow" : "gray"}>{hint}</Text>
-          <Text wrap="truncate-end" color="gray">{runtimeStatus}</Text>
-        </Box>
-      )}
+        {layout.tiny ? (
+          <Box width={layout.contentWidth} flexShrink={0}>
+            <Text wrap="truncate-end" color={notice ? "yellow" : "gray"}>{hint}</Text>
+          </Box>
+        ) : (
+          <Box
+            flexDirection={layout.compact ? "column" : "row"}
+            width={layout.contentWidth}
+            flexShrink={0}
+            justifyContent={layout.compact ? undefined : "space-between"}
+            paddingTop={1}
+          >
+            <Text wrap="truncate-end" color={notice ? "yellow" : "gray"}>{hint}</Text>
+            <Text wrap="truncate-end" color="gray">{runtimeStatus}</Text>
+          </Box>
+        )}
+      </Box>
     </Box>
   );
 }
