@@ -2,6 +2,7 @@ export {
   GitHubConfigurationError,
   loadGitHubConfig,
   type GitHubConfig,
+  type GitHubConfigOptions,
 } from "./config.js";
 export {
   failure,

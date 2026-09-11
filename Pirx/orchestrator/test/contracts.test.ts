@@ -36,7 +36,7 @@ function errorCode(result: { readonly outcome: string; readonly error?: { readon
 
 test("loadGitHubConfig validates fields without exposing the token", () => {
   assert.throws(
-    () => loadGitHubConfig({ PIRX_GITHUB_TOKEN: "super-secret" }),
+    () => loadGitHubConfig({}),
     (error: unknown) => {
       assert.ok(error instanceof GitHubConfigurationError);
       assert.match(error.message, /PIRX_GITHUB_OWNER/u);
@@ -46,13 +46,12 @@ test("loadGitHubConfig validates fields without exposing the token", () => {
   );
   assert.deepEqual(
     loadGitHubConfig({
-      PIRX_GITHUB_TOKEN: "token",
       PIRX_GITHUB_OWNER: "owner",
       PIRX_GITHUB_REPOSITORY: "repo",
       PIRX_GITHUB_PROJECT_OWNER: "owner",
       PIRX_GITHUB_PROJECT_NUMBER: "3",
       PIRX_GITHUB_TIMEOUT_MS: "2500",
-    }),
+    }, { tokenProvider: () => "token" }),
     { ...config, token: "token", owner: "owner", repository: "repo", projectOwner: "owner", timeoutMs: 2500, apiUrl: "https://api.github.com" },
   );
 });

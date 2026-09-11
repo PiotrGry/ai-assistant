@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+
 export interface GitHubConfig {
   readonly token: string;
   readonly owner: string;
@@ -6,6 +8,11 @@ export interface GitHubConfig {
   readonly projectNumber: number;
   readonly apiUrl: string;
   readonly timeoutMs: number;
+}
+
+export interface GitHubConfigOptions {
+  /** Injectable only for deterministic tests; production uses `gh auth token`. */
+  readonly tokenProvider?: (hostname: string) => string;
 }
 
 export class GitHubConfigurationError extends Error {
@@ -57,18 +64,50 @@ function apiUrl(value: string | undefined): string {
   return parsed.toString().replace(/\/+$/u, "");
 }
 
-export function loadGitHubConfig(env: NodeJS.ProcessEnv = process.env): GitHubConfig {
+function githubHostname(apiEndpoint: string): string {
+  const hostname = new URL(apiEndpoint).hostname;
+  return hostname === "api.github.com" ? "github.com" : hostname;
+}
+
+function ghAuthToken(hostname: string): string {
+  try {
+    const token = execFileSync("gh", ["auth", "token", "--hostname", hostname], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 16_384,
+    }).trim();
+    if (token.length === 0 || /[\u0000-\u001f\u007f]/u.test(token)) {
+      throw new Error("empty or invalid token");
+    }
+    return token;
+  } catch {
+    throw new GitHubConfigurationError(
+      `GitHub CLI authentication is unavailable for ${hostname}. Run gh auth login first.`,
+    );
+  }
+}
+
+export function loadGitHubConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  options: GitHubConfigOptions = {},
+): GitHubConfig {
   const timeoutText = env.PIRX_GITHUB_TIMEOUT_MS?.trim() || "10000";
+  const apiEndpoint = apiUrl(env.PIRX_GITHUB_API_URL);
+  const owner = required(env, "PIRX_GITHUB_OWNER");
+  const repository = required(env, "PIRX_GITHUB_REPOSITORY");
+  const projectOwner = required(env, "PIRX_GITHUB_PROJECT_OWNER");
+  const projectNumber = positiveInteger(
+    required(env, "PIRX_GITHUB_PROJECT_NUMBER"),
+    "PIRX_GITHUB_PROJECT_NUMBER",
+  );
+  const hostname = githubHostname(apiEndpoint);
   return {
-    token: required(env, "PIRX_GITHUB_TOKEN"),
-    owner: required(env, "PIRX_GITHUB_OWNER"),
-    repository: required(env, "PIRX_GITHUB_REPOSITORY"),
-    projectOwner: required(env, "PIRX_GITHUB_PROJECT_OWNER"),
-    projectNumber: positiveInteger(
-      required(env, "PIRX_GITHUB_PROJECT_NUMBER"),
-      "PIRX_GITHUB_PROJECT_NUMBER",
-    ),
-    apiUrl: apiUrl(env.PIRX_GITHUB_API_URL),
+    token: options.tokenProvider?.(hostname) ?? ghAuthToken(hostname),
+    owner,
+    repository,
+    projectOwner,
+    projectNumber,
+    apiUrl: apiEndpoint,
     timeoutMs: positiveInteger(timeoutText, "PIRX_GITHUB_TIMEOUT_MS"),
   };
 }

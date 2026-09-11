@@ -6,10 +6,11 @@ and prevents business logic from using a raw HTTP or GraphQL client.
 
 ## Configuration
 
-`loadGitHubConfig()` validates these environment variables before the first
-request:
+`loadGitHubConfig()` validates the repository settings before the first request
+and obtains the credential with `gh auth token`:
 
-- `PIRX_GITHUB_TOKEN`
+- run `gh auth login` first; set `GH_CONFIG_DIR` only when using a non-default
+  GitHub CLI profile,
 - `PIRX_GITHUB_OWNER`
 - `PIRX_GITHUB_REPOSITORY`
 - `PIRX_GITHUB_PROJECT_OWNER`
@@ -82,7 +83,6 @@ and `replayNoOp: true`. It never prints tokens or raw worker output.
 Run it only against a dedicated controlled Issue:
 
 ```sh
-export PIRX_GITHUB_TOKEN=...
 export PIRX_GITHUB_OWNER=PiotrGry
 export PIRX_GITHUB_REPOSITORY=ai-assistant
 export PIRX_GITHUB_PROJECT_OWNER=PiotrGry
