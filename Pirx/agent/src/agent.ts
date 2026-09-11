@@ -289,8 +289,9 @@ function actionTarget(
     "destination",
     "calendarId",
     "eventId",
+    "issueNumber",
   ]
-    .filter((key) => typeof arguments_[key] === "string")
+    .filter((key) => typeof arguments_[key] === "string" || typeof arguments_[key] === "number")
     .map((key) => `${key}=${String(arguments_[key])}`);
   return [name, ...identifiers].join(" ");
 }

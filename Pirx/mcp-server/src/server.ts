@@ -22,6 +22,7 @@ import { registerHelloTool } from "./tools/hello.js";
 import { registerSystemTools } from "./tools/system.js";
 import { registerObsidianTools } from "./tools/obsidian.js";
 import { registerGitHubPocTool } from "./tools/github.js";
+import { registerGitHubIssueTools } from "./tools/github-issues.js";
 
 export type GitHubPocTransport = GitHubIssueReadTransport & GitHubIssueMutationTransport;
 
@@ -56,28 +57,40 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   registerSystemTools(server);
   registerObsidianTools(server, obsidianVault);
   registerCalendarTools(server, calendar);
-  if (environment.PIRX_GITHUB_POC_ISSUE?.trim() !== undefined) {
+  const githubRequested = [
+    environment.PIRX_GITHUB_OWNER,
+    environment.PIRX_GITHUB_REPOSITORY,
+    environment.PIRX_GITHUB_POC_ISSUE,
+  ].some((value) => value !== undefined && value.trim().length > 0);
+  if (githubRequested) {
     let githubConfig = options.githubPocConfig;
-    let configurationError = config.githubPocConfigurationError;
-    if (githubConfig === undefined && configurationError === undefined) {
+    let githubConfigurationError: string | undefined;
+    if (githubConfig === undefined) {
       try {
         githubConfig = loadGitHubConfig(environment);
       } catch (error: unknown) {
-        configurationError =
+        githubConfigurationError =
           error instanceof GitHubConfigurationError
             ? error.message
-            : "GitHub POC is unavailable because its required configuration is incomplete.";
+            : "GitHub Issue tools are unavailable because their required configuration is incomplete.";
       }
     }
     const transport =
       options.githubPocTransport ??
       (githubConfig === undefined ? undefined : new GitHubTransport(githubConfig));
-    registerGitHubPocTool(server, {
-      issue: config.githubPocIssue,
+    registerGitHubIssueTools(server, {
       config: githubConfig,
       transport,
-      configurationError,
+      configurationError: githubConfigurationError,
     });
+    if ((environment.PIRX_GITHUB_POC_ISSUE?.trim().length ?? 0) > 0) {
+      registerGitHubPocTool(server, {
+        issue: config.githubPocIssue,
+        config: githubConfig,
+        transport,
+        configurationError: config.githubPocConfigurationError ?? githubConfigurationError,
+      });
+    }
   }
   return server;
 }

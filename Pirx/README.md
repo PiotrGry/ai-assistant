@@ -171,6 +171,14 @@ Konfiguracja GitHub pozostaje w procesie serwera MCP/orchestratora:
 Token jest pobierany przy każdym uruchomieniu serwera przez lokalny GitHub CLI,
 ale nie trafia do modelu, argumentów MCP, wyników narzędzi ani logów.
 
+Po ustawieniu `PIRX_GITHUB_OWNER` i `PIRX_GITHUB_REPOSITORY` serwer udostępnia
+też repository-scoped tools `github_issue_get`, `github_issue_list`,
+`github_issue_search`, `github_issue_create`, `github_issue_update`,
+`github_issue_comment`, `github_issue_close` i `github_issue_reopen`. Żaden z
+tych tooli nie przyjmuje repozytorium jako argumentu. Odczyty są read-only;
+mutacje wymagają argumentu `confirmed: true`, czyli jawnego potwierdzenia
+użytkownika przed ponowieniem wywołania.
+
 ## LazyVim
 
 W `:LazyExtras` włącz `lang.typescript`, zrestartuj Neovim i otwórz dowolny plik z `agent/src` albo `mcp-server/src`. `:LspInfo` powinno wtedy pokazać `vtsls`; serwer językowy sam odczyta tutejszy `tsconfig` i zależności z workspace.

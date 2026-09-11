@@ -59,11 +59,17 @@ class FakeGitHubTransport implements GitHubPocTransport {
     if (request.path.endsWith("/comments")) {
       return success(this.comments, context.correlationId) as GitHubOperationResult<T>;
     }
+    if (request.path.endsWith("/issues")) {
+      return success([issuePayload()], context.correlationId) as GitHubOperationResult<T>;
+    }
     return success(issuePayload(), context.correlationId) as GitHubOperationResult<T>;
   }
 
-  async restWrite<T>(request: { body?: unknown }, context: { correlationId: string }): Promise<GitHubOperationResult<T>> {
+  async restWrite<T>(request: { path: string; body?: unknown }, context: { correlationId: string }): Promise<GitHubOperationResult<T>> {
     this.writes.push(request.body);
+    if (!request.path.endsWith("/comments")) {
+      return success(issuePayload(), context.correlationId) as GitHubOperationResult<T>;
+    }
     const comment = {
       id: 9001,
       html_url: "https://github.com/PiotrGry/ai-assistant/issues/179#issuecomment-9001",
@@ -73,8 +79,32 @@ class FakeGitHubTransport implements GitHubPocTransport {
     return success(comment, context.correlationId) as GitHubOperationResult<T>;
   }
 
-  async graphqlRead<T>(_request: unknown, context: { correlationId: string }): Promise<GitHubOperationResult<T>> {
-    return success({ data: { search: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } }, context.correlationId) as GitHubOperationResult<T>;
+  async graphqlRead<T>(request: { variables?: { query?: string } }, context: { correlationId: string }): Promise<GitHubOperationResult<T>> {
+    if (request.variables?.query?.includes("pirx-operation") === true) {
+      return success({
+        search: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+      }, context.correlationId) as GitHubOperationResult<T>;
+    }
+    return success({
+      search: {
+        nodes: [{
+          id: "I_kwDOtest",
+          number: 179,
+          url: "https://github.com/PiotrGry/ai-assistant/issues/179",
+          title: "[POC TEST] GitHub Issue lifecycle sandbox",
+          body: "controlled sandbox",
+          state: "OPEN",
+          author: { login: "PiotrGry" },
+          labels: { nodes: [{ name: "poc-test", color: "5319E7" }] },
+          assignees: { nodes: [] },
+          milestone: null,
+          createdAt: "2026-09-11T09:00:00Z",
+          updatedAt: "2026-09-11T09:00:00Z",
+          closedAt: null,
+        }],
+        pageInfo: { hasNextPage: false, endCursor: null },
+      },
+    }, context.correlationId) as GitHubOperationResult<T>;
   }
 }
 
@@ -169,6 +199,77 @@ test("GitHub POC uses the fixed Issue and proves idempotent replay", async (cont
   });
   assert.equal(redirected.isError, true);
   assert.equal(transport.writes.length, 1);
+});
+
+test("repository-scoped Issue tools expose bounded reads and confirmed mutations", async (context) => {
+  const transport = new FakeGitHubTransport();
+  const fixture = await connected({ transport, config: githubConfig });
+  context.after(async () => {
+    await fixture.client.close();
+    await fixture.server.close();
+  });
+
+  const listed = await fixture.client.listTools();
+  for (const name of [
+    "github_issue_get",
+    "github_issue_list",
+    "github_issue_search",
+    "github_issue_create",
+    "github_issue_update",
+    "github_issue_comment",
+    "github_issue_close",
+    "github_issue_reopen",
+  ]) {
+    assert.ok(listed.tools.some((tool) => tool.name === name), name);
+  }
+  assert.equal(listed.tools.find((tool) => tool.name === "github_issue_get")?.annotations?.readOnlyHint, true);
+  assert.equal(listed.tools.find((tool) => tool.name === "github_issue_close")?.annotations?.destructiveHint, true);
+
+  const get = await fixture.client.callTool({
+    name: "github_issue_get",
+    arguments: { issueNumber: 179, correlationId: "get-correlation" },
+  });
+  assert.equal(get.isError, undefined);
+  assert.equal((get.structuredContent as { issue: { number: number } }).issue.number, 179);
+
+  const list = await fixture.client.callTool({
+    name: "github_issue_list",
+    arguments: { state: "open", pageSize: 1, maxItems: 1 },
+  });
+  assert.equal(list.isError, undefined);
+  assert.equal((list.structuredContent as { page: { items: unknown[] } }).page.items.length, 1);
+
+  const search = await fixture.client.callTool({
+    name: "github_issue_search",
+    arguments: { text: "sandbox", maxItems: 1 },
+  });
+  assert.equal(search.isError, undefined);
+
+  const denied = await fixture.client.callTool({
+    name: "github_issue_create",
+    arguments: { title: "Denied", confirmed: false },
+  });
+  assert.equal(denied.isError, true);
+  assert.equal(transport.writes.length, 0);
+
+  const mutationCalls = [
+    { name: "github_issue_create", arguments: { title: "Created", confirmed: true } },
+    { name: "github_issue_update", arguments: { issueNumber: 179, title: "Updated", confirmed: true } },
+    { name: "github_issue_comment", arguments: { issueNumber: 179, comment: "Confirmed comment", confirmed: true } },
+    { name: "github_issue_close", arguments: { issueNumber: 179, confirmed: true } },
+    { name: "github_issue_reopen", arguments: { issueNumber: 179, confirmed: true } },
+  ] as const;
+  for (const call of mutationCalls) {
+    const result = await fixture.client.callTool(call);
+    assert.notEqual(result.isError, true, call.name);
+  }
+  assert.equal(transport.writes.length, 4);
+
+  const redirected = await fixture.client.callTool({
+    name: "github_issue_get",
+    arguments: { issueNumber: 179, repository: "other-owner/other-repository" },
+  });
+  assert.equal(redirected.isError, true);
 });
 
 test("GitHub POC maps normalized failures without exposing credentials", async (context) => {
