@@ -15,6 +15,8 @@ export interface GoogleCalendarConfig {
 export interface McpServerConfig {
   readonly obsidianVaultPath: string | undefined;
   readonly googleCalendar: GoogleCalendarConfig;
+  readonly githubPocIssue: number | undefined;
+  readonly githubPocConfigurationError: string | undefined;
 }
 
 function positiveInteger(name: string, value: string): number {
@@ -35,6 +37,30 @@ function optionalPath(value: string | undefined): string | undefined {
     return undefined;
   }
   return resolve(value.trim());
+}
+
+function optionalPositiveInteger(value: string | undefined): {
+  readonly value: number | undefined;
+  readonly error: string | undefined;
+} {
+  if (value === undefined || value.trim().length === 0) {
+    return { value: undefined, error: undefined };
+  }
+  const trimmed = value.trim();
+  if (!/^\d+$/u.test(trimmed)) {
+    return {
+      value: undefined,
+      error: "PIRX_GITHUB_POC_ISSUE must be a positive integer.",
+    };
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    return {
+      value: undefined,
+      error: "PIRX_GITHUB_POC_ISSUE must be a positive integer.",
+    };
+  }
+  return { value: parsed, error: undefined };
 }
 
 function defaultObsidianVault(): string | undefined {
@@ -61,6 +87,8 @@ export function loadMcpServerConfig(
     );
   }
 
+  const githubPocIssue = optionalPositiveInteger(environment.PIRX_GITHUB_POC_ISSUE);
+
   return {
     obsidianVaultPath:
       optionalPath(environment.PIRX_OBSIDIAN_VAULT) ?? defaultObsidianVault(),
@@ -84,5 +112,7 @@ export function loadMcpServerConfig(
         environment.PIRX_GOOGLE_AUTH_TIMEOUT_MS ?? "300000",
       ),
     },
+    githubPocIssue: githubPocIssue.value,
+    githubPocConfigurationError: githubPocIssue.error,
   };
 }

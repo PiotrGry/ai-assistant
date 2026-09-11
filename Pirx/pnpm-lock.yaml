@@ -26,6 +26,9 @@ importers:
 
   mcp-server:
     dependencies:
+      '@pirx/orchestrator':
+        specifier: workspace:*
+        version: link:../orchestrator
       '@modelcontextprotocol/server':
         specifier: 2.0.0
         version: 2.0.0

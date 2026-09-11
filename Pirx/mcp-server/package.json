@@ -12,6 +12,7 @@
     "start": "node --enable-source-maps dist/index.js"
   },
   "dependencies": {
+    "@pirx/orchestrator": "workspace:*",
     "@modelcontextprotocol/server": "2.0.0",
     "zod": "4.5.2"
   },

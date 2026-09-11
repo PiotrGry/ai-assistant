@@ -13,6 +13,7 @@ test("MCP configuration uses the existing environment-based approach", () => {
     PIRX_GOOGLE_CALENDAR_TIMEZONE: "Europe/Warsaw",
     PIRX_GOOGLE_TIMEOUT_MS: "4321",
     PIRX_GOOGLE_AUTH_TIMEOUT_MS: "9876",
+    PIRX_GITHUB_POC_ISSUE: "179",
   });
 
   assert.equal(config.obsidianVaultPath, resolve("/tmp/pirx-vault"));
@@ -22,6 +23,8 @@ test("MCP configuration uses the existing environment-based approach", () => {
   assert.equal(config.googleCalendar.defaultTimeZone, "Europe/Warsaw");
   assert.equal(config.googleCalendar.requestTimeoutMs, 4_321);
   assert.equal(config.googleCalendar.authorizationTimeoutMs, 9_876);
+  assert.equal(config.githubPocIssue, 179);
+  assert.equal(config.githubPocConfigurationError, undefined);
 });
 
 test("MCP configuration uses the project vault by default", () => {
@@ -41,4 +44,10 @@ test("MCP configuration rejects invalid timeouts and timezones", () => {
       }),
     /valid IANA timezone/u,
   );
+});
+
+test("MCP keeps invalid optional GitHub POC configuration controlled", () => {
+  const config = loadMcpServerConfig({ PIRX_GITHUB_POC_ISSUE: "0" });
+  assert.equal(config.githubPocIssue, undefined);
+  assert.match(config.githubPocConfigurationError ?? "", /positive integer/u);
 });

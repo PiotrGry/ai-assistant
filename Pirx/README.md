@@ -152,6 +152,27 @@ tworzenie wydarzeń jest wykonywane najwyżej raz na wywołanie narzędzia.
 Brak konfiguracji Obsidiana lub Google nie zatrzymuje MCP: odpowiednie
 narzędzie zwróci kontrolowany błąd, a pozostałe pozostaną dostępne.
 
+## GitHub Issue round-trip POC
+
+Opcjonalny tool `github_issue_round_trip_poc` jest widoczny wyłącznie po
+ustawieniu stałego celu `PIRX_GITHUB_POC_ISSUE`. W repozytorium testowym używa
+się Issue `179`. Numer Issue nie jest argumentem narzędzia i model nie może go
+zmienić. Wywołanie odczytuje Issue, publikuje oznaczony komentarz cyklu życia,
+weryfikuje stan i ponawia operację idempotentnie.
+
+Konfiguracja GitHub pozostaje w procesie serwera MCP/orchestratora:
+
+- `PIRX_GITHUB_TOKEN` — token GitHub; nie przekazuj go w promptach ani
+  argumentach narzędzia,
+- `PIRX_GITHUB_OWNER` i `PIRX_GITHUB_REPOSITORY`,
+- `PIRX_GITHUB_PROJECT_OWNER` i `PIRX_GITHUB_PROJECT_NUMBER`,
+- `PIRX_GITHUB_POC_ISSUE` — stały numer Issue sandboxa,
+- opcjonalnie `PIRX_GITHUB_API_URL` i `PIRX_GITHUB_TIMEOUT_MS`.
+
+Token musi być dostępny przy każdym uruchomieniu procesu agenta (na przykład
+przez menedżer sekretów albo sesyjne zmienne środowiskowe), ale nie trafia do
+modelu, argumentów MCP, wyników narzędzi ani logów.
+
 ## LazyVim
 
 W `:LazyExtras` włącz `lang.typescript`, zrestartuj Neovim i otwórz dowolny plik z `agent/src` albo `mcp-server/src`. `:LspInfo` powinno wtedy pokazać `vtsls`; serwer językowy sam odczyta tutejszy `tsconfig` i zależności z workspace.

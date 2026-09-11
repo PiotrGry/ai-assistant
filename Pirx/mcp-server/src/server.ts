@@ -1,4 +1,15 @@
 import { McpServer } from "@modelcontextprotocol/server";
+import {
+  GitHubIssueLifecycleRoundTrip,
+  GitHubIssueMutator,
+  GitHubIssueReader,
+  GitHubTransport,
+  GitHubWriteQueue,
+  loadGitHubConfig,
+  type GitHubConfig,
+  type GitHubIssueMutationTransport,
+  type GitHubIssueReadTransport,
+} from "@pirx/orchestrator";
 
 import { loadMcpServerConfig } from "./config.js";
 import { GoogleOAuthTokenProvider } from "./google-calendar/auth.js";
@@ -9,15 +20,21 @@ import { registerCalendarTools } from "./tools/calendar.js";
 import { registerHelloTool } from "./tools/hello.js";
 import { registerSystemTools } from "./tools/system.js";
 import { registerObsidianTools } from "./tools/obsidian.js";
+import { registerGitHubPocTool } from "./tools/github.js";
+
+export type GitHubPocTransport = GitHubIssueReadTransport & GitHubIssueMutationTransport;
 
 export interface McpServerOptions {
   readonly environment?: NodeJS.ProcessEnv;
   readonly obsidianVault?: ObsidianVault;
   readonly calendar?: CalendarOperations;
+  readonly githubPocTransport?: GitHubPocTransport;
+  readonly githubPocConfig?: GitHubConfig;
 }
 
 export function createMcpServer(options: McpServerOptions = {}): McpServer {
-  const config = loadMcpServerConfig(options.environment);
+  const environment = options.environment ?? process.env;
+  const config = loadMcpServerConfig(environment);
   const obsidianVault =
     options.obsidianVault ??
     (config.obsidianVaultPath === undefined
@@ -38,5 +55,26 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   registerSystemTools(server);
   registerObsidianTools(server, obsidianVault);
   registerCalendarTools(server, calendar);
+  if (environment.PIRX_GITHUB_POC_ISSUE?.trim() !== undefined) {
+    let githubConfig = options.githubPocConfig;
+    let configurationError = config.githubPocConfigurationError;
+    if (githubConfig === undefined && configurationError === undefined) {
+      try {
+        githubConfig = loadGitHubConfig(environment);
+      } catch {
+        configurationError =
+          "GitHub POC is unavailable because its required configuration is incomplete.";
+      }
+    }
+    const transport =
+      options.githubPocTransport ??
+      (githubConfig === undefined ? undefined : new GitHubTransport(githubConfig));
+    registerGitHubPocTool(server, {
+      issue: config.githubPocIssue,
+      config: githubConfig,
+      transport,
+      configurationError,
+    });
+  }
   return server;
 }
