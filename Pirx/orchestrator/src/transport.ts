@@ -36,6 +36,30 @@ function retryAfterMs(headers: Headers, now: number): { readonly value?: number;
   return { value: Math.max(0, date - now), malformed: false };
 }
 
+function linkPagination(headers: Headers): GitHubResponseMetadata["pagination"] {
+  const value = headers.get("link");
+  if (value === null) {
+    return undefined;
+  }
+  const links: Record<string, string> = {};
+  for (const part of value.split(",")) {
+    const match = /^\s*<([^<>]+)>\s*;\s*rel="([^"]+)"\s*$/u.exec(part);
+    if (match === null) {
+      continue;
+    }
+    const [, url, relation] = match;
+    if (url !== undefined && (relation === "next" || relation === "previous")) {
+      links[relation] = url;
+    }
+  }
+  return Object.keys(links).length === 0
+    ? undefined
+    : {
+        ...(links.next === undefined ? {} : { next: links.next }),
+        ...(links.previous === undefined ? {} : { previous: links.previous }),
+      };
+}
+
 function metadata(response: Response, now = Date.now()): GitHubResponseMetadata {
   const resetSeconds = finiteHeaderNumber(response.headers, "x-ratelimit-reset");
   const limit = finiteHeaderNumber(response.headers, "x-ratelimit-limit");
@@ -49,9 +73,11 @@ function metadata(response: Response, now = Date.now()): GitHubResponseMetadata 
     ...([limit, remaining, used].some((item) => item.malformed) ? ["malformed_counter" as const] : []),
   ];
   const resetAt = resetSeconds.value === undefined ? undefined : resetSeconds.value * 1_000;
+  const pagination = linkPagination(response.headers);
   return {
     status: response.status,
     ...(requestId === null ? {} : { requestId }),
+    ...(pagination === undefined ? {} : { pagination }),
     rateLimit: {
       ...(limit.value === undefined ? {} : { limit: limit.value }),
       ...(remaining.value === undefined ? {} : { remaining: remaining.value }),

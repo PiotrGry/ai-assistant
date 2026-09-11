@@ -40,3 +40,22 @@ export type {
   GitHubRestReadRequest,
   GitHubRestWriteRequest,
 } from "./transport-types.js";
+export {
+  GitHubIssueReader,
+  githubIssueQueryFields,
+  type GitHubIssueDirection,
+  type GitHubIssueLabel,
+  type GitHubIssueListFilter,
+  type GitHubIssueMilestone,
+  type GitHubIssueMilestoneSummary,
+  type GitHubIssuePage,
+  type GitHubIssuePageOptions,
+  type GitHubIssueReadTransport,
+  type GitHubIssueRef,
+  type GitHubIssueSearchFilter,
+  type GitHubIssueSort,
+  type GitHubIssueState,
+  type GitHubIssueStateFilter,
+  type GitHubIssueSummary,
+  type GitHubIssueUser,
+} from "./issue-read.js";

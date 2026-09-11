@@ -49,3 +49,20 @@ Later Issue and Project clients should expose focused domain methods and use
 `GitHubTransport.restRead()` / `graphqlRead()` for reads and the queue plus a
 write transport method for mutations. They must not expose an unrestricted
 GitHub executor to workers.
+
+## Issue read client
+
+`GitHubIssueReader` exposes only the Issue read surface needed by M1:
+
+- `getIssue(number)` uses the REST Issue endpoint;
+- `listIssues(filter, pageOptions)` uses bounded REST pagination and filters
+  pull requests from the Issue collection;
+- `searchIssues(filter, pageOptions)` uses a focused GraphQL `search` query
+  requesting only Issue summary fields.
+
+Results use `GitHubIssueSummary` and `GitHubIssuePage<T>`, never raw REST
+payloads or GraphQL nodes. `pageSize` is limited to 100, `maxItems` defaults
+to 100 and is capped at 1,000. Returned cursors are opaque and operation-
+specific. A failed later page remains a normalized failure and includes the
+failed cursor plus the number of items already read; it is never marked as a
+complete page.

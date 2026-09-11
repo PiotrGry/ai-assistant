@@ -16,6 +16,9 @@ export type GitHubErrorCode =
   | "cancelled"
   | "malformed_response"
   | "invalid_request"
+  | "invalid_filter"
+  | "invalid_cursor"
+  | "partial_page"
   | "graphql_error"
   | "queue_full"
   | "duplicate_conflict"
@@ -41,11 +44,16 @@ export interface GitHubResponseMetadata {
   readonly status: number;
   readonly requestId?: string;
   readonly rateLimit: GitHubRateLimitMetadata;
+  readonly pagination?: {
+    readonly next?: string;
+    readonly previous?: string;
+  };
 }
 
 export interface GitHubOperationError {
   readonly code: GitHubErrorCode;
   readonly message: string;
+  readonly details?: Readonly<Record<string, string | number>>;
 }
 
 interface GitHubResultBase {
@@ -88,10 +96,15 @@ export function failure(
   correlationId: string,
   remoteOutcome: GitHubRemoteOutcome,
   response?: GitHubResponseMetadata,
+  details?: Readonly<Record<string, string | number>>,
 ): GitHubFailure {
   return {
     outcome,
-    error: { code, message },
+    error: {
+      code,
+      message,
+      ...(details === undefined ? {} : { details }),
+    },
     correlationId,
     remoteOutcome,
     ...(response === undefined ? {} : { response }),
