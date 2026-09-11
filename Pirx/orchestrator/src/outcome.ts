@@ -19,6 +19,8 @@ export type GitHubErrorCode =
   | "invalid_filter"
   | "invalid_cursor"
   | "partial_page"
+  | "conflict"
+  | "validation_failed"
   | "graphql_error"
   | "queue_full"
   | "duplicate_conflict"

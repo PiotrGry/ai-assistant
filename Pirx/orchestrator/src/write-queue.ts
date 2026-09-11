@@ -12,6 +12,8 @@ export interface GitHubWriteOperation<T> {
   readonly operationKind: string;
   readonly idempotencyKey: string;
   readonly target: string;
+  /** The caller's stable correlation identity. Defaults to the queue factory. */
+  readonly correlationId?: string;
   readonly timeoutMs: number;
   /** Enables #52 retry handling for this mutation when explicitly true. */
   readonly idempotent?: boolean;
@@ -90,7 +92,7 @@ export class GitHubWriteQueue {
   }
 
   submit<T>(operation: GitHubWriteOperation<T>): Promise<GitHubOperationResult<T>> {
-    const correlationId = this.#correlationIdFactory();
+    const correlationId = operation.correlationId?.trim() || this.#correlationIdFactory();
     const key = operation.idempotencyKey;
     if (typeof key !== "string" || key.trim().length === 0) {
       return Promise.resolve(invalidOperation(correlationId, "GitHub mutation idempotencyKey is required."));

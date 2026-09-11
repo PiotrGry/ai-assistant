@@ -59,3 +59,25 @@ export {
   type GitHubIssueSummary,
   type GitHubIssueUser,
 } from "./issue-read.js";
+export {
+  GitHubIssueMutator,
+  type GitHubCommentRef,
+  type GitHubIssueCloseRequest,
+  type GitHubIssueCreateRequest,
+  type GitHubIssueExpectedState,
+  type GitHubIssueMutationResult,
+  type GitHubIssueMutationTransport,
+  type GitHubIssueMutatorOptions,
+  type GitHubIssuePatch,
+  type GitHubIssueReopenRequest,
+  type GitHubIssueUpdateRequest,
+  type GitHubIssueMilestonePatch,
+  type GitHubLifecycleCommentEnvelope,
+  type GitHubLifecycleCommentRequest,
+  type GitHubLifecycleCommentResult,
+} from "./issue-mutate.js";
+export {
+  GitHubIssueLifecycleRoundTrip,
+  type GitHubIssueRoundTripEvidence,
+  type GitHubIssueRoundTripRequest,
+} from "./issue-round-trip.js";

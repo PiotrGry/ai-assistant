@@ -12,7 +12,8 @@
     "typecheck": "tsc -p orchestrator/tsconfig.json --noEmit && tsc -p orchestrator/tsconfig.test.json --noEmit && tsc -p mcp-server/tsconfig.json --noEmit && tsc -p mcp-server/tsconfig.test.json --noEmit && tsc -p agent/tsconfig.json --noEmit && tsc -p agent/tsconfig.test.json --noEmit && tsc -p tui/tsconfig.json --noEmit && tsc -p tui/tsconfig.test.json --noEmit",
     "test": "npm run build && tsc -p orchestrator/tsconfig.test.json && node --test orchestrator/dist-test/test/*.test.js && tsc -p mcp-server/tsconfig.test.json && node --test mcp-server/dist-test/test/*.test.js && tsc -p agent/tsconfig.test.json && node --test agent/dist-test/test/*.test.js && tsc -p tui/tsconfig.test.json && node --test tui/dist-test/test/*.test.js",
     "check": "npm run typecheck && npm run test",
-    "calendar:authorize": "pnpm --filter @pirx/mcp-server calendar:authorize",
+  "calendar:authorize": "pnpm --filter @pirx/mcp-server calendar:authorize",
+  "github:round-trip": "pnpm --filter @pirx/orchestrator github:round-trip",
     "start": "node --enable-source-maps agent/dist/index.js",
     "tui": "node --enable-source-maps tui/dist/index.js"
   },

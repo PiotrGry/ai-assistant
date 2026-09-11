@@ -116,6 +116,9 @@ function responseResult<T>(
   if (response.status === 429) {
     return failure("rate_limited", "rate_limited", "GitHub rate limit was reached.", correlationId, "not_accepted", responseMetadata);
   }
+  if (response.status === 422) {
+    return failure("permanent_error", "validation_failed", "GitHub rejected the mutation validation.", correlationId, remoteOutcome, responseMetadata);
+  }
   if (response.status >= 500) {
     return failure("retryable_error", "retryable", "GitHub is temporarily unavailable.", correlationId, remoteOutcome, responseMetadata);
   }
