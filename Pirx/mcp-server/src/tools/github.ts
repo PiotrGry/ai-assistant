@@ -108,7 +108,10 @@ function mapResult(result: GitHubOperationResult<unknown>) {
         correlationId: result.correlationId,
         remoteOutcome: result.remoteOutcome,
         errorCode: result.error.code,
-        message: result.error.message,
+        message:
+          result.error.code === "authentication"
+            ? "GitHub authentication failed. Run gh auth login first."
+            : result.error.message,
       },
       true,
     );
