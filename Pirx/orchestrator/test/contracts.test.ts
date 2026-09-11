@@ -56,6 +56,50 @@ test("loadGitHubConfig validates fields without exposing the token", () => {
   );
 });
 
+test("loadGitHubConfig does not require project settings for Issue operations", () => {
+  assert.deepEqual(
+    loadGitHubConfig(
+      {
+        PIRX_GITHUB_OWNER: "owner",
+        PIRX_GITHUB_REPOSITORY: "repo",
+      },
+      { tokenProvider: () => "token" },
+    ),
+    {
+      token: "token",
+      owner: "owner",
+      repository: "repo",
+      apiUrl: "https://api.github.com",
+      timeoutMs: 10_000,
+    },
+  );
+});
+
+test("GitHub CLI authentication failures are actionable without exposing credentials", () => {
+  assert.throws(
+    () =>
+      loadGitHubConfig(
+        {
+          PIRX_GITHUB_OWNER: "owner",
+          PIRX_GITHUB_REPOSITORY: "repo",
+        },
+        {
+          tokenProvider: () => {
+            throw new GitHubConfigurationError(
+              "GitHub CLI authentication is unavailable. Run gh auth login first.",
+            );
+          },
+        },
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof GitHubConfigurationError);
+      assert.match(error.message, /gh auth login/u);
+      assert.doesNotMatch(error.message, /token/u);
+      return true;
+    },
+  );
+});
+
 test("REST transport sends auth at the boundary and returns typed metadata", async () => {
   let requestUrl: URL | undefined;
   let requestInit: RequestInit | undefined;

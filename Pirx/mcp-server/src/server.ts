@@ -5,6 +5,7 @@ import {
   GitHubIssueReader,
   GitHubTransport,
   GitHubWriteQueue,
+  GitHubConfigurationError,
   loadGitHubConfig,
   type GitHubConfig,
   type GitHubIssueMutationTransport,
@@ -61,9 +62,11 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
     if (githubConfig === undefined && configurationError === undefined) {
       try {
         githubConfig = loadGitHubConfig(environment);
-      } catch {
+      } catch (error: unknown) {
         configurationError =
-          "GitHub POC is unavailable because its required configuration is incomplete.";
+          error instanceof GitHubConfigurationError
+            ? error.message
+            : "GitHub POC is unavailable because its required configuration is incomplete.";
       }
     }
     const transport =

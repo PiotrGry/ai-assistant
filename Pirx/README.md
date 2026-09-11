@@ -165,7 +165,6 @@ Konfiguracja GitHub pozostaje w procesie serwera MCP/orchestratora:
 - uwierzytelnienie pochodzi z `gh auth token`; wykonaj wcześniej `gh auth login`
   (opcjonalnie ustaw `GH_CONFIG_DIR` dla niestandardowego profilu),
 - `PIRX_GITHUB_OWNER` i `PIRX_GITHUB_REPOSITORY`,
-- `PIRX_GITHUB_PROJECT_OWNER` i `PIRX_GITHUB_PROJECT_NUMBER`,
 - `PIRX_GITHUB_POC_ISSUE` — stały numer Issue sandboxa,
 - opcjonalnie `PIRX_GITHUB_API_URL` i `PIRX_GITHUB_TIMEOUT_MS`.
 

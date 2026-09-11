@@ -4,8 +4,8 @@ export interface GitHubConfig {
   readonly token: string;
   readonly owner: string;
   readonly repository: string;
-  readonly projectOwner: string;
-  readonly projectNumber: number;
+  readonly projectOwner?: string;
+  readonly projectNumber?: number;
   readonly apiUrl: string;
   readonly timeoutMs: number;
 }
@@ -95,18 +95,19 @@ export function loadGitHubConfig(
   const apiEndpoint = apiUrl(env.PIRX_GITHUB_API_URL);
   const owner = required(env, "PIRX_GITHUB_OWNER");
   const repository = required(env, "PIRX_GITHUB_REPOSITORY");
-  const projectOwner = required(env, "PIRX_GITHUB_PROJECT_OWNER");
-  const projectNumber = positiveInteger(
-    required(env, "PIRX_GITHUB_PROJECT_NUMBER"),
-    "PIRX_GITHUB_PROJECT_NUMBER",
-  );
+  const projectOwner = env.PIRX_GITHUB_PROJECT_OWNER?.trim() || undefined;
+  const projectNumberText = env.PIRX_GITHUB_PROJECT_NUMBER?.trim();
+  const projectNumber =
+    projectNumberText === undefined || projectNumberText.length === 0
+      ? undefined
+      : positiveInteger(projectNumberText, "PIRX_GITHUB_PROJECT_NUMBER");
   const hostname = githubHostname(apiEndpoint);
   return {
     token: options.tokenProvider?.(hostname) ?? ghAuthToken(hostname),
     owner,
     repository,
-    projectOwner,
-    projectNumber,
+    ...(projectOwner === undefined ? {} : { projectOwner }),
+    ...(projectNumber === undefined ? {} : { projectNumber }),
     apiUrl: apiEndpoint,
     timeoutMs: positiveInteger(timeoutText, "PIRX_GITHUB_TIMEOUT_MS"),
   };

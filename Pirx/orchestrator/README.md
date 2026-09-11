@@ -13,8 +13,6 @@ and obtains the credential with `gh auth token`:
   GitHub CLI profile,
 - `PIRX_GITHUB_OWNER`
 - `PIRX_GITHUB_REPOSITORY`
-- `PIRX_GITHUB_PROJECT_OWNER`
-- `PIRX_GITHUB_PROJECT_NUMBER`
 - optional `PIRX_GITHUB_API_URL` (defaults to `https://api.github.com`)
 - optional `PIRX_GITHUB_TIMEOUT_MS` (defaults to `10000`)
 
