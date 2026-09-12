@@ -69,6 +69,7 @@ test("SessionLogger persists the environment, session and completed turn", async
   });
   const turn = logger.beginTurn("Sprawdź stan.");
   assert.ok(turn.actionLedger !== undefined);
+  assert.equal(turn.turnId, turn.id);
   await logger.saveTurn(
     "Sprawdź stan.",
     "Stan jest poprawny.",

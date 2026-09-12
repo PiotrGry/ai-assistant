@@ -71,7 +71,7 @@ test("action ledger persists planned, started and succeeded transitions", async 
   }
 });
 
-test("the same logical mutation is deduplicated across turns", async () => {
+test("unkeyed mutations are scoped to a turn, keyed mutations replay across turns", async () => {
   const { directory, store } = await createStore();
   try {
     const ledger = new SqliteActionLedger(store);
@@ -84,10 +84,19 @@ test("the same logical mutation is deduplicated across turns", async () => {
     assert.equal(duplicate.operationId, "");
 
     const laterTurn = ledger.plan({ ...input, turnId: "turn-2" });
-    assert.equal(laterTurn.mutationId, first.mutationId);
-    assert.equal(laterTurn.alreadySucceeded, true);
-    assert.equal(laterTurn.operationId, "");
-    assert.equal(mutationId(input), mutationId({ ...input, turnId: "turn-2" }));
+    assert.notEqual(laterTurn.mutationId, first.mutationId);
+    assert.equal(laterTurn.alreadySucceeded, false);
+    assert.notEqual(laterTurn.operationId, "");
+    assert.notEqual(mutationId(input), mutationId({ ...input, turnId: "turn-2" }));
+
+    const keyedInput = { ...input, turnId: "turn-2", sequence: 1, arguments: { ...input.arguments, idempotencyKey: "logical-operation-1" } };
+    const keyedFirst = ledger.plan(keyedInput);
+    ledger.start(keyedFirst);
+    ledger.finish(keyedFirst, "succeeded");
+    const keyedReplay = ledger.plan({ ...keyedInput, turnId: "turn-2" });
+    assert.equal(keyedReplay.mutationId, keyedFirst.mutationId);
+    assert.equal(keyedReplay.alreadySucceeded, true);
+    assert.equal(keyedReplay.operationId, "");
   } finally {
     store.close();
     await rm(directory, { recursive: true, force: true });

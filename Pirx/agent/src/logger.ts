@@ -15,6 +15,8 @@ import { readGpuStats } from "./telemetry.js";
 
 export interface SessionTurn {
   readonly id: string;
+  /** The ChatTurnContext name used by PirxAgent for host authorization. */
+  readonly turnId: string;
   readonly sequence: number;
   readonly sessionId?: string;
   readonly actionLedger?: SqliteActionLedger;
@@ -180,8 +182,10 @@ export class SessionLogger {
     if (this.#closed) {
       throw new Error("Session logger is closed.");
     }
+    const id = randomUUID();
     const turn: SessionTurn = {
-      id: randomUUID(),
+      id,
+      turnId: id,
       sequence: this.#turnSequence,
       ...(this.#sessionId === undefined ? {} : { sessionId: this.#sessionId }),
       ...(this.actionLedger === undefined ? {} : { actionLedger: this.actionLedger }),

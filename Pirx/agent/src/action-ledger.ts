@@ -47,13 +47,25 @@ function stableSerialize(value: unknown): string {
 }
 
 export function mutationId(input: ActionPlanInput): string {
+  const explicitOperationKey = explicitOperationIdentity(input.arguments);
   const operation = [
     input.sessionId,
+    explicitOperationKey === undefined ? input.turnId : explicitOperationKey,
     input.toolName,
     input.target,
     stableArguments(input.arguments),
   ].join("\u0000");
   return createHash("sha256").update(operation).digest("hex");
+}
+
+function explicitOperationIdentity(arguments_: Record<string, unknown>): string | undefined {
+  for (const key of ["idempotencyKey", "eventId"]) {
+    const value = arguments_[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return `${key}:${value}`;
+    }
+  }
+  return undefined;
 }
 
 function stableArguments(arguments_: Record<string, unknown>): string {
