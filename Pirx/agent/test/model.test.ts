@@ -119,6 +119,7 @@ test("switches runtime model only after Ollama validates it", async (context) =>
   assert.equal(turn.content, "ready");
   assert.equal(turn.metrics.model, "beta");
   assert.equal(requests.at(-1)?.model, "beta");
+  assert.equal(requests.at(-1)?.think, false);
 
   await activeAgent.close();
   agent = undefined;

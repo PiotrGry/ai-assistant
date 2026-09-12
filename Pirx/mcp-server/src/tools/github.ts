@@ -7,10 +7,11 @@ import {
   GitHubIssueLifecycleRoundTrip,
   GitHubIssueMutator,
   GitHubIssueReader,
-  GitHubWriteQueue,
   type GitHubConfig,
   type GitHubOperationResult,
 } from "@pirx/orchestrator";
+
+import { verifyHostAuthorization } from "../authorization.js";
 
 import type { GitHubPocTransport } from "../server.js";
 
@@ -151,6 +152,9 @@ export function registerGitHubPocTool(
     readonly config: GitHubConfig | undefined;
     readonly transport: GitHubPocTransport | undefined;
     readonly configurationError: string | undefined;
+    readonly authorizationSecret: string | undefined;
+    readonly reader: GitHubIssueReader | undefined;
+    readonly mutator: GitHubIssueMutator | undefined;
   },
 ): void {
   server.registerTool(
@@ -168,7 +172,7 @@ export function registerGitHubPocTool(
         openWorldHint: true,
       },
     },
-    async ({ eventId, summary, correlationId }) => {
+    async ({ eventId, summary, correlationId }, context) => {
       if (options.issue === undefined) {
         return unavailable(
           options.configurationError ??
@@ -186,14 +190,32 @@ export function registerGitHubPocTool(
         return unavailable("GitHub POC is unavailable because GitHub configuration is incomplete.");
       }
 
-      const reader = new GitHubIssueReader(options.transport, options.config);
-      const queue = new GitHubWriteQueue();
-      const mutator = new GitHubIssueMutator(options.transport, reader, queue, options.config);
+      const authorization = verifyHostAuthorization(
+        options.authorizationSecret,
+        context.mcpReq._meta,
+        "github_issue_round_trip_poc",
+        { eventId, summary, ...(correlationId === undefined ? {} : { correlationId }) },
+      );
+      if (authorization === undefined) {
+        return structured({
+          outcome: "permanent_error",
+          correlationId: correlationId ?? randomUUID(),
+          remoteOutcome: "not_accepted",
+          errorCode: "authorization_required",
+          message: "This GitHub mutation must be authorized by the Pirx host for this exact tool target and argument set.",
+        }, true);
+      }
+      const reader = options.reader;
+      const mutator = options.mutator;
+      if (reader === undefined || mutator === undefined) {
+        return unavailable("GitHub POC is unavailable because its shared GitHub service is not configured.");
+      }
       const roundTrip = new GitHubIssueLifecycleRoundTrip(reader, mutator);
       try {
         const result = await roundTrip.execute({
           issue: options.issue,
           replay: true,
+          idempotencyKey: authorization.idempotencyKey,
           ...(correlationId === undefined ? {} : { correlationId }),
           lifecycle: {
             eventId,
@@ -207,7 +229,6 @@ export function registerGitHubPocTool(
       } catch {
         return unavailable("GitHub POC failed before a normalized result was produced.");
       } finally {
-        await queue.close({ drain: true });
       }
     },
   );

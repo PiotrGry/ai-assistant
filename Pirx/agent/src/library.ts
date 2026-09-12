@@ -11,6 +11,13 @@ export { loadConfig } from "./config.js";
 export type { AgentConfig, StorageMode, SystemPrompt } from "./config.js";
 export { parseOllamaModelNames } from "./ollama-models.js";
 export { mutationId, SqliteActionLedger } from "./action-ledger.js";
+export {
+  HOST_AUTHORIZATION_META_KEY,
+  argumentsHash,
+  createHostAuthorization,
+  toolTarget,
+} from "./mcp-authorization.js";
+export type { HostToolAuthorization } from "./mcp-authorization.js";
 export type {
   ActionPlan,
   ActionPlanInput,

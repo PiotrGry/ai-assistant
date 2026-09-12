@@ -6,17 +6,13 @@ import * as z from "zod/v4";
 import {
   GitHubIssueMutator,
   GitHubIssueReader,
-  GitHubWriteQueue,
-  type GitHubConfig,
   type GitHubIssueMutationResult,
-  type GitHubIssueMutationTransport,
-  type GitHubIssueReadTransport,
   type GitHubIssueRef,
   type GitHubIssueSummary,
   type GitHubOperationResult,
 } from "@pirx/orchestrator";
 
-type GitHubIssueTransport = GitHubIssueReadTransport & GitHubIssueMutationTransport;
+import { verifyHostAuthorization } from "../authorization.js";
 
 const safeText = (max: number) => z.string().trim().min(1).max(max).refine(
   (value) => !/[\u0000-\u001f\u007f]/u.test(value) &&
@@ -30,10 +26,9 @@ const labels = z.array(safeText(100)).max(100);
 const milestone = z.union([z.literal("none"), issueNumber]);
 const correlationId = safeText(256).optional();
 const idempotencyKey = safeText(256).optional();
-const confirmation = z.boolean().default(false);
 const paging = z.object({
   pageSize: z.number().int().min(1).max(100).optional(),
-  maxItems: z.number().int().min(1).max(1_000).optional(),
+  maxItems: z.number().int().min(1).max(100).optional(),
   cursor: safeText(2_000).optional(),
 });
 const filter = z.object({
@@ -51,21 +46,27 @@ const issueRefSchema = z.object({
   number: issueNumber, url: z.string(),
 });
 const issueSchema = issueRefSchema.extend({
-  title: z.string(), body: z.string().optional(), state: issueState,
+  title: z.string(), body: z.string().max(2_000).optional(), state: issueState,
   author: authorSchema.optional(), labels: z.array(labelSchema),
   assignees: z.array(authorSchema),
   milestone: z.object({ number: issueNumber, title: z.string(), state: issueState.optional() }).optional(),
   createdAt: z.string(), updatedAt: z.string(), closedAt: z.string().optional(),
   parentIssue: issueRefSchema.optional(), blockingIssueNumbers: z.array(issueNumber).optional(),
 });
+const rawIssueSchema = issueSchema.extend({ body: z.string().max(65_536).optional() });
 const commentSchema = z.object({ id: issueNumber, url: z.string() });
 const failureSchema = z.object({
   outcome: z.enum(["rate_limited", "retryable_error", "permanent_error", "unknown"]),
   remoteOutcome: z.enum(["accepted", "not_accepted", "unknown"]),
   correlationId: z.string(), errorCode: z.string(), message: z.string(),
+  retryAfterMs: z.number().int().nonnegative().optional(),
+  resetAt: z.number().int().nonnegative().optional(),
 });
 const pageSchema = z.object({
   items: z.array(issueSchema), nextCursor: z.string().optional(), complete: z.boolean(),
+});
+const rawPageSchema = z.object({
+  items: z.array(rawIssueSchema), nextCursor: z.string().optional(), complete: z.boolean(),
 });
 const readSuccess = (value: z.ZodTypeAny) => z.object({
   outcome: z.literal("success"), remoteOutcome: z.literal("accepted"), correlationId: z.string(),
@@ -109,17 +110,37 @@ function mapFailure(result: GitHubFailureResult) {
   const message = result.error.code === "authentication"
     ? "GitHub authentication failed. Run gh auth login first."
     : result.error.message;
+  const rateLimit = result.response?.rateLimit;
   return structured({
     outcome: result.outcome,
     remoteOutcome: result.remoteOutcome,
     correlationId: result.correlationId,
     errorCode: result.error.code,
     message,
+    ...(rateLimit?.retryAfterMs === undefined ? {} : { retryAfterMs: rateLimit.retryAfterMs }),
+    ...(rateLimit?.resetAt === undefined ? {} : { resetAt: rateLimit.resetAt }),
   }, true);
 }
 
 function mapIssue(value: unknown): GitHubIssueSummary | undefined {
-  return issueSchema.safeParse(value).success ? value as GitHubIssueSummary : undefined;
+  const parsed = rawIssueSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const body = parsed.data.body;
+  return body === undefined || body.length <= 2_000
+    ? parsed.data as GitHubIssueSummary
+    : { ...parsed.data, body: `${body.slice(0, 1_950)}\n[… body truncated by Pirx MCP …]` } as GitHubIssueSummary;
+}
+
+function mapPage(value: unknown): { readonly items: readonly GitHubIssueSummary[]; readonly nextCursor?: string; readonly complete: boolean } | undefined {
+  const parsed = rawPageSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const items = parsed.data.items.map(mapIssue);
+  if (items.some((item): item is undefined => item === undefined)) return undefined;
+  return {
+    items: items as GitHubIssueSummary[],
+    ...(parsed.data.nextCursor === undefined ? {} : { nextCursor: parsed.data.nextCursor }),
+    complete: parsed.data.complete,
+  };
 }
 
 function issueRef(value: GitHubIssueRef) {
@@ -157,30 +178,29 @@ function expectedState(expectedStateValue: "open" | "closed" | undefined, expect
     };
 }
 
-function confirmOrReject(confirmed: boolean, correlation: string) {
-  return confirmed
-    ? undefined
-    : failureResult(correlation, "confirmation_required", "This GitHub mutation requires explicit user confirmation. Confirm it before retrying.");
+function authorizationOrReject(
+  secret: string | undefined,
+  context: { readonly mcpReq: { readonly _meta?: unknown } },
+  toolName: string,
+  input: Record<string, unknown>,
+  correlation: string,
+) {
+  return verifyHostAuthorization(secret, context.mcpReq._meta, toolName, input) ??
+    failureResult(correlation, "authorization_required", "This GitHub mutation must be authorized by the Pirx host for this exact tool target and argument set.");
 }
 
 export function registerGitHubIssueTools(
   server: McpServer,
   options: {
-    readonly config: GitHubConfig | undefined;
-    readonly transport: GitHubIssueTransport | undefined;
     readonly configurationError: string | undefined;
+    readonly authorizationSecret: string | undefined;
+    readonly reader: GitHubIssueReader | undefined;
+    readonly mutator: GitHubIssueMutator | undefined;
   },
 ): void {
   const unavailableMessage = options.configurationError ?? "GitHub Issue tools are unavailable because GitHub is not configured.";
-  const reader = options.config === undefined || options.transport === undefined
-    ? undefined
-    : new GitHubIssueReader(options.transport, options.config);
-  const queue = reader === undefined || options.config === undefined || options.transport === undefined
-    ? undefined
-    : new GitHubWriteQueue();
-  const mutator = reader === undefined || queue === undefined || options.config === undefined || options.transport === undefined
-    ? undefined
-    : new GitHubIssueMutator(options.transport, reader, queue, options.config);
+  const reader = options.reader;
+  const mutator = options.mutator;
 
   server.registerTool("github_issue_get", {
     title: "Get an Issue in the configured repository",
@@ -192,7 +212,11 @@ export function registerGitHubIssueTools(
     const correlation = requestedCorrelation ?? randomUUID();
     if (reader === undefined) return unavailable(unavailableMessage, correlation);
     const result = await reader.getIssue(number, { correlationId: correlation });
-    return result.outcome === "success" ? mapRead(result, { issue: result.value }) : mapFailure(result);
+    if (result.outcome !== "success") return mapFailure(result);
+    const issue = mapIssue(result.value);
+    return issue === undefined
+      ? unavailable("GitHub returned an invalid normalized Issue result.", correlation)
+      : mapRead(result, { issue });
   });
 
   server.registerTool("github_issue_list", {
@@ -211,66 +235,74 @@ export function registerGitHubIssueTools(
       ...(input.sort === undefined ? {} : { sort: input.sort }),
       ...(input.direction === undefined ? {} : { direction: input.direction }),
     }, {
-      ...(input.pageSize === undefined ? {} : { pageSize: input.pageSize }),
-      ...(input.maxItems === undefined ? {} : { maxItems: input.maxItems }),
+      pageSize: input.pageSize ?? 25,
+      maxItems: input.maxItems ?? 25,
       ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
       correlationId: correlation,
     });
-    return result.outcome === "success" ? mapRead(result, { page: result.value }) : mapFailure(result);
+    if (result.outcome !== "success") return mapFailure(result);
+    const page = mapPage(result.value);
+    return page === undefined
+      ? unavailable("GitHub returned an invalid normalized Issue page.", correlation)
+      : mapRead(result, { page });
   });
 
   server.registerTool("github_issue_search", {
     title: "Search Issues in the configured repository",
     description: "Search bounded current Issues using repository-scoped filters. The repository cannot be changed by the caller.",
-    inputSchema: filter.extend(paging.shape).extend({ text: safeText(256), correlationId }).strict(),
+    inputSchema: filter.extend(paging.shape).extend({ text: safeText(256).optional(), correlationId }).strict(),
     outputSchema: z.union([readSuccess(z.object({ page: pageSchema })), failureSchema]),
     annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   }, async (input) => {
     const correlation = input.correlationId ?? randomUUID();
     if (reader === undefined) return unavailable(unavailableMessage, correlation);
     const result = await reader.searchIssues({
-      text: input.text,
+      ...(input.text === undefined ? {} : { text: input.text }),
       ...(input.state === undefined ? {} : { state: input.state }),
       ...(input.labels === undefined ? {} : { labels: input.labels }),
       ...(input.milestone === undefined ? {} : { milestone: input.milestone }),
       ...(input.sort === undefined ? {} : { sort: input.sort }),
       ...(input.direction === undefined ? {} : { direction: input.direction }),
     }, {
-      ...(input.pageSize === undefined ? {} : { pageSize: input.pageSize }),
-      ...(input.maxItems === undefined ? {} : { maxItems: input.maxItems }),
+      pageSize: input.pageSize ?? 25,
+      maxItems: input.maxItems ?? 25,
       ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
       correlationId: correlation,
     });
-    return result.outcome === "success" ? mapRead(result, { page: result.value }) : mapFailure(result);
+    if (result.outcome !== "success") return mapFailure(result);
+    const page = mapPage(result.value);
+    return page === undefined
+      ? unavailable("GitHub returned an invalid normalized Issue page.", correlation)
+      : mapRead(result, { page });
   });
 
   const createInput = z.object({
     title: safeText(256), body: z.string().max(65_536).nullable().optional(), labels: labels.optional(), milestone: milestone.optional(),
-    idempotencyKey, correlationId, confirmed: confirmation,
+    idempotencyKey, correlationId,
   }).strict();
   server.registerTool("github_issue_create", {
     title: "Create an Issue in the configured repository",
-    description: "Create one GitHub Issue in the server-configured repository. This mutation requires explicit user confirmation and is never sent to another repository.",
+    description: "Create one GitHub Issue in the server-configured repository. Pirx host authorization is required and is bound to this exact operation.",
     inputSchema: createInput, outputSchema: z.union([mutationSuccess, failureSchema]),
     annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: true },
-  }, async (input) => {
+  }, async (input, context) => {
     const correlation = input.correlationId ?? randomUUID();
-    const denied = confirmOrReject(input.confirmed, correlation);
-    if (denied !== undefined) return denied;
+    const authorization = authorizationOrReject(options.authorizationSecret, context, "github_issue_create", input, correlation);
+    if (!("idempotencyKey" in authorization)) return authorization;
     if (mutator === undefined) return unavailable(unavailableMessage, correlation);
     return mapMutation(await mutator.createIssue({
       title: input.title,
       ...(input.body === undefined ? {} : { body: input.body }),
       ...(input.labels === undefined ? {} : { labels: input.labels }),
       ...(input.milestone === undefined ? {} : { milestone: input.milestone }),
-      idempotencyKey: input.idempotencyKey ?? `mcp-create:${randomUUID()}`,
+      idempotencyKey: authorization.idempotencyKey,
       correlationId: correlation,
     }));
   });
 
   const updateInput = z.object({
     issueNumber, title: safeText(256).optional(), body: z.string().max(65_536).nullable().optional(), state: issueState.optional(), labels: labels.optional(), milestone: milestone.optional(),
-    expectedState: issueState.optional(), expectedUpdatedAt: safeText(100).optional(), idempotencyKey, correlationId, confirmed: confirmation,
+    expectedState: issueState.optional(), expectedUpdatedAt: safeText(100).optional(), idempotencyKey, correlationId,
   }).strict().superRefine((input, context) => {
     if (input.title === undefined && input.body === undefined && input.state === undefined && input.labels === undefined && input.milestone === undefined) {
       context.addIssue({ code: "custom", message: "At least one Issue field must be supplied.", input });
@@ -278,13 +310,13 @@ export function registerGitHubIssueTools(
   });
   server.registerTool("github_issue_update", {
     title: "Update an Issue in the configured repository",
-    description: "Update supported fields on one Issue in the server-configured repository. This mutation requires explicit user confirmation.",
+    description: "Update supported fields on one Issue in the server-configured repository. Pirx host authorization is required and optimistic conflicts are reported.",
     inputSchema: updateInput, outputSchema: z.union([mutationSuccess, failureSchema]),
     annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: true },
-  }, async (input) => {
+  }, async (input, context) => {
     const correlation = input.correlationId ?? randomUUID();
-    const denied = confirmOrReject(input.confirmed, correlation);
-    if (denied !== undefined) return denied;
+    const authorization = authorizationOrReject(options.authorizationSecret, context, "github_issue_update", input, correlation);
+    if (!("idempotencyKey" in authorization)) return authorization;
     if (mutator === undefined) return unavailable(unavailableMessage, correlation);
     const patch = {
       ...(input.title === undefined ? {} : { title: input.title }),
@@ -298,26 +330,26 @@ export function registerGitHubIssueTools(
       issue: input.issueNumber,
       patch,
       ...(expected === undefined ? {} : { expected }),
-      idempotencyKey: input.idempotencyKey ?? `mcp-update:${input.issueNumber}:${randomUUID()}`,
+      idempotencyKey: authorization.idempotencyKey,
       correlationId: correlation,
     }));
   });
 
-  const commentInput = z.object({ issueNumber, comment: safeText(500), eventId: safeText(256).optional(), idempotencyKey, correlationId, confirmed: confirmation }).strict();
+  const commentInput = z.object({ issueNumber, comment: safeText(500), eventId: safeText(256).optional(), idempotencyKey, correlationId }).strict();
   server.registerTool("github_issue_comment", {
     title: "Comment on an Issue in the configured repository",
-    description: "Publish one marked lifecycle comment on an Issue in the server-configured repository. This mutation requires explicit user confirmation and is idempotent when the same event is retried.",
+    description: "Publish one marked lifecycle comment on an Issue in the server-configured repository. Pirx host authorization is required and replay is idempotent.",
     inputSchema: commentInput, outputSchema: z.union([commentSuccess, failureSchema]),
     annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: true },
-  }, async (input) => {
+  }, async (input, context) => {
     const correlation = input.correlationId ?? randomUUID();
-    const denied = confirmOrReject(input.confirmed, correlation);
-    if (denied !== undefined) return denied;
+    const authorization = authorizationOrReject(options.authorizationSecret, context, "github_issue_comment", input, correlation);
+    if (!("idempotencyKey" in authorization)) return authorization;
     if (mutator === undefined) return unavailable(unavailableMessage, correlation);
-    const eventId = input.eventId ?? input.idempotencyKey ?? randomUUID();
+    const eventId = input.eventId ?? authorization.idempotencyKey;
     const result = await mutator.publishLifecycleComment({
       issue: input.issueNumber,
-      idempotencyKey: input.idempotencyKey ?? `mcp-comment:${input.issueNumber}:${eventId}`,
+      idempotencyKey: authorization.idempotencyKey,
       correlationId: correlation,
       envelope: { eventId, eventType: "manual.pirx_mcp.github_issue_comment", taskId: "github-issue-comment", timestamp: new Date().toISOString(), summary: input.comment },
     });
@@ -325,23 +357,23 @@ export function registerGitHubIssueTools(
     return structured({ outcome: "success", remoteOutcome: result.remoteOutcome, correlationId: result.correlationId, issue: issueRef(result.value.issue), comment: result.value.comment, eventId: result.value.eventId, changed: result.value.changed, noOp: result.value.noOp, idempotencyKey: result.value.idempotencyKey });
   });
 
-  const transitionInput = z.object({ issueNumber, expectedState: issueState.optional(), expectedUpdatedAt: safeText(100).optional(), idempotencyKey, correlationId, confirmed: confirmation }).strict();
+  const transitionInput = z.object({ issueNumber, expectedState: issueState.optional(), expectedUpdatedAt: safeText(100).optional(), idempotencyKey, correlationId }).strict();
   for (const [name, transition, title] of [["github_issue_close", "close", "Close"], ["github_issue_reopen", "reopen", "Reopen"]] as const) {
     server.registerTool(name, {
       title: `${title} an Issue in the configured repository`,
-      description: `${title} one Issue in the server-configured repository. This mutation requires explicit user confirmation and cannot target another repository.`,
+      description: `${title} one Issue in the server-configured repository. Pirx host authorization is required and cannot target another repository.`,
       inputSchema: transitionInput, outputSchema: z.union([mutationSuccess, failureSchema]),
       annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: transition === "close", openWorldHint: true },
-    }, async (input) => {
+    }, async (input, context) => {
       const correlation = input.correlationId ?? randomUUID();
-      const denied = confirmOrReject(input.confirmed, correlation);
-      if (denied !== undefined) return denied;
+      const authorization = authorizationOrReject(options.authorizationSecret, context, name, input, correlation);
+      if (!("idempotencyKey" in authorization)) return authorization;
       if (mutator === undefined) return unavailable(unavailableMessage, correlation);
       const expected = expectedState(input.expectedState, input.expectedUpdatedAt);
       const request = {
         issue: input.issueNumber,
         ...(expected === undefined ? {} : { expected }),
-        idempotencyKey: input.idempotencyKey ?? `mcp-${transition}:${input.issueNumber}:${randomUUID()}`,
+        idempotencyKey: authorization.idempotencyKey,
         correlationId: correlation,
       };
       return mapMutation(await (transition === "close" ? mutator.closeIssue(request) : mutator.reopenIssue(request)));

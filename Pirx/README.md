@@ -176,8 +176,10 @@ też repository-scoped tools `github_issue_get`, `github_issue_list`,
 `github_issue_search`, `github_issue_create`, `github_issue_update`,
 `github_issue_comment`, `github_issue_close` i `github_issue_reopen`. Żaden z
 tych tooli nie przyjmuje repozytorium jako argumentu. Odczyty są read-only;
-mutacje wymagają argumentu `confirmed: true`, czyli jawnego potwierdzenia
-użytkownika przed ponowieniem wywołania.
+mutacje są wykonywane wyłącznie po autoryzacji związanej przez hosta Pirx z
+konkretnym narzędziem, celem i skrótem argumentów. Model nie może sam nadać
+sobie uprawnień przez argument narzędzia. Klucz idempotencji jest wyznaczany
+przez hosta, więc ponowienie tej samej operacji nie tworzy drugiego zapisu.
 
 ## LazyVim
 

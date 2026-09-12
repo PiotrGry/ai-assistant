@@ -71,7 +71,7 @@ test("action ledger persists planned, started and succeeded transitions", async 
   }
 });
 
-test("same turn mutation is deduplicated, while a later turn is distinct", async () => {
+test("the same logical mutation is deduplicated across turns", async () => {
   const { directory, store } = await createStore();
   try {
     const ledger = new SqliteActionLedger(store);
@@ -84,9 +84,10 @@ test("same turn mutation is deduplicated, while a later turn is distinct", async
     assert.equal(duplicate.operationId, "");
 
     const laterTurn = ledger.plan({ ...input, turnId: "turn-2" });
-    assert.notEqual(laterTurn.mutationId, first.mutationId);
-    assert.notEqual(laterTurn.operationId, "");
-    assert.notEqual(mutationId(input), mutationId({ ...input, turnId: "turn-2" }));
+    assert.equal(laterTurn.mutationId, first.mutationId);
+    assert.equal(laterTurn.alreadySucceeded, true);
+    assert.equal(laterTurn.operationId, "");
+    assert.equal(mutationId(input), mutationId({ ...input, turnId: "turn-2" }));
   } finally {
     store.close();
     await rm(directory, { recursive: true, force: true });

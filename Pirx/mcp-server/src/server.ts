@@ -1,6 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import {
-  GitHubIssueLifecycleRoundTrip,
   GitHubIssueMutator,
   GitHubIssueReader,
   GitHubTransport,
@@ -32,6 +31,7 @@ export interface McpServerOptions {
   readonly calendar?: CalendarOperations;
   readonly githubPocTransport?: GitHubPocTransport;
   readonly githubPocConfig?: GitHubConfig;
+  readonly githubAuthorizationSecret?: string;
 }
 
 export function createMcpServer(options: McpServerOptions = {}): McpServer {
@@ -78,10 +78,20 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
     const transport =
       options.githubPocTransport ??
       (githubConfig === undefined ? undefined : new GitHubTransport(githubConfig));
+    const githubQueue = githubConfig === undefined || transport === undefined
+      ? undefined
+      : new GitHubWriteQueue();
+    const githubReader = githubConfig === undefined || transport === undefined
+      ? undefined
+      : new GitHubIssueReader(transport, githubConfig);
+    const githubMutator = githubReader === undefined || githubQueue === undefined || githubConfig === undefined || transport === undefined
+      ? undefined
+      : new GitHubIssueMutator(transport, githubReader, githubQueue, githubConfig);
     registerGitHubIssueTools(server, {
-      config: githubConfig,
-      transport,
       configurationError: githubConfigurationError,
+      authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
+      reader: githubReader,
+      mutator: githubMutator,
     });
     if ((environment.PIRX_GITHUB_POC_ISSUE?.trim().length ?? 0) > 0) {
       registerGitHubPocTool(server, {
@@ -89,7 +99,21 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
         config: githubConfig,
         transport,
         configurationError: config.githubPocConfigurationError ?? githubConfigurationError,
+        authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
+        reader: githubReader,
+        mutator: githubMutator,
       });
+    }
+    if (githubQueue !== undefined) {
+      const close = server.close.bind(server);
+      let closed: Promise<void> | undefined;
+      server.close = () => {
+        closed ??= (async () => {
+          await githubQueue.close({ drain: true });
+          await close();
+        })();
+        return closed;
+      };
     }
   }
   return server;

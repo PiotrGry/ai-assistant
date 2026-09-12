@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import test from "node:test";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -9,6 +10,9 @@ import {
 } from "@pirx/orchestrator";
 
 import { createMcpServer, type GitHubPocTransport } from "../src/server.js";
+import { createHostAuthorization, HOST_AUTHORIZATION_META_KEY } from "../src/authorization.js";
+
+const authorizationSecret = "mcp-test-authorization-secret";
 
 const githubConfig: GitHubConfig = {
   token: "secret-token-that-must-not-leak",
@@ -51,6 +55,7 @@ class FakeGitHubTransport implements GitHubPocTransport {
   readonly writes: unknown[] = [];
   readonly comments: Array<Record<string, unknown>> = [];
   failureResult: GitHubOperationResult<unknown> | undefined;
+  largeBody = false;
 
   async restRead<T>(request: { path: string }, context: { correlationId: string }): Promise<GitHubOperationResult<T>> {
     if (this.failureResult !== undefined) {
@@ -60,9 +65,15 @@ class FakeGitHubTransport implements GitHubPocTransport {
       return success(this.comments, context.correlationId) as GitHubOperationResult<T>;
     }
     if (request.path.endsWith("/issues")) {
-      return success([issuePayload()], context.correlationId) as GitHubOperationResult<T>;
+      return success([this.payload()], context.correlationId) as GitHubOperationResult<T>;
     }
-    return success(issuePayload(), context.correlationId) as GitHubOperationResult<T>;
+    return success(this.payload(), context.correlationId) as GitHubOperationResult<T>;
+  }
+
+  private payload() {
+    return this.largeBody
+      ? { ...issuePayload(), body: "x".repeat(20_000) }
+      : issuePayload();
   }
 
   async restWrite<T>(request: { path: string; body?: unknown }, context: { correlationId: string }): Promise<GitHubOperationResult<T>> {
@@ -121,10 +132,27 @@ async function connected(options: {
     },
     ...(options.transport === undefined ? {} : { githubPocTransport: options.transport }),
     ...(options.config === undefined ? {} : { githubPocConfig: options.config }),
+    githubAuthorizationSecret: authorizationSecret,
   });
   const client = new Client({ name: "github-poc-test", version: "0.1.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   return { server, client };
+}
+
+async function callAuthorized(
+  client: Client,
+  name: string,
+  arguments_: Record<string, unknown>,
+  operationId: string = randomUUID(),
+  signedArguments: Record<string, unknown> = arguments_,
+) {
+  return client.callTool({
+    name,
+    arguments: arguments_,
+    _meta: {
+      [HOST_AUTHORIZATION_META_KEY]: createHostAuthorization(authorizationSecret, name, signedArguments, operationId),
+    },
+  });
 }
 
 test("GitHub POC is omitted when its fixed target is not configured", async (context) => {
@@ -152,14 +180,11 @@ test("GitHub POC uses the fixed Issue and proves idempotent replay", async (cont
   assert.match(tool.description ?? "", /fixed configured.*Issue/u);
   assert.equal(tool.annotations?.readOnlyHint, false);
 
-  const result = await fixture.client.callTool({
-    name: "github_issue_round_trip_poc",
-    arguments: {
-      eventId: "mcp-test-event",
-      summary: "Controlled MCP integration test.",
-      correlationId: "mcp-test-correlation",
-    },
-  });
+  const result = await callAuthorized(fixture.client, "github_issue_round_trip_poc", {
+    eventId: "mcp-test-event",
+    summary: "Controlled MCP integration test.",
+    correlationId: "mcp-test-correlation",
+  }, "poc-operation-1");
   assert.notEqual(result.isError, true);
   assert.deepEqual(result.structuredContent, {
     outcome: "success",
@@ -189,19 +214,16 @@ test("GitHub POC uses the fixed Issue and proves idempotent replay", async (cont
   assert.equal(transport.writes.length, 1);
   assert.equal(JSON.stringify(result).includes("secret-token"), false);
 
-  const redirected = await fixture.client.callTool({
-    name: "github_issue_round_trip_poc",
-    arguments: {
-      eventId: "redirect-attempt",
-      summary: "Should be rejected",
-      issue: 1,
-    },
+  const redirected = await callAuthorized(fixture.client, "github_issue_round_trip_poc", {
+    eventId: "redirect-attempt",
+    summary: "Should be rejected",
+    issue: 1,
   });
   assert.equal(redirected.isError, true);
   assert.equal(transport.writes.length, 1);
 });
 
-test("repository-scoped Issue tools expose bounded reads and confirmed mutations", async (context) => {
+test("repository-scoped Issue tools expose bounded reads and host-authorized mutations", async (context) => {
   const transport = new FakeGitHubTransport();
   const fixture = await connected({ transport, config: githubConfig });
   context.after(async () => {
@@ -247,29 +269,63 @@ test("repository-scoped Issue tools expose bounded reads and confirmed mutations
 
   const denied = await fixture.client.callTool({
     name: "github_issue_create",
-    arguments: { title: "Denied", confirmed: false },
+    arguments: { title: "Denied" },
   });
   assert.equal(denied.isError, true);
+  assert.equal((denied.structuredContent as { errorCode: string }).errorCode, "authorization_required");
+  assert.equal(transport.writes.length, 0);
+
+  const spoofed = await callAuthorized(fixture.client, "github_issue_create", { title: "Different" }, "spoofed-operation", { title: "Original" });
+  assert.equal(spoofed.isError, true);
+  assert.equal((spoofed.structuredContent as { errorCode: string }).errorCode, "authorization_required");
   assert.equal(transport.writes.length, 0);
 
   const mutationCalls = [
-    { name: "github_issue_create", arguments: { title: "Created", confirmed: true } },
-    { name: "github_issue_update", arguments: { issueNumber: 179, title: "Updated", confirmed: true } },
-    { name: "github_issue_comment", arguments: { issueNumber: 179, comment: "Confirmed comment", confirmed: true } },
-    { name: "github_issue_close", arguments: { issueNumber: 179, confirmed: true } },
-    { name: "github_issue_reopen", arguments: { issueNumber: 179, confirmed: true } },
+    { name: "github_issue_create", arguments: { title: "Created" } },
+    { name: "github_issue_update", arguments: { issueNumber: 179, title: "Updated" } },
+    { name: "github_issue_comment", arguments: { issueNumber: 179, comment: "Authorized comment" } },
+    { name: "github_issue_close", arguments: { issueNumber: 179 } },
+    { name: "github_issue_reopen", arguments: { issueNumber: 179 } },
   ] as const;
   for (const call of mutationCalls) {
-    const result = await fixture.client.callTool(call);
+    const result = await callAuthorized(fixture.client, call.name, call.arguments);
     assert.notEqual(result.isError, true, call.name);
   }
   assert.equal(transport.writes.length, 4);
+
+  const tooMany = await fixture.client.callTool({
+    name: "github_issue_list",
+    arguments: { maxItems: 101 },
+  });
+  assert.equal(tooMany.isError, true);
 
   const redirected = await fixture.client.callTool({
     name: "github_issue_get",
     arguments: { issueNumber: 179, repository: "other-owner/other-repository" },
   });
   assert.equal(redirected.isError, true);
+});
+
+test("Issue outputs bound large bodies without changing transport parity", async (context) => {
+  const transport = new FakeGitHubTransport();
+  transport.largeBody = true;
+  const fixture = await connected({ transport, config: githubConfig });
+  context.after(async () => {
+    await fixture.client.close();
+    await fixture.server.close();
+  });
+
+  const result = await fixture.client.callTool({
+    name: "github_issue_get",
+    arguments: { issueNumber: 179 },
+  });
+  assert.equal(result.isError, undefined);
+  const issue = (result.structuredContent as { issue: { body?: string } }).issue;
+  assert.ok(issue.body);
+  assert.ok(issue.body.length <= 2_000);
+  assert.match(issue.body, /body truncated by Pirx MCP/u);
+  assert.equal(result.content?.[0]?.type, "text");
+  assert.deepEqual(JSON.parse((result.content?.[0] as { text: string }).text), result.structuredContent);
 });
 
 test("GitHub POC maps normalized failures without exposing credentials", async (context) => {
@@ -287,9 +343,8 @@ test("GitHub POC maps normalized failures without exposing credentials", async (
     await fixture.server.close();
   });
 
-  const result = await fixture.client.callTool({
-    name: "github_issue_round_trip_poc",
-    arguments: { eventId: "failure-event", summary: "Failure mapping test" },
+  const result = await callAuthorized(fixture.client, "github_issue_round_trip_poc", {
+    eventId: "failure-event", summary: "Failure mapping test",
   });
   assert.equal(result.isError, true);
   assert.deepEqual(result.structuredContent, {
@@ -311,12 +366,9 @@ test("GitHub POC rejects unsafe input before any GitHub write", async (context) 
     await fixture.server.close();
   });
 
-  const result = await fixture.client.callTool({
-    name: "github_issue_round_trip_poc",
-    arguments: {
-      eventId: "event-with-token=secret",
-      summary: "Must be rejected",
-    },
+  const result = await callAuthorized(fixture.client, "github_issue_round_trip_poc", {
+    eventId: "event-with-token=secret",
+    summary: "Must be rejected",
   });
   assert.equal(result.isError, true);
   assert.equal(transport.writes.length, 0);

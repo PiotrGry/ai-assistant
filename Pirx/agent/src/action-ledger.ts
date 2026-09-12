@@ -49,11 +49,18 @@ function stableSerialize(value: unknown): string {
 export function mutationId(input: ActionPlanInput): string {
   const operation = [
     input.sessionId,
-    input.turnId,
     input.toolName,
-    stableSerialize(input.arguments),
+    input.target,
+    stableArguments(input.arguments),
   ].join("\u0000");
   return createHash("sha256").update(operation).digest("hex");
+}
+
+function stableArguments(arguments_: Record<string, unknown>): string {
+  const stable = Object.fromEntries(
+    Object.entries(arguments_).filter(([key]) => key !== "correlationId" && key !== "confirmed"),
+  );
+  return stableSerialize(stable);
 }
 
 export class SqliteActionLedger {

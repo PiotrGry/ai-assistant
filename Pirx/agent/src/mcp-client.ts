@@ -1,4 +1,5 @@
 import { access } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 
 import {
   Client,
@@ -10,6 +11,11 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import type { Tool } from "ollama";
 
 import { toolResultToText } from "./tool-result.js";
+import {
+  HOST_AUTHORIZATION_META_KEY,
+  createHostAuthorization,
+  type HostToolAuthorization,
+} from "./mcp-authorization.js";
 
 export interface ToolExecution {
   readonly text: string;
@@ -77,6 +83,7 @@ export class PirxMcpClient {
   readonly #serverEntry: string;
   readonly #toolTimeoutMs: number;
   readonly #maxToolResultCharacters: number;
+  readonly #authorizationSecret: string;
 
   #client: Client | undefined;
   #tools: ListedMcpTool[] = [];
@@ -86,10 +93,12 @@ export class PirxMcpClient {
     serverEntry: string,
     toolTimeoutMs: number,
     maxToolResultCharacters = 12_000,
+    authorizationSecret = randomBytes(32).toString("base64url"),
   ) {
     this.#serverEntry = serverEntry;
     this.#toolTimeoutMs = toolTimeoutMs;
     this.#maxToolResultCharacters = maxToolResultCharacters;
+    this.#authorizationSecret = authorizationSecret;
   }
 
   get toolNames(): readonly string[] {
@@ -131,11 +140,13 @@ export class PirxMcpClient {
       );
     }
 
+    const environment = childEnvironment(process.env);
+    environment.PIRX_MCP_AUTH_SECRET = this.#authorizationSecret;
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [this.#serverEntry],
       stderr: "inherit",
-      env: childEnvironment(process.env),
+      env: environment,
     });
 
     const client = new Client({
@@ -165,6 +176,7 @@ export class PirxMcpClient {
   async callTool(
     name: string,
     arguments_: Record<string, unknown>,
+    authorization?: Pick<HostToolAuthorization, "operationId">,
   ): Promise<ToolExecution> {
     if (this.#client === undefined || this.#unavailableReason !== undefined) {
       const reason = this.#unavailableReason ?? "brak aktywnego połączenia";
@@ -189,6 +201,18 @@ export class PirxMcpClient {
         {
           name,
           arguments: arguments_,
+          ...(authorization === undefined
+            ? {}
+            : {
+                _meta: {
+                  [HOST_AUTHORIZATION_META_KEY]: createHostAuthorization(
+                    this.#authorizationSecret,
+                    name,
+                    arguments_,
+                    authorization.operationId,
+                  ),
+                },
+              }),
         },
         { timeout: this.#toolTimeoutMs },
       );

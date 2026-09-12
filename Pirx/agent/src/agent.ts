@@ -5,6 +5,7 @@ import { Ollama, type ChatResponse, type Message, type Tool } from "ollama";
 import type { AgentConfig, SystemPrompt } from "./config.js";
 import { loadSystemPrompt } from "./config.js";
 import type { SqliteActionLedger } from "./action-ledger.js";
+import { toolTarget } from "./mcp-authorization.js";
 import {
   estimateContext,
   selectMessagesForContext,
@@ -279,23 +280,6 @@ function rawOllamaMetrics(response: unknown): Record<string, unknown> {
   };
 }
 
-function actionTarget(
-  name: string,
-  arguments_: Record<string, unknown>,
-): string {
-  const identifiers = [
-    "path",
-    "source",
-    "destination",
-    "calendarId",
-    "eventId",
-    "issueNumber",
-  ]
-    .filter((key) => typeof arguments_[key] === "string" || typeof arguments_[key] === "number")
-    .map((key) => `${key}=${String(arguments_[key])}`);
-  return [name, ...identifiers].join(" ");
-}
-
 function boundedFetch(timeoutMs: number): typeof fetch {
   return async (input, init = {}) => {
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
@@ -520,6 +504,7 @@ export class PirxAgent {
         const llmStartedAt = performance.now();
         const request = {
           model,
+          think: false as const,
           messages,
           stream: false as const,
           keep_alive: this.#config.keepAlive,
@@ -635,7 +620,7 @@ export class PirxAgent {
                   sessionId: context.sessionId,
                   turnId: context.turnId,
                   sequence: mcpOperationSequence,
-                  target: actionTarget(name, arguments_),
+                  target: toolTarget(name, arguments_),
                   toolName: name,
                   arguments: arguments_,
                   authorization: {
@@ -689,7 +674,11 @@ export class PirxAgent {
           this.#hooks.onToolCall?.(name, arguments_);
 
           const toolStartedAt = performance.now();
-          const execution = await this.#mcp.callTool(name, arguments_);
+          const execution = await this.#mcp.callTool(
+            name,
+            arguments_,
+            actionPlan === undefined ? undefined : { operationId: actionPlan.mutationId },
+          );
           const toolDurationMs = performance.now() - toolStartedAt;
           if (mcpOperation !== undefined) {
             context.operationRecorder?.finish(mcpOperation, {
