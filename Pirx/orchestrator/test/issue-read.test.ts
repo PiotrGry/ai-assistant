@@ -173,6 +173,7 @@ test("searchIssues uses a focused GraphQL query and follows cursor pagination", 
   const first = transport.graphqlCalls[0]?.request;
   assert.ok(first !== undefined);
   assert.match(first.query, /labels\(first: 100\)/u);
+  assert.match(first.query, /\.\.\. on Issue/u);
   assert.doesNotMatch(first.query, /comments|projectItems|history/u);
   assert.match(String(first.variables?.query), /repo:PiotrGry\/ai-assistant is:issue is:open label:"github" milestone:1 sort:updated-asc "rate limit"/u);
   assert.equal(first.variables?.after, undefined);

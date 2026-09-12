@@ -558,7 +558,7 @@ export class GitHubIssueReader {
       const failedCursor = after === undefined ? undefined : encodeCursor("graphql", after);
       const remaining = pageOptions.maxItems - items.length;
       const first = Math.min(pageOptions.pageSize, remaining);
-      const query = `query SearchIssues($query: String!, $first: Int!, $after: String) { search(query: $query, type: ISSUE, first: $first, after: $after) { nodes { ${ISSUE_FIELDS} } pageInfo { hasNextPage endCursor } } }`;
+      const query = `query SearchIssues($query: String!, $first: Int!, $after: String) { search(query: $query, type: ISSUE, first: $first, after: $after) { nodes { ... on Issue { ${ISSUE_FIELDS} } } pageInfo { hasNextPage endCursor } } }`;
       const result = await this.#read<GraphqlSearchPayload>(correlationId, options.signal, (context) => this.#transport.graphqlRead<GraphqlSearchPayload>({
         query,
         variables: {
