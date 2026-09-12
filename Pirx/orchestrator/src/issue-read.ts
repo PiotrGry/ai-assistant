@@ -140,6 +140,10 @@ interface GraphqlSearchPayload {
   readonly search?: unknown;
 }
 
+interface GraphqlNewestIssuesPayload {
+  readonly repository?: unknown;
+}
+
 interface GraphqlSearchConnection {
   readonly nodes?: unknown;
   readonly pageInfo?: unknown;
@@ -461,6 +465,38 @@ export class GitHubIssueReader {
 
   async searchIssues(filter: GitHubIssueSearchFilter = {}, options: GitHubIssuePageOptions = {}): Promise<GitHubOperationResult<GitHubIssuePage<GitHubIssueSummary>>> {
     return this.#listOrSearch("search", filter, options);
+  }
+
+  // Reads one page of the newest Issues through the GraphQL Issue connection, which reflects a
+  // just-created Issue immediately; GitHub search and REST Issue lists can lag it by seconds.
+  async listNewestIssues(options: Pick<GitHubIssuePageOptions, "maxItems" | "correlationId" | "signal"> = {}): Promise<GitHubOperationResult<readonly GitHubIssueSummary[]>> {
+    const correlationId = options.correlationId ?? randomUUID();
+    const first = options.maxItems ?? MAX_PAGE_SIZE;
+    if (!Number.isSafeInteger(first) || first <= 0 || first > MAX_PAGE_SIZE) {
+      return failure("permanent_error", "invalid_filter", `maxItems must be an integer between 1 and ${MAX_PAGE_SIZE}.`, correlationId, "not_accepted");
+    }
+    const query = `query NewestIssues($owner: String!, $repository: String!, $first: Int!) { repository(owner: $owner, name: $repository) { issues(first: $first, orderBy: { field: CREATED_AT, direction: DESC }, states: [OPEN, CLOSED]) { nodes { ${ISSUE_FIELDS} } } } }`;
+    const result = await this.#read<GraphqlNewestIssuesPayload>(correlationId, options.signal, (context) => this.#transport.graphqlRead<GraphqlNewestIssuesPayload>({
+      query,
+      variables: { owner: this.#owner, repository: this.#repository, first },
+    }, context));
+    if (result.outcome !== "success") {
+      return result as GitHubOperationResult<readonly GitHubIssueSummary[]>;
+    }
+    const repository = isRecord(result.value.repository) ? result.value.repository : undefined;
+    const connection = repository !== undefined && isRecord(repository.issues) ? repository.issues : undefined;
+    if (connection === undefined || !Array.isArray(connection.nodes)) {
+      return failure("permanent_error", "malformed_response", "GitHub returned a malformed newest Issue page.", correlationId, "not_accepted", result.response);
+    }
+    const items: GitHubIssueSummary[] = [];
+    for (const rawIssue of connection.nodes) {
+      const issue = mapIssue(rawIssue, this.#owner, this.#repository, true);
+      if (issue === undefined) {
+        return failure("permanent_error", "malformed_response", "GitHub returned a malformed Issue in the newest Issue page.", correlationId, "not_accepted", result.response);
+      }
+      items.push(issue);
+    }
+    return { ...result, value: items };
   }
 
   async #listOrSearch(kind: "list" | "search", filter: GitHubIssueListFilter | GitHubIssueSearchFilter, options: GitHubIssuePageOptions): Promise<GitHubOperationResult<GitHubIssuePage<GitHubIssueSummary>>> {

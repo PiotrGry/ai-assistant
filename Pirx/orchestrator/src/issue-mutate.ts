@@ -203,6 +203,9 @@ function digest(value: unknown): string {
   return createHash("sha256").update(canonical(value)).digest("hex");
 }
 
+// Newest Issues scanned for a create marker before falling back to search (one GraphQL page).
+const RECENT_ISSUE_SCAN = 100;
+
 function operationMarker(kind: string, idempotencyKey: string): string {
   return `<!-- pirx-operation:v1 kind=${kind} id=${digest(idempotencyKey)} -->`;
 }
@@ -414,12 +417,19 @@ export class GitHubIssueMutator {
   }
 
   async #findIssueByMarker(marker: string, correlationId: string): Promise<GitHubOperationResult<GitHubIssueSummary | undefined>> {
+    // GitHub search and REST Issue lists lag a just-created Issue by seconds, and search matching is
+    // fuzzy, so a hit may carry another operation's marker. Scan the newest Issues through GraphQL first,
+    // then fall back to search for older ones, and accept only an exact marker match either way.
+    const recent = await this.#reader.listNewestIssues({ correlationId, maxItems: RECENT_ISSUE_SCAN });
+    if (recent.outcome !== "success") return recent as GitHubOperationResult<GitHubIssueSummary | undefined>;
+    const fresh = recent.value.find((issue) => issue.body?.includes(marker) === true);
+    if (fresh !== undefined) return { ...recent, value: fresh };
     const result = await this.#reader.searchIssues({ text: marker }, { correlationId, maxItems: 10 });
     if (result.outcome !== "success") {
       if (result.error.code === "not_found") return { outcome: "success", value: undefined, correlationId, remoteOutcome: "accepted" };
       return result as GitHubOperationResult<GitHubIssueSummary | undefined>;
     }
-    return { ...result, value: result.value.items[0] };
+    return { ...result, value: result.value.items.find((issue) => issue.body?.includes(marker) === true) };
   }
 
   async #findComment(number: number, marker: string, correlationId: string): Promise<GitHubOperationResult<{ comment: GitHubCommentRef } | undefined>> {

@@ -90,7 +90,10 @@ class FakeGitHubTransport implements GitHubPocTransport {
     return success(comment, context.correlationId) as GitHubOperationResult<T>;
   }
 
-  async graphqlRead<T>(request: { variables?: { query?: string } }, context: { correlationId: string }): Promise<GitHubOperationResult<T>> {
+  async graphqlRead<T>(request: { query?: string; variables?: { query?: string } }, context: { correlationId: string }): Promise<GitHubOperationResult<T>> {
+    if (request.query?.includes("repository(") === true) {
+      return success({ repository: { issues: { nodes: [] } } }, context.correlationId) as GitHubOperationResult<T>;
+    }
     if (request.variables?.query?.includes("pirx-operation") === true) {
       return success({
         search: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },

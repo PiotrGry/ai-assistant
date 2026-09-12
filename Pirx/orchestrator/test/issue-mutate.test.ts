@@ -54,6 +54,7 @@ class FakeMutationTransport implements GitHubIssueMutationTransport {
   async restRead<T>(request: GitHubRestReadRequest, context: GitHubRequestContext): Promise<GitHubOperationResult<T>> {
     this.reads.push(request);
     if (request.path.endsWith("/comments")) return success(this.comments, context.correlationId) as GitHubOperationResult<T>;
+    if (request.path.endsWith("/issues")) return success(this.staleRestList ? [] : [this.issue], context.correlationId) as GitHubOperationResult<T>;
     return success(this.issue, context.correlationId) as GitHubOperationResult<T>;
   }
 
@@ -82,10 +83,30 @@ class FakeMutationTransport implements GitHubIssueMutationTransport {
     return success({ number: 48 }, context.correlationId) as GitHubOperationResult<T>;
   }
 
-  async graphqlRead<T>(_request: { query: string; variables?: Readonly<Record<string, unknown>> }, context: GitHubRequestContext): Promise<GitHubOperationResult<T>> {
-    const text = typeof _request.variables?.query === "string" ? _request.variables.query : "";
-    const issueBody = typeof this.issue.body === "string" ? this.issue.body : "";
-    const payload = issueBody.length > 0 && text.length > 0 && issueBody.includes("pirx-operation") ? [this.issue] : [];
+  // On GitHub, search and REST Issue lists lag a just-created Issue by seconds; the GraphQL Issue connection does not.
+  staleSearch = false;
+  staleRestList = false;
+
+  async graphqlRead<T>(request: { query: string; variables?: Readonly<Record<string, unknown>> }, context: GitHubRequestContext): Promise<GitHubOperationResult<T>> {
+    const issue = this.issue;
+    const node = {
+      ...issue,
+      id: issue.node_id,
+      url: issue.html_url,
+      createdAt: issue.created_at,
+      updatedAt: issue.updated_at,
+      closedAt: issue.closed_at,
+      labels: { nodes: issue.labels },
+      assignees: { nodes: issue.assignees },
+    };
+    if (!request.query.includes("search(")) {
+      const newestFirst = request.query.includes("CREATED_AT") && request.query.includes("DESC");
+      return success({ repository: { issues: { nodes: newestFirst ? [node] : [] } } }, context.correlationId) as GitHubOperationResult<T>;
+    }
+    const text = typeof request.variables?.query === "string" ? request.variables.query : "";
+    const issueBody = typeof issue.body === "string" ? issue.body : "";
+    // Like GitHub search, matching is fuzzy: any Pirx operation marker matches any marker query.
+    const payload = !this.staleSearch && issueBody.length > 0 && text.length > 0 && issueBody.includes("pirx-operation") ? [node] : [];
     return success({ search: { nodes: payload, pageInfo: { hasNextPage: false, endCursor: null } } }, context.correlationId) as GitHubOperationResult<T>;
   }
 }
@@ -94,6 +115,38 @@ function createMutator(transport: FakeMutationTransport, capacity = 10): GitHubI
   const reader = new GitHubIssueReader(transport, config, { retryPolicy: { maxAttempts: 1 } });
   return new GitHubIssueMutator(transport, reader, new GitHubWriteQueue({ capacity }), config, { retryPolicy: { maxAttempts: 1 } });
 }
+
+function postCount(transport: FakeMutationTransport): number {
+  return transport.writes.filter((write) => write.method === "POST" && write.path.endsWith("/issues")).length;
+}
+
+test("create replay finds a just-created Issue before search and REST lists catch up", async () => {
+  const transport = new FakeMutationTransport();
+  transport.staleSearch = true;
+  transport.staleRestList = true;
+  const first = await createMutator(transport).createIssue({ title: "Replayed issue", body: "hello", idempotencyKey: "create-replay-1" });
+  assert.equal(first.outcome, "success");
+
+  // A fresh mutator models a new process (for example an MCP server restart) with no in-memory queue state.
+  const replay = await createMutator(transport).createIssue({ title: "Replayed issue", body: "hello", idempotencyKey: "create-replay-1" });
+  assert.equal(replay.outcome, "success");
+  if (replay.outcome !== "success") return;
+  assert.equal(postCount(transport), 1);
+  assert.equal(replay.value.issue.number, 49);
+  assert.equal(replay.value.noOp, true);
+});
+
+test("create does not treat an Issue carrying another operation marker as a replay", async () => {
+  const transport = new FakeMutationTransport();
+  const mutator = createMutator(transport);
+  assert.equal((await mutator.createIssue({ title: "First", idempotencyKey: "create-a" })).outcome, "success");
+
+  const second = await mutator.createIssue({ title: "Second", idempotencyKey: "create-b" });
+  assert.equal(second.outcome, "success");
+  if (second.outcome !== "success") return;
+  assert.equal(postCount(transport), 2);
+  assert.equal(second.value.noOp, false);
+});
 
 test("create and update use focused payloads and verify the canonical Issue", async () => {
   const transport = new FakeMutationTransport();
