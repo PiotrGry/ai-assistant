@@ -1,0 +1,130 @@
+{
+  "uid": "pirx-conversations",
+  "title": "Pirx · Rozmowy",
+  "tags": ["pirx"],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "",
+  "time": { "from": "now-90d", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "session",
+        "label": "Sesja",
+        "type": "query",
+        "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+        "query": "SELECT s.id AS __value, strftime('%Y-%m-%d %H:%M', s.started_at) || ' · ' || COALESCE(json_extract(e.payload_json, '$.model'), '?') || ' · ' || (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id) || ' tur' || CASE WHEN json_extract(e.payload_json, '$.imported_from') IS NOT NULL THEN ' · import' ELSE '' END AS __text FROM sessions s JOIN run_environments e ON e.id = s.environment_id ORDER BY CAST(strftime('%s', s.started_at) AS INTEGER) DESC",
+        "definition": "SELECT s.id AS __value, strftime('%Y-%m-%d %H:%M', s.started_at) || ' · ' || COALESCE(json_extract(e.payload_json, '$.model'), '?') || ' · ' || (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id) || ' tur' || CASE WHEN json_extract(e.payload_json, '$.imported_from') IS NOT NULL THEN ' · import' ELSE '' END AS __text FROM sessions s JOIN run_environments e ON e.id = s.environment_id ORDER BY CAST(strftime('%s', s.started_at) AS INTEGER) DESC",
+        "refresh": 2,
+        "multi": false,
+        "includeAll": true,
+        "allValue": "__all",
+        "current": { "text": "All", "value": "$__all" },
+        "options": [],
+        "sort": 0
+      },
+      {
+        "name": "search",
+        "label": "Szukaj w pytaniach i odpowiedziach",
+        "type": "textbox",
+        "query": "",
+        "current": { "text": "", "value": "" }
+      },
+      {
+        "name": "turn",
+        "label": "Tura",
+        "type": "query",
+        "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+        "query": "SELECT t.id AS __value, t.sequence || ': ' || substr(t.user_prompt, 1, 60) AS __text FROM turns t WHERE t.session_id = ${session:sqlstring} ORDER BY t.sequence",
+        "definition": "SELECT t.id AS __value, t.sequence || ': ' || substr(t.user_prompt, 1, 60) AS __text FROM turns t WHERE t.session_id = ${session:sqlstring} ORDER BY t.sequence",
+        "refresh": 1,
+        "multi": false,
+        "includeAll": false,
+        "current": {},
+        "options": [],
+        "sort": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Tury",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": ["Czas"],
+          "rawQueryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS `Czas`, t.sequence AS `Nr`, t.user_prompt AS `Pytanie`, COALESCE(json_extract(t.payload_json, '$.response'), json_extract(t.payload_json, '$.error'), '') AS `Odpowiedź`, COALESCE(json_extract(t.payload_json, '$.metrics.model'), '') AS `Model`, json_extract(t.payload_json, '$.metrics.tool_calls') AS `Narzędzia`, ROUND(json_extract(t.payload_json, '$.metrics.turn_duration_ms') / 1000.0, 1) AS `Czas tury [s]`, t.status AS `Status`, t.session_id AS `Sesja`, t.id AS `Id tury` FROM turns t WHERE CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND (${session:sqlstring} = '__all' OR t.session_id = ${session:sqlstring}) AND (${search:sqlstring} = '' OR t.user_prompt LIKE '%' || ${search:sqlstring} || '%' OR json_extract(t.payload_json, '$.response') LIKE '%' || ${search:sqlstring} || '%') ORDER BY CAST(strftime('%s', t.started_at) AS INTEGER) DESC, t.sequence DESC LIMIT 500",
+          "queryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS `Czas`, t.sequence AS `Nr`, t.user_prompt AS `Pytanie`, COALESCE(json_extract(t.payload_json, '$.response'), json_extract(t.payload_json, '$.error'), '') AS `Odpowiedź`, COALESCE(json_extract(t.payload_json, '$.metrics.model'), '') AS `Model`, json_extract(t.payload_json, '$.metrics.tool_calls') AS `Narzędzia`, ROUND(json_extract(t.payload_json, '$.metrics.turn_duration_ms') / 1000.0, 1) AS `Czas tury [s]`, t.status AS `Status`, t.session_id AS `Sesja`, t.id AS `Id tury` FROM turns t WHERE CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND (${session:sqlstring} = '__all' OR t.session_id = ${session:sqlstring}) AND (${search:sqlstring} = '' OR t.user_prompt LIKE '%' || ${search:sqlstring} || '%' OR json_extract(t.payload_json, '$.response') LIKE '%' || ${search:sqlstring} || '%') ORDER BY CAST(strftime('%s', t.started_at) AS INTEGER) DESC, t.sequence DESC LIMIT 500"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "inspect": true } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Id tury" },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Pokaż wiadomości i operacje tury",
+                    "url": "/d/pirx-conversations?${__url_time_range}&var-session=${__data.fields.Sesja}&var-turn=${__value.raw}"
+                  }
+                ]
+              }
+            ]
+          },
+          { "matcher": { "id": "byName", "options": "Pytanie" }, "properties": [{ "id": "custom.width", "value": 360 }] },
+          { "matcher": { "id": "byName", "options": "Odpowiedź" }, "properties": [{ "id": "custom.width", "value": 480 }] }
+        ]
+      },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Wiadomości tury",
+      "gridPos": { "h": 14, "w": 14, "x": 0, "y": 12 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": [],
+          "rawQueryText": "SELECT m.sequence AS `Nr`, m.role AS `Rola`, COALESCE(m.tool_name, (SELECT group_concat(json_extract(c.value, '$.function.name'), ', ') FROM json_each(m.payload_json, '$.tool_calls') c), '') AS `Narzędzie`, COALESCE(m.content, '') AS `Treść` FROM messages m WHERE m.turn_id = ${turn:sqlstring} ORDER BY m.sequence",
+          "queryText": "SELECT m.sequence AS `Nr`, m.role AS `Rola`, COALESCE(m.tool_name, (SELECT group_concat(json_extract(c.value, '$.function.name'), ', ') FROM json_each(m.payload_json, '$.tool_calls') c), '') AS `Narzędzie`, COALESCE(m.content, '') AS `Treść` FROM messages m WHERE m.turn_id = ${turn:sqlstring} ORDER BY m.sequence"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "inspect": true } }, "overrides": [] },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Operacje tury",
+      "gridPos": { "h": 14, "w": 10, "x": 14, "y": 12 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": [],
+          "rawQueryText": "SELECT o.sequence AS `Nr`, o.kind AS `Rodzaj`, COALESCE(json_extract(o.payload_json, '$.tool_name'), '') AS `Narzędzie`, o.status AS `Status`, ROUND(json_extract(o.payload_json, '$.wall_duration_ms')) AS `Czas [ms]`, COALESCE(o.error, '') AS `Błąd` FROM operations o WHERE o.turn_id = ${turn:sqlstring} ORDER BY o.sequence",
+          "queryText": "SELECT o.sequence AS `Nr`, o.kind AS `Rodzaj`, COALESCE(json_extract(o.payload_json, '$.tool_name'), '') AS `Narzędzie`, o.status AS `Status`, ROUND(json_extract(o.payload_json, '$.wall_duration_ms')) AS `Czas [ms]`, COALESCE(o.error, '') AS `Błąd` FROM operations o WHERE o.turn_id = ${turn:sqlstring} ORDER BY o.sequence"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "inspect": true } }, "overrides": [] },
+      "options": { "showHeader": true }
+    }
+  ]
+}

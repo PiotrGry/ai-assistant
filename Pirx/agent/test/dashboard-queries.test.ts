@@ -366,3 +366,60 @@ test("tools dashboard reports calls, errors and failed work", async () => {
     await cleanup();
   }
 });
+
+test("conversation dashboard lists sessions, turns, messages and operations", async () => {
+  const dashboards = await loadDashboards();
+  const { database, cleanup } = await seededDatabase();
+  try {
+    const dashboard = dashboards.find((candidate) => candidate.uid === "pirx-conversations");
+    assert.ok(dashboard, "dashboard pirx-conversations is missing");
+    const sessionQuery = dashboard.templating?.list.find((variable) => variable.name === "session")?.query;
+    assert.equal(typeof sessionQuery, "string");
+    const sessions = rows(database, sessionQuery as string);
+    assert.equal(sessions.length, 3);
+    assert.ok(sessions.some((row) => row["__value"] === "session-1" && row["__text"] === "2026-09-13 10:00 · gemma4:12b · 2 tur"));
+    assert.ok(sessions.some((row) => String(row["__text"]).endsWith(" · import")));
+
+    const turnsSql = panelSql(panel(dashboards, "pirx-conversations", "Tury"));
+    assert.deepEqual(
+      rows(database, turnsSql).map((row) => [row["Pytanie"], row["Odpowiedź"], row["Status"]]),
+      [
+        ["a teraz kalendarz", "Ollama timeout", "failed"],
+        ["pokaż zadania z milestone 1", "Oto zadania.", "completed"],
+        ["Cześć", "Hej", "completed"],
+      ],
+    );
+    assert.equal(rows(database, turnsSql, [["${session:sqlstring}", "'session-1'"]]).length, 2);
+    assert.deepEqual(
+      rows(database, turnsSql, [["${search:sqlstring}", "'kalendarz'"]]).map((row) => row["Pytanie"]),
+      ["a teraz kalendarz"],
+    );
+    assert.deepEqual(
+      rows(database, turnsSql, [["${search:sqlstring}", "'Hej'"]]).map((row) => row["Pytanie"]),
+      ["Cześć"],
+    );
+
+    const messages = rows(database, panelSql(panel(dashboards, "pirx-conversations", "Wiadomości tury")));
+    assert.deepEqual(
+      messages.map((row) => [row["Nr"], row["Rola"], row["Narzędzie"], row["Treść"]]),
+      [
+        [0, "user", "", "pokaż zadania z milestone 1"],
+        [1, "assistant", "github_issue_list", ""],
+        [2, "tool", "github_issue_list", "{\"page\":{\"items\":[]}}"],
+        [3, "assistant", "", "Oto zadania."],
+      ],
+    );
+
+    const operations = rows(database, panelSql(panel(dashboards, "pirx-conversations", "Operacje tury")));
+    assert.deepEqual(
+      operations.map((row) => [row["Nr"], row["Rodzaj"], row["Narzędzie"], row["Status"], row["Czas [ms]"], row["Błąd"]]),
+      [
+        [0, "llm", "", "succeeded", 900, ""],
+        [1, "mcp", "github_issue_list", "succeeded", 450, ""],
+        [2, "mcp", "github_issue_get", "failed", 120, "Błąd narzędzia: not found"],
+      ],
+    );
+  } finally {
+    await cleanup();
+  }
+});
