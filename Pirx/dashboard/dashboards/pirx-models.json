@@ -1,0 +1,150 @@
+{
+  "uid": "pirx-models",
+  "title": "Pirx · Wydajność modeli",
+  "tags": ["pirx"],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "1m",
+  "time": { "from": "now-90d", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "model",
+        "label": "Model",
+        "type": "query",
+        "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+        "query": "SELECT DISTINCT json_extract(payload_json, '$.metrics.model') AS __text, json_extract(payload_json, '$.metrics.model') AS __value FROM turns WHERE json_extract(payload_json, '$.metrics.model') IS NOT NULL ORDER BY 1",
+        "definition": "SELECT DISTINCT json_extract(payload_json, '$.metrics.model') AS __text, json_extract(payload_json, '$.metrics.model') AS __value FROM turns WHERE json_extract(payload_json, '$.metrics.model') IS NOT NULL ORDER BY 1",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": { "text": ["All"], "value": ["$__all"] },
+        "options": [],
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Czas tury [s]",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, json_extract(t.payload_json, '$.metrics.model') AS model, json_extract(t.payload_json, '$.metrics.turn_duration_ms') / 1000.0 AS value FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring}) AND json_extract(t.payload_json, '$.metrics.turn_duration_ms') IS NOT NULL ORDER BY time",
+          "queryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, json_extract(t.payload_json, '$.metrics.model') AS model, json_extract(t.payload_json, '$.metrics.turn_duration_ms') / 1000.0 AS value FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring}) AND json_extract(t.payload_json, '$.metrics.turn_duration_ms') IS NOT NULL ORDER BY time"
+        }
+      ],
+      "transformations": [{ "id": "prepareTimeSeries", "options": { "format": "multi" } }],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "points", "pointSize": 6 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Generacja [tok/s]",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, json_extract(t.payload_json, '$.metrics.model') AS model, json_extract(t.payload_json, '$.metrics.generation_tokens_per_second') AS value FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring}) AND json_extract(t.payload_json, '$.metrics.generation_tokens_per_second') IS NOT NULL ORDER BY time",
+          "queryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, json_extract(t.payload_json, '$.metrics.model') AS model, json_extract(t.payload_json, '$.metrics.generation_tokens_per_second') AS value FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring}) AND json_extract(t.payload_json, '$.metrics.generation_tokens_per_second') IS NOT NULL ORDER BY time"
+        }
+      ],
+      "transformations": [{ "id": "prepareTimeSeries", "options": { "format": "multi" } }],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "points", "pointSize": 6 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Prefill [tok/s]",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, json_extract(t.payload_json, '$.metrics.model') AS model, json_extract(t.payload_json, '$.metrics.prompt_tokens_per_second') AS value FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring}) AND json_extract(t.payload_json, '$.metrics.prompt_tokens_per_second') IS NOT NULL ORDER BY time",
+          "queryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, json_extract(t.payload_json, '$.metrics.model') AS model, json_extract(t.payload_json, '$.metrics.prompt_tokens_per_second') AS value FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring}) AND json_extract(t.payload_json, '$.metrics.prompt_tokens_per_second') IS NOT NULL ORDER BY time"
+        }
+      ],
+      "transformations": [{ "id": "prepareTimeSeries", "options": { "format": "multi" } }],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "points", "pointSize": 6 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Tokeny na turę",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, json_extract(t.payload_json, '$.metrics.model') || ' · wejście' AS series, json_extract(t.payload_json, '$.metrics.input_tokens') AS value FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring}) AND json_extract(t.payload_json, '$.metrics.input_tokens') IS NOT NULL UNION ALL SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, json_extract(t.payload_json, '$.metrics.model') || ' · wyjście' AS series, json_extract(t.payload_json, '$.metrics.output_tokens') AS value FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring}) AND json_extract(t.payload_json, '$.metrics.output_tokens') IS NOT NULL ORDER BY time",
+          "queryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, json_extract(t.payload_json, '$.metrics.model') || ' · wejście' AS series, json_extract(t.payload_json, '$.metrics.input_tokens') AS value FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring}) AND json_extract(t.payload_json, '$.metrics.input_tokens') IS NOT NULL UNION ALL SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, json_extract(t.payload_json, '$.metrics.model') || ' · wyjście' AS series, json_extract(t.payload_json, '$.metrics.output_tokens') AS value FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring}) AND json_extract(t.payload_json, '$.metrics.output_tokens') IS NOT NULL ORDER BY time"
+        }
+      ],
+      "transformations": [{ "id": "prepareTimeSeries", "options": { "format": "multi" } }],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "points", "pointSize": 6 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Zajętość kontekstu [%]",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, json_extract(t.payload_json, '$.metrics.model') AS model, ROUND(100.0 * json_extract(t.payload_json, '$.metrics.context_estimates[#-1].estimatedInputTokens') / json_extract(t.payload_json, '$.metrics.context_estimates[#-1].inputBudgetTokens'), 1) AS value FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring}) AND json_extract(t.payload_json, '$.metrics.context_estimates[#-1].inputBudgetTokens') > 0 ORDER BY time",
+          "queryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, json_extract(t.payload_json, '$.metrics.model') AS model, ROUND(100.0 * json_extract(t.payload_json, '$.metrics.context_estimates[#-1].estimatedInputTokens') / json_extract(t.payload_json, '$.metrics.context_estimates[#-1].inputBudgetTokens'), 1) AS value FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring}) AND json_extract(t.payload_json, '$.metrics.context_estimates[#-1].inputBudgetTokens') > 0 ORDER BY time"
+        }
+      ],
+      "transformations": [{ "id": "prepareTimeSeries", "options": { "format": "multi" } }],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "points", "pointSize": 6 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Porównanie modeli",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": [],
+          "rawQueryText": "WITH turn_stats AS (SELECT json_extract(t.payload_json, '$.metrics.model') AS model, json_extract(t.payload_json, '$.metrics.turn_duration_ms') AS duration_ms, json_extract(t.payload_json, '$.metrics.generation_tokens_per_second') AS generation_tps, json_extract(t.payload_json, '$.metrics.model_calls') AS model_calls, json_extract(t.payload_json, '$.metrics.tool_calls') AS tool_calls FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring})), ranked AS (SELECT model, duration_ms, generation_tps, model_calls, tool_calls, ROW_NUMBER() OVER (PARTITION BY model ORDER BY duration_ms) AS position, COUNT(*) OVER (PARTITION BY model) AS total FROM turn_stats WHERE duration_ms IS NOT NULL) SELECT model AS `Model`, MAX(total) AS `Tury`, ROUND(MAX(CASE WHEN position = (total + 1) / 2 THEN duration_ms END) / 1000.0, 2) AS `Mediana czasu [s]`, ROUND(MAX(CASE WHEN position = CAST(0.95 * total + 0.999999 AS INTEGER) THEN duration_ms END) / 1000.0, 2) AS `p95 czasu [s]`, ROUND(AVG(generation_tps), 1) AS `Generacja [tok/s]`, ROUND(AVG(model_calls), 2) AS `Wywołania modelu`, ROUND(AVG(tool_calls), 2) AS `Wywołania narzędzi` FROM ranked GROUP BY model ORDER BY `Tury` DESC",
+          "queryText": "WITH turn_stats AS (SELECT json_extract(t.payload_json, '$.metrics.model') AS model, json_extract(t.payload_json, '$.metrics.turn_duration_ms') AS duration_ms, json_extract(t.payload_json, '$.metrics.generation_tokens_per_second') AS generation_tps, json_extract(t.payload_json, '$.metrics.model_calls') AS model_calls, json_extract(t.payload_json, '$.metrics.tool_calls') AS tool_calls FROM turns t WHERE t.status = 'completed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 AND json_extract(t.payload_json, '$.metrics.model') IN (${model:sqlstring})), ranked AS (SELECT model, duration_ms, generation_tps, model_calls, tool_calls, ROW_NUMBER() OVER (PARTITION BY model ORDER BY duration_ms) AS position, COUNT(*) OVER (PARTITION BY model) AS total FROM turn_stats WHERE duration_ms IS NOT NULL) SELECT model AS `Model`, MAX(total) AS `Tury`, ROUND(MAX(CASE WHEN position = (total + 1) / 2 THEN duration_ms END) / 1000.0, 2) AS `Mediana czasu [s]`, ROUND(MAX(CASE WHEN position = CAST(0.95 * total + 0.999999 AS INTEGER) THEN duration_ms END) / 1000.0, 2) AS `p95 czasu [s]`, ROUND(AVG(generation_tps), 1) AS `Generacja [tok/s]`, ROUND(AVG(model_calls), 2) AS `Wywołania modelu`, ROUND(AVG(tool_calls), 2) AS `Wywołania narzędzi` FROM ranked GROUP BY model ORDER BY `Tury` DESC"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "inspect": true } }, "overrides": [] },
+      "options": { "showHeader": true }
+    }
+  ]
+}
