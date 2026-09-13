@@ -1,6 +1,6 @@
 import { render } from "ink";
 
-import { PirxAgent, loadConfig } from "@pirx/agent";
+import { PirxAgent, SessionLogger, loadConfig } from "@pirx/agent";
 
 import { App } from "./app.js";
 import { TuiEventBus } from "./events.js";
@@ -20,6 +20,15 @@ async function main(): Promise<void> {
     onMcpUnavailable: (reason) => events.emit({ type: "mcp-unavailable", reason }),
   });
 
+  let logger: SessionLogger | undefined;
+  let recordingNotice: string | undefined;
+  try {
+    logger = await SessionLogger.create(config, agent.systemPrompt);
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error);
+    recordingNotice = `Sesja nie będzie zapisana: ${detail}`;
+  }
+
   let instance: ReturnType<typeof render> | undefined;
   const alternateScreen = process.stdout.isTTY === true;
   if (alternateScreen) {
@@ -27,9 +36,12 @@ async function main(): Promise<void> {
   }
 
   try {
-    instance = render(<App agent={agent} events={events} />, {
-      exitOnCtrlC: false,
-    });
+    instance = render(
+      <App agent={agent} events={events} recorder={logger} initialNotice={recordingNotice} />,
+      {
+        exitOnCtrlC: false,
+      },
+    );
     const onStdoutResize = (): void => {
       // tmux can resize before Ink has rendered the new React layout. Clear
       // the old frame so log-update never combines two different dimensions.
@@ -65,6 +77,7 @@ async function main(): Promise<void> {
     if (alternateScreen) {
       process.stdout.write("\u001B[?1049l");
     }
+    await logger?.close().catch(() => undefined);
     await agent.close();
   }
 }

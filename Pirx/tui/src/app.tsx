@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Box, Text, useApp, useInput, useStdin, useStdout } from "ink";
 
-import type { ChatTurn, PirxAgent, TurnMetrics } from "@pirx/agent";
+import type { PirxAgent, TurnMetrics } from "@pirx/agent";
 
 import { Composer } from "./composer.js";
 import type { TuiEvent } from "./events.js";
@@ -9,10 +9,13 @@ import { TuiEventBus } from "./events.js";
 import { buildHistoryLines, type ChatItem } from "./history.js";
 import { isExitCommand } from "./input-state.js";
 import { calculateTuiLayout } from "./layout.js";
+import { runRecordedTurn, type RecordedTurn, type TurnRecorder } from "./recorded-turn.js";
 
 interface AppProps {
   readonly agent: PirxAgent;
   readonly events: TuiEventBus;
+  readonly recorder?: TurnRecorder | undefined;
+  readonly initialNotice?: string | undefined;
 }
 
 function errorMessage(error: unknown): string {
@@ -24,7 +27,7 @@ function compactDetail(value: string): string {
   return firstLine.length > 140 ? `${firstLine.slice(0, 137)}…` : firstLine;
 }
 
-export function App({ agent, events }: AppProps): React.JSX.Element {
+export function App({ agent, events, recorder, initialNotice }: AppProps): React.JSX.Element {
   const { exit } = useApp();
   const { stdin } = useStdin();
   const { stdout } = useStdout();
@@ -36,7 +39,7 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
   const [clearToken, setClearToken] = useState(0);
   const [busy, setBusy] = useState(false);
   const [lastMetrics, setLastMetrics] = useState<TurnMetrics | undefined>();
-  const [notice, setNotice] = useState<string | undefined>();
+  const [notice, setNotice] = useState<string | undefined>(initialNotice);
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [models, setModels] = useState<readonly string[]>([]);
   const [modelIndex, setModelIndex] = useState(0);
@@ -284,9 +287,15 @@ export function App({ agent, events }: AppProps): React.JSX.Element {
     setClearToken((current) => current + 1);
     setNotice(undefined);
     setBusy(true);
-    void agent.chat(value).then((turn: ChatTurn) => {
+    const run: Promise<RecordedTurn> = recorder === undefined
+      ? agent.chat(value).then((turn) => ({ turn }))
+      : runRecordedTurn(agent, recorder, value);
+    void run.then(({ turn, recordingError }) => {
       setLastMetrics(turn.metrics);
       setHistory((current) => [...current, { kind: "assistant", content: turn.content }]);
+      if (recordingError !== undefined) {
+        setNotice(`Nie zapisano tury: ${recordingError}`);
+      }
     }).catch((error: unknown) => {
       const detail = errorMessage(error);
       setNotice(detail);
