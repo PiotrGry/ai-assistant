@@ -37,3 +37,6 @@ pirx-benchmark-results*.tar.gz
 # --- System ---
 .DS_Store
 *.swp
+
+# Lokalne worktree gita (superpowers)
+.worktrees/
