@@ -320,3 +320,49 @@ test("model performance dashboard compares imported and recorded models", async 
     await cleanup();
   }
 });
+
+test("tools dashboard reports calls, errors and failed work", async () => {
+  const dashboards = await loadDashboards();
+  const { database, cleanup } = await seededDatabase();
+  try {
+    const perTool = rows(database, panelSql(panel(dashboards, "pirx-tools", "Wywołania na narzędzie")));
+    assert.deepEqual(perTool.map((row) => [row["Narzędzie"], row["Wywołania"]]).sort(), [
+      ["github_issue_get", 1],
+      ["github_issue_list", 1],
+    ]);
+
+    const summary = rows(database, panelSql(panel(dashboards, "pirx-tools", "Narzędzia: błędy i czasy")));
+    assert.deepEqual(
+      summary
+        .map((row) => [row["Narzędzie"], row["Wywołania"], row["Błędy"], row["Błędy [%]"], row["Mediana [ms]"], row["p95 [ms]"]])
+        .sort(),
+      [
+        ["github_issue_get", 1, 1, 100, 120, 120],
+        ["github_issue_list", 1, 0, 0, 450, 450],
+      ],
+    );
+
+    const errors = rows(database, panelSql(panel(dashboards, "pirx-tools", "Ostatnie błędy narzędzi")));
+    assert.deepEqual(errors.map((row) => [row["Narzędzie"], row["Status"], row["Błąd"], row["Pytanie"]]), [
+      ["github_issue_get", "failed", "Błąd narzędzia: not found", "pokaż zadania z milestone 1"],
+    ]);
+
+    const failedTurns = rows(database, panelSql(panel(dashboards, "pirx-tools", "Nieudane tury")));
+    assert.deepEqual(failedTurns.map((row) => [row["Pytanie"], row["Błąd"]]), [["a teraz kalendarz", "Ollama timeout"]]);
+
+    const limited = rows(database, panelSql(panel(dashboards, "pirx-tools", "Tury przerwane przez limit")));
+    assert.deepEqual(limited, [{ Tury: 0 }]);
+
+    const failedSessions = rows(database, panelSql(panel(dashboards, "pirx-tools", "Nieudane sesje")));
+    assert.deepEqual(failedSessions.map((row) => [row["Sesja"], row["Model"], row["Tury"]]), [["session-2", "gemma4:12b", 0]]);
+
+    const outsideRange = rows(
+      database,
+      panelSql(panel(dashboards, "pirx-tools", "Wywołania na narzędzie")),
+      [["$__to", "1789290000000"]],
+    );
+    assert.deepEqual(outsideRange, []);
+  } finally {
+    await cleanup();
+  }
+});

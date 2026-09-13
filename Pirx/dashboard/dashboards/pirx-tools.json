@@ -1,0 +1,128 @@
+{
+  "uid": "pirx-tools",
+  "title": "Pirx · Narzędzia i błędy",
+  "tags": ["pirx"],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "1m",
+  "time": { "from": "now-30d", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "barchart",
+      "title": "Wywołania na narzędzie",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": [],
+          "rawQueryText": "SELECT json_extract(o.payload_json, '$.tool_name') AS `Narzędzie`, COUNT(*) AS `Wywołania` FROM operations o WHERE o.kind = 'mcp' AND CAST(strftime('%s', o.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', o.started_at) AS INTEGER) < $__to / 1000 GROUP BY 1 ORDER BY 2 DESC",
+          "queryText": "SELECT json_extract(o.payload_json, '$.tool_name') AS `Narzędzie`, COUNT(*) AS `Wywołania` FROM operations o WHERE o.kind = 'mcp' AND CAST(strftime('%s', o.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', o.started_at) AS INTEGER) < $__to / 1000 GROUP BY 1 ORDER BY 2 DESC"
+        }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "xField": "Narzędzie", "orientation": "horizontal", "legend": { "showLegend": false } }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Narzędzia: błędy i czasy",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": [],
+          "rawQueryText": "WITH calls AS (SELECT json_extract(o.payload_json, '$.tool_name') AS tool, o.status AS status, json_extract(o.payload_json, '$.wall_duration_ms') AS duration_ms FROM operations o WHERE o.kind = 'mcp' AND CAST(strftime('%s', o.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', o.started_at) AS INTEGER) < $__to / 1000), ranked AS (SELECT tool, status, duration_ms, ROW_NUMBER() OVER (PARTITION BY tool ORDER BY duration_ms IS NULL, duration_ms) AS position, COUNT(duration_ms) OVER (PARTITION BY tool) AS timed FROM calls) SELECT tool AS `Narzędzie`, COUNT(*) AS `Wywołania`, SUM(CASE WHEN status <> 'succeeded' THEN 1 ELSE 0 END) AS `Błędy`, ROUND(100.0 * SUM(CASE WHEN status <> 'succeeded' THEN 1 ELSE 0 END) / COUNT(*), 1) AS `Błędy [%]`, ROUND(MAX(CASE WHEN duration_ms IS NOT NULL AND position = (timed + 1) / 2 THEN duration_ms END)) AS `Mediana [ms]`, ROUND(MAX(CASE WHEN duration_ms IS NOT NULL AND position = CAST(0.95 * timed + 0.999999 AS INTEGER) THEN duration_ms END)) AS `p95 [ms]` FROM ranked GROUP BY tool ORDER BY `Wywołania` DESC",
+          "queryText": "WITH calls AS (SELECT json_extract(o.payload_json, '$.tool_name') AS tool, o.status AS status, json_extract(o.payload_json, '$.wall_duration_ms') AS duration_ms FROM operations o WHERE o.kind = 'mcp' AND CAST(strftime('%s', o.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', o.started_at) AS INTEGER) < $__to / 1000), ranked AS (SELECT tool, status, duration_ms, ROW_NUMBER() OVER (PARTITION BY tool ORDER BY duration_ms IS NULL, duration_ms) AS position, COUNT(duration_ms) OVER (PARTITION BY tool) AS timed FROM calls) SELECT tool AS `Narzędzie`, COUNT(*) AS `Wywołania`, SUM(CASE WHEN status <> 'succeeded' THEN 1 ELSE 0 END) AS `Błędy`, ROUND(100.0 * SUM(CASE WHEN status <> 'succeeded' THEN 1 ELSE 0 END) / COUNT(*), 1) AS `Błędy [%]`, ROUND(MAX(CASE WHEN duration_ms IS NOT NULL AND position = (timed + 1) / 2 THEN duration_ms END)) AS `Mediana [ms]`, ROUND(MAX(CASE WHEN duration_ms IS NOT NULL AND position = CAST(0.95 * timed + 0.999999 AS INTEGER) THEN duration_ms END)) AS `p95 [ms]` FROM ranked GROUP BY tool ORDER BY `Wywołania` DESC"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "inspect": true } }, "overrides": [] },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Ostatnie błędy narzędzi",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": ["Czas"],
+          "rawQueryText": "SELECT CAST(strftime('%s', o.started_at) AS INTEGER) AS `Czas`, json_extract(o.payload_json, '$.tool_name') AS `Narzędzie`, o.status AS `Status`, COALESCE(o.error, '') AS `Błąd`, t.user_prompt AS `Pytanie` FROM operations o JOIN turns t ON t.id = o.turn_id WHERE o.kind = 'mcp' AND o.status <> 'succeeded' AND CAST(strftime('%s', o.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', o.started_at) AS INTEGER) < $__to / 1000 ORDER BY o.started_at DESC LIMIT 100",
+          "queryText": "SELECT CAST(strftime('%s', o.started_at) AS INTEGER) AS `Czas`, json_extract(o.payload_json, '$.tool_name') AS `Narzędzie`, o.status AS `Status`, COALESCE(o.error, '') AS `Błąd`, t.user_prompt AS `Pytanie` FROM operations o JOIN turns t ON t.id = o.turn_id WHERE o.kind = 'mcp' AND o.status <> 'succeeded' AND CAST(strftime('%s', o.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', o.started_at) AS INTEGER) < $__to / 1000 ORDER BY o.started_at DESC LIMIT 100"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "inspect": true } }, "overrides": [] },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Nieudane tury",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 18 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": ["Czas"],
+          "rawQueryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS `Czas`, t.user_prompt AS `Pytanie`, COALESCE(json_extract(t.payload_json, '$.error'), '') AS `Błąd`, t.session_id AS `Sesja` FROM turns t WHERE t.status = 'failed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 ORDER BY t.started_at DESC LIMIT 100",
+          "queryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS `Czas`, t.user_prompt AS `Pytanie`, COALESCE(json_extract(t.payload_json, '$.error'), '') AS `Błąd`, t.session_id AS `Sesja` FROM turns t WHERE t.status = 'failed' AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 ORDER BY t.started_at DESC LIMIT 100"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "inspect": true } }, "overrides": [] },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Tury przerwane przez limit",
+      "gridPos": { "h": 9, "w": 4, "x": 12, "y": 18 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": [],
+          "rawQueryText": "SELECT COUNT(*) AS `Tury` FROM turns t WHERE json_extract(t.payload_json, '$.metrics.done_reason') IN ('tool_iteration_limit', 'unexpected_loop_end') AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000",
+          "queryText": "SELECT COUNT(*) AS `Tury` FROM turns t WHERE json_extract(t.payload_json, '$.metrics.done_reason') IN ('tool_iteration_limit', 'unexpected_loop_end') AND CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000"
+        }
+      ],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Nieudane sesje",
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 18 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+          "queryType": "table",
+          "timeColumns": ["Czas"],
+          "rawQueryText": "SELECT CAST(strftime('%s', s.started_at) AS INTEGER) AS `Czas`, s.id AS `Sesja`, COALESCE(json_extract(e.payload_json, '$.model'), '') AS `Model`, (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id) AS `Tury` FROM sessions s JOIN run_environments e ON e.id = s.environment_id WHERE s.status = 'failed' AND CAST(strftime('%s', s.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', s.started_at) AS INTEGER) < $__to / 1000 ORDER BY s.started_at DESC LIMIT 100",
+          "queryText": "SELECT CAST(strftime('%s', s.started_at) AS INTEGER) AS `Czas`, s.id AS `Sesja`, COALESCE(json_extract(e.payload_json, '$.model'), '') AS `Model`, (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id) AS `Tury` FROM sessions s JOIN run_environments e ON e.id = s.environment_id WHERE s.status = 'failed' AND CAST(strftime('%s', s.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', s.started_at) AS INTEGER) < $__to / 1000 ORDER BY s.started_at DESC LIMIT 100"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "inspect": true } }, "overrides": [] },
+      "options": { "showHeader": true }
+    }
+  ]
+}
