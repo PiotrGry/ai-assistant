@@ -1,0 +1,277 @@
+{
+  "uid": "pirx-gpu",
+  "title": "Pirx · GPU",
+  "tags": ["pirx", "gpu"],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "name": "Tury Pirxa",
+        "enable": true,
+        "iconColor": "#5cc2cf",
+        "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-sqlite" },
+        "target": {
+          "refId": "Anno",
+          "queryType": "table",
+          "timeColumns": ["time", "timeEnd"],
+          "rawQueryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, CAST(strftime('%s', COALESCE(t.ended_at, t.started_at)) AS INTEGER) AS timeEnd, substr(t.user_prompt, 1, 80) AS text FROM turns t WHERE CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 ORDER BY 1",
+          "queryText": "SELECT CAST(strftime('%s', t.started_at) AS INTEGER) AS time, CAST(strftime('%s', COALESCE(t.ended_at, t.started_at)) AS INTEGER) AS timeEnd, substr(t.user_prompt, 1, 80) AS text FROM turns t WHERE CAST(strftime('%s', t.started_at) AS INTEGER) >= $__from / 1000 AND CAST(strftime('%s', t.started_at) AS INTEGER) < $__to / 1000 ORDER BY 1"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Obciążenie GPU",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT sampled_at / 1000 AS time, utilization_percent AS value FROM gpu_samples WHERE gpu_index = 0 AND sampled_at >= $__from AND sampled_at < $__to ORDER BY sampled_at DESC LIMIT 1",
+          "queryText": "SELECT sampled_at / 1000 AS time, utilization_percent AS value FROM gpu_samples WHERE gpu_index = 0 AND sampled_at >= $__from AND sampled_at < $__to ORDER BY sampled_at DESC LIMIT 1"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 80 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "VRAM",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT sampled_at / 1000 AS time, vram_used_mb AS value FROM gpu_samples WHERE gpu_index = 0 AND sampled_at >= $__from AND sampled_at < $__to ORDER BY sampled_at DESC LIMIT 1",
+          "queryText": "SELECT sampled_at / 1000 AS time, vram_used_mb AS value FROM gpu_samples WHERE gpu_index = 0 AND sampled_at >= $__from AND sampled_at < $__to ORDER BY sampled_at DESC LIMIT 1"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "mbytes", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 14000 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Temperatura",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT sampled_at / 1000 AS time, temperature_c AS value FROM gpu_samples WHERE gpu_index = 0 AND sampled_at >= $__from AND sampled_at < $__to ORDER BY sampled_at DESC LIMIT 1",
+          "queryText": "SELECT sampled_at / 1000 AS time, temperature_c AS value FROM gpu_samples WHERE gpu_index = 0 AND sampled_at >= $__from AND sampled_at < $__to ORDER BY sampled_at DESC LIMIT 1"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "celsius", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 75 }, { "color": "red", "value": 85 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Moc",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT sampled_at / 1000 AS time, power_w AS value FROM gpu_samples WHERE gpu_index = 0 AND sampled_at >= $__from AND sampled_at < $__to ORDER BY sampled_at DESC LIMIT 1",
+          "queryText": "SELECT sampled_at / 1000 AS time, power_w AS value FROM gpu_samples WHERE gpu_index = 0 AND sampled_at >= $__from AND sampled_at < $__to ORDER BY sampled_at DESC LIMIT 1"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "watt", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 250 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Obciążenie [%]",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, ROUND(AVG(utilization_percent), 1) AS GPU, ROUND(AVG(memory_utilization_percent), 1) AS `Pamięć` FROM gpu_samples WHERE sampled_at >= $__from AND sampled_at < $__to GROUP BY 1 ORDER BY 1",
+          "queryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, ROUND(AVG(utilization_percent), 1) AS GPU, ROUND(AVG(memory_utilization_percent), 1) AS `Pamięć` FROM gpu_samples WHERE sampled_at >= $__from AND sampled_at < $__to GROUP BY 1 ORDER BY 1"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "fillOpacity": 12, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "VRAM [MiB]",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, ROUND(AVG(vram_used_mb)) AS `Użyty`, MAX(vram_total_mb) AS `Całkowity` FROM gpu_samples WHERE sampled_at >= $__from AND sampled_at < $__to GROUP BY 1 ORDER BY 1",
+          "queryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, ROUND(AVG(vram_used_mb)) AS `Użyty`, MAX(vram_total_mb) AS `Całkowity` FROM gpu_samples WHERE sampled_at >= $__from AND sampled_at < $__to GROUP BY 1 ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "mbytes", "min": 0, "custom": { "fillOpacity": 12, "showPoints": "never" } },
+        "overrides": [{ "matcher": { "id": "byName", "options": "Całkowity" }, "properties": [{ "id": "custom.fillOpacity", "value": 0 }, { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 6] } }] }]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Temperatura [°C]",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 12 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, ROUND(AVG(temperature_c), 1) AS Temperatura FROM gpu_samples WHERE sampled_at >= $__from AND sampled_at < $__to GROUP BY 1 ORDER BY 1",
+          "queryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, ROUND(AVG(temperature_c), 1) AS Temperatura FROM gpu_samples WHERE sampled_at >= $__from AND sampled_at < $__to GROUP BY 1 ORDER BY 1"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "celsius", "custom": { "fillOpacity": 0, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "hidden", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Moc [W]",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 12 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, ROUND(AVG(power_w), 1) AS Moc, MAX(power_limit_w) AS `Limit` FROM gpu_samples WHERE sampled_at >= $__from AND sampled_at < $__to GROUP BY 1 ORDER BY 1",
+          "queryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, ROUND(AVG(power_w), 1) AS Moc, MAX(power_limit_w) AS `Limit` FROM gpu_samples WHERE sampled_at >= $__from AND sampled_at < $__to GROUP BY 1 ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "watt", "min": 0, "custom": { "fillOpacity": 12, "showPoints": "never" } },
+        "overrides": [{ "matcher": { "id": "byName", "options": "Limit" }, "properties": [{ "id": "custom.fillOpacity", "value": 0 }, { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 6] } }] }]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Wentylator [%]",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 12 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, ROUND(AVG(fan_percent), 1) AS Wentylator FROM gpu_samples WHERE sampled_at >= $__from AND sampled_at < $__to GROUP BY 1 ORDER BY 1",
+          "queryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, ROUND(AVG(fan_percent), 1) AS Wentylator FROM gpu_samples WHERE sampled_at >= $__from AND sampled_at < $__to GROUP BY 1 ORDER BY 1"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "fillOpacity": 0, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "hidden", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+    },
+    {
+      "id": 10,
+      "type": "state-timeline",
+      "title": "P-state",
+      "description": "Najbardziej aktywny stan wydajności w przedziale: P0 to pełna wydajność, P8 i wyżej to oszczędzanie energii.",
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 19 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, 'P' || MIN(CAST(substr(pstate, 2) AS INTEGER)) AS `P-state` FROM gpu_samples WHERE sampled_at >= $__from AND sampled_at < $__to AND pstate IS NOT NULL GROUP BY 1 ORDER BY 1",
+          "queryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, 'P' || MIN(CAST(substr(pstate, 2) AS INTEGER)) AS `P-state` FROM gpu_samples WHERE sampled_at >= $__from AND sampled_at < $__to AND pstate IS NOT NULL GROUP BY 1 ORDER BY 1"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 70, "lineWidth": 0 } }, "overrides": [] },
+      "options": { "showValue": "auto", "mergeValues": true, "rowHeight": 0.8, "legend": { "showLegend": false } }
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Procesy na GPU",
+      "description": "Procesy liczące na GPU w ostatniej próbce wybranego zakresu. Procesy graficzne (np. Xorg) nie są tu raportowane przez nvidia-smi.",
+      "gridPos": { "h": 9, "w": 10, "x": 0, "y": 24 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+          "queryType": "table",
+          "timeColumns": [],
+          "rawQueryText": "SELECT p.pid AS PID, p.name AS Proces, p.vram_used_mb AS `VRAM [MiB]` FROM gpu_processes p WHERE p.sampled_at = (SELECT MAX(s.sampled_at) FROM gpu_samples s WHERE s.sampled_at >= $__from AND s.sampled_at < $__to) ORDER BY p.vram_used_mb DESC, p.pid",
+          "queryText": "SELECT p.pid AS PID, p.name AS Proces, p.vram_used_mb AS `VRAM [MiB]` FROM gpu_processes p WHERE p.sampled_at = (SELECT MAX(s.sampled_at) FROM gpu_samples s WHERE s.sampled_at >= $__from AND s.sampled_at < $__to) ORDER BY p.vram_used_mb DESC, p.pid"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "inspect": true } }, "overrides": [] },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "VRAM procesów [MiB]",
+      "gridPos": { "h": 9, "w": 14, "x": 10, "y": 24 },
+      "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "frser-sqlite-datasource", "uid": "pirx-gpu" },
+          "queryType": "table",
+          "timeColumns": ["time"],
+          "rawQueryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, name AS proces, MAX(vram_used_mb) AS value FROM gpu_processes WHERE sampled_at >= $__from AND sampled_at < $__to GROUP BY 1, 2 ORDER BY 1, 2",
+          "queryText": "SELECT (sampled_at / 1000 / MAX(1, ${__interval_ms} / 1000)) * MAX(1, ${__interval_ms} / 1000) AS time, name AS proces, MAX(vram_used_mb) AS value FROM gpu_processes WHERE sampled_at >= $__from AND sampled_at < $__to GROUP BY 1, 2 ORDER BY 1, 2"
+        }
+      ],
+      "transformations": [{ "id": "prepareTimeSeries", "options": { "format": "multi" } }],
+      "fieldConfig": { "defaults": { "unit": "mbytes", "min": 0, "custom": { "fillOpacity": 12, "showPoints": "never", "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    }
+  ]
+}

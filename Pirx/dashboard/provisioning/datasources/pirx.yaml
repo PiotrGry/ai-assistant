@@ -10,3 +10,13 @@ datasources:
     jsonData:
       # The plugin adds _pragma=query_only(1) itself; no mode=ro because WAL readers need the -shm file.
       path: /var/lib/pirx/pirx.sqlite
+
+  - name: Pirx GPU
+    uid: pirx-gpu
+    type: frser-sqlite-datasource
+    access: proxy
+    isDefault: false
+    editable: false
+    jsonData:
+      # Written every second by the pirx-gpu-sampler user service.
+      path: /var/lib/pirx/gpu.sqlite

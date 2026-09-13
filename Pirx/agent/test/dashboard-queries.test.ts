@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { GpuStore } from "../src/gpu/gpu-store.js";
+import type { GpuSample } from "../src/gpu/nvidia-smi.js";
 import { importSessionLogs } from "../src/import-logs.js";
 import { SqliteStore } from "../src/storage/sqlite.js";
 
@@ -40,15 +42,25 @@ interface Variable {
   readonly datasource?: { readonly uid?: string };
 }
 
+interface Annotation {
+  readonly name: string;
+  readonly datasource?: { readonly uid?: string };
+  readonly target?: Target;
+}
+
 interface Dashboard {
   readonly uid: string;
   readonly panels: readonly Panel[];
   readonly templating?: { readonly list: readonly Variable[] };
+  readonly annotations?: { readonly list: readonly Annotation[] };
 }
 
 type Row = Record<string, unknown>;
 
+type Databases = Readonly<Record<"pirx-sqlite" | "pirx-gpu", DatabaseSync>>;
+
 const GRAFANA_VARIABLES: ReadonlyArray<readonly [string, string]> = [
+  ["${__interval_ms}", "60000"],
   ["${model:sqlstring}", "'gemma4:12b','qwen3:14b'"],
   ["${session:sqlstring}", "'__all'"],
   ["${turn:sqlstring}", "'turn-1'"],
@@ -199,7 +211,42 @@ function seedRecordedSession(store: SqliteStore): void {
   store.finishSession("session-2", "2026-09-13T11:00:01.000Z", "failed");
 }
 
-async function seededDatabase(): Promise<{ readonly database: DatabaseSync; cleanup(): Promise<void> }> {
+function gpuSample(overrides: Partial<GpuSample>): GpuSample {
+  return {
+    index: 0,
+    utilizationPercent: null,
+    memoryUtilizationPercent: null,
+    vramUsedMb: null,
+    vramTotalMb: 16376,
+    temperatureC: null,
+    powerW: null,
+    powerLimitW: 320,
+    fanPercent: null,
+    pstate: null,
+    ...overrides,
+  };
+}
+
+// Three one-second samples at 1000-1002 s; all fall into the 960 s bucket at a 60 s interval.
+function seedGpuSamples(store: GpuStore): void {
+  store.insertReading(1_000_000, {
+    gpus: [gpuSample({ utilizationPercent: 10, memoryUtilizationPercent: 5, vramUsedMb: 1000, temperatureC: 40, powerW: 50, fanPercent: 0, pstate: "P8" })],
+    processes: [],
+  });
+  store.insertReading(1_001_000, {
+    gpus: [gpuSample({ utilizationPercent: 50, memoryUtilizationPercent: 10, vramUsedMb: 2000, temperatureC: 45, powerW: 100, fanPercent: 30, pstate: "P12" })],
+    processes: [{ pid: 4242, name: "ollama", vramMb: 1500 }],
+  });
+  store.insertReading(1_002_000, {
+    gpus: [gpuSample({ utilizationPercent: 90, memoryUtilizationPercent: 15, vramUsedMb: 3000, temperatureC: 50, powerW: 150, fanPercent: 60, pstate: "P2" })],
+    processes: [
+      { pid: 4242, name: "ollama", vramMb: 2500 },
+      { pid: 77, name: "python3", vramMb: 300 },
+    ],
+  });
+}
+
+async function seededDatabase(): Promise<{ readonly database: DatabaseSync; readonly databases: Databases; cleanup(): Promise<void> }> {
   const directory = await mkdtemp(join(tmpdir(), "pirx-dashboard-test-"));
   const filename = join(directory, "pirx.sqlite");
   const logs = join(directory, "logs");
@@ -231,14 +278,29 @@ async function seededDatabase(): Promise<{ readonly database: DatabaseSync; clea
   } finally {
     store.close();
   }
+  const gpuFilename = join(directory, "gpu.sqlite");
+  const gpuStore = GpuStore.open(gpuFilename);
+  try {
+    seedGpuSamples(gpuStore);
+  } finally {
+    gpuStore.close();
+  }
   const database = new DatabaseSync(filename, { readOnly: true });
+  const gpuDatabase = new DatabaseSync(gpuFilename, { readOnly: true });
   return {
     database,
+    databases: { "pirx-sqlite": database, "pirx-gpu": gpuDatabase },
     cleanup: async () => {
       database.close();
+      gpuDatabase.close();
       await rm(directory, { recursive: true, force: true });
     },
   };
+}
+
+function databaseFor(databases: Databases, uid: string | undefined, where: string): DatabaseSync {
+  assert.ok(uid === "pirx-sqlite" || uid === "pirx-gpu", `${where} uses unknown datasource ${String(uid)}`);
+  return databases[uid];
 }
 
 function rows(database: DatabaseSync, sql: string, overrides: ReadonlyArray<readonly [string, string]> = []): Row[] {
@@ -262,28 +324,37 @@ function panelSql(found: Panel): string {
 test("every dashboard query runs against the Pirx schema", async () => {
   const dashboards = await loadDashboards();
   assert.ok(dashboards.length > 0, "no dashboards found");
-  const { database, cleanup } = await seededDatabase();
+  const { databases, cleanup } = await seededDatabase();
   try {
     for (const dashboard of dashboards) {
       for (const variable of dashboard.templating?.list ?? []) {
         if (variable.type !== "query") continue;
-        assert.equal(variable.datasource?.uid, "pirx-sqlite", `${dashboard.uid}/${variable.name} datasource`);
-        assert.equal(typeof variable.query, "string", `${dashboard.uid}/${variable.name} query must be SQL text`);
-        const result = rows(database, variable.query as string);
+        const where = `${dashboard.uid}/${variable.name}`;
+        assert.equal(typeof variable.query, "string", `${where} query must be SQL text`);
+        const result = rows(databaseFor(databases, variable.datasource?.uid, where), variable.query as string);
         for (const row of result) {
-          assert.ok("__text" in row && "__value" in row, `${dashboard.uid}/${variable.name} needs __text and __value`);
+          assert.ok("__text" in row && "__value" in row, `${where} needs __text and __value`);
         }
       }
       for (const found of dashboard.panels) {
         for (const target of found.targets ?? []) {
-          assert.equal(target.datasource?.uid, "pirx-sqlite", `${dashboard.uid}/${found.title} datasource`);
-          assert.equal(target.rawQueryText, target.queryText, `${dashboard.uid}/${found.title} query texts differ`);
-          const result = rows(database, target.rawQueryText ?? "");
-          if (found.type === "timeseries") {
-            assert.ok(result.length > 0, `${dashboard.uid}/${found.title} returned no rows`);
-            assert.equal(Object.keys(result[0] ?? {})[0], "time", `${dashboard.uid}/${found.title} must start with time`);
+          const where = `${dashboard.uid}/${found.title}`;
+          assert.equal(target.rawQueryText, target.queryText, `${where} query texts differ`);
+          const result = rows(databaseFor(databases, target.datasource?.uid, where), target.rawQueryText ?? "");
+          if (found.type === "timeseries" || found.type === "state-timeline") {
+            assert.ok(result.length > 0, `${where} returned no rows`);
+            assert.equal(Object.keys(result[0] ?? {})[0], "time", `${where} must start with time`);
             assert.deepEqual(target.timeColumns, ["time"]);
           }
+        }
+      }
+      for (const annotation of dashboard.annotations?.list ?? []) {
+        if (annotation.target?.rawQueryText === undefined) continue;
+        const where = `${dashboard.uid}/annotation ${annotation.name}`;
+        assert.equal(annotation.target.rawQueryText, annotation.target.queryText, `${where} query texts differ`);
+        const result = rows(databaseFor(databases, annotation.datasource?.uid, where), annotation.target.rawQueryText);
+        for (const row of result) {
+          assert.ok("time" in row && "timeEnd" in row && "text" in row, `${where} needs time, timeEnd and text`);
         }
       }
     }
@@ -419,6 +490,50 @@ test("conversation dashboard lists sessions, turns, messages and operations", as
         [2, "mcp", "github_issue_get", "failed", 120, "Błąd narzędzia: not found"],
       ],
     );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("GPU dashboard shows current values, averaged history, processes and Pirx turns", async () => {
+  const dashboards = await loadDashboards();
+  const { databases, cleanup } = await seededDatabase();
+  const gpu = databases["pirx-gpu"];
+  try {
+    assert.deepEqual(rows(gpu, panelSql(panel(dashboards, "pirx-gpu", "Obciążenie GPU"))), [{ time: 1_002, value: 90 }]);
+
+    const load = panelSql(panel(dashboards, "pirx-gpu", "Obciążenie [%]"));
+    assert.deepEqual(rows(gpu, load), [{ time: 960, GPU: 50, "Pamięć": 10 }]);
+    assert.deepEqual(rows(gpu, load, [["${__interval_ms}", "1000"]]).map((row) => row["GPU"]), [10, 50, 90]);
+    assert.deepEqual(rows(gpu, load, [["${__interval_ms}", "250"]]).length, 3);
+
+    assert.deepEqual(rows(gpu, panelSql(panel(dashboards, "pirx-gpu", "VRAM [MiB]"))), [{ time: 960, "Użyty": 2000, "Całkowity": 16376 }]);
+    assert.deepEqual(rows(gpu, panelSql(panel(dashboards, "pirx-gpu", "Temperatura [°C]"))), [{ time: 960, Temperatura: 45 }]);
+    assert.deepEqual(rows(gpu, panelSql(panel(dashboards, "pirx-gpu", "Moc [W]"))), [{ time: 960, Moc: 100, Limit: 320 }]);
+    assert.deepEqual(rows(gpu, panelSql(panel(dashboards, "pirx-gpu", "Wentylator [%]"))), [{ time: 960, Wentylator: 30 }]);
+    assert.deepEqual(rows(gpu, panelSql(panel(dashboards, "pirx-gpu", "P-state"))), [{ time: 960, "P-state": "P2" }]);
+
+    assert.deepEqual(
+      rows(gpu, panelSql(panel(dashboards, "pirx-gpu", "Procesy na GPU"))),
+      [
+        { PID: 4242, Proces: "ollama", "VRAM [MiB]": 2500 },
+        { PID: 77, Proces: "python3", "VRAM [MiB]": 300 },
+      ],
+    );
+    assert.deepEqual(
+      rows(gpu, panelSql(panel(dashboards, "pirx-gpu", "VRAM procesów [MiB]"))),
+      [
+        { time: 960, proces: "ollama", value: 2500 },
+        { time: 960, proces: "python3", value: 300 },
+      ],
+    );
+
+    const dashboard = dashboards.find((candidate) => candidate.uid === "pirx-gpu");
+    const turns = dashboard?.annotations?.list.find((annotation) => annotation.name === "Tury Pirxa");
+    assert.equal(turns?.datasource?.uid, "pirx-sqlite");
+    const annotations = rows(databases["pirx-sqlite"], turns?.target?.rawQueryText ?? "");
+    assert.equal(annotations.length, 3);
+    assert.ok(annotations.some((row) => row["text"] === "pokaż zadania z milestone 1" && row["timeEnd"] === 1_789_293_605));
   } finally {
     await cleanup();
   }

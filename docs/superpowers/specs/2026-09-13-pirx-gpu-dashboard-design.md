@@ -110,8 +110,9 @@ CREATE TABLE gpu_processes (
   - kafelki bieżących wartości: obciążenie GPU, VRAM, temperatura, moc;
   - obciążenie GPU i pamięci [%], VRAM użyty wobec całkowitego [MiB],
     temperatura [°C], moc wobec limitu [W], wentylator [%];
-  - P-state jako oś stanów: najbardziej aktywny stan w przedziale (`MIN(pstate)`,
-    bo `P0` to najwyższa wydajność);
+  - P-state jako oś stanów: najbardziej aktywny stan w przedziale, liczony
+    numerycznie (`'P' || MIN(CAST(substr(pstate, 2) AS INTEGER))`), bo `P0` to
+    najwyższa wydajność, a porównanie tekstu stawiałoby `P12` przed `P2`;
   - tabela procesów z ostatniej próbki w wybranym zakresie;
   - VRAM procesów w czasie, seria na nazwę procesu;
   - adnotacje tur Pirxa ze źródła `pirx-sqlite`, jeśli wtyczka obsługuje
