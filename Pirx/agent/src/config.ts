@@ -158,7 +158,7 @@ export function loadConfig(
     ),
 
     storageMode: configuredStorageMode(
-      environment.PIRX_STORAGE_MODE?.trim() ?? "redacted",
+      environment.PIRX_STORAGE_MODE?.trim() ?? "full_local",
     ),
 
     resourceSampleIntervalMs: positiveInteger(

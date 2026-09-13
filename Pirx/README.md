@@ -57,7 +57,7 @@ Context and storage controls:
 - `PIRX_MAX_TOOL_RESULT_CHARACTERS` — deterministic MCP result limit (default `12000`),
 - `PIRX_CONTINUATION_CHECK` — after a reply without a tool call, ask the model once whether a tool step is still needed, so an announced step ("Pobieram teraz…") actually runs (default `true`),
 - `PIRX_STORAGE_FILE` — SQLite path (default `$XDG_DATA_HOME/pirx/pirx.sqlite` or `~/.local/share/pirx/pirx.sqlite`),
-- `PIRX_STORAGE_MODE` — `redacted` (default), `metrics_only`, or `full_local`,
+- `PIRX_STORAGE_MODE` — `full_local` (default, keeps message and tool-result bodies for the dashboard), `redacted`, or `metrics_only`,
 - `PIRX_RESOURCE_SAMPLE_INTERVAL_MS` — resource sampling interval (default `1000`).
 
 The SQLite store uses WAL and `synchronous=FULL`. It records sessions, turns,

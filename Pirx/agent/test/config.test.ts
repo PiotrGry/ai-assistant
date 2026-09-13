@@ -22,10 +22,10 @@ test("agent configuration rejects an invalid timezone before startup", () => {
 });
 
 test("agent configuration exposes explicit storage privacy modes", () => {
-  assert.equal(loadConfig({}).storageMode, "redacted");
+  assert.equal(loadConfig({}).storageMode, "full_local");
   assert.equal(
-    loadConfig({ PIRX_STORAGE_MODE: "full_local" }).storageMode,
-    "full_local",
+    loadConfig({ PIRX_STORAGE_MODE: "redacted" }).storageMode,
+    "redacted",
   );
   assert.throws(
     () => loadConfig({ PIRX_STORAGE_MODE: "secret_dump" }),
