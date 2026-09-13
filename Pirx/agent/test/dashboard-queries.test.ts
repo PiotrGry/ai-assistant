@@ -170,6 +170,7 @@ function seedRecordedSession(store: SqliteStore): void {
     metrics: {
       model: "gemma4:12b",
       turn_duration_ms: 4000,
+      total_seconds: 3.6,
       generation_tokens_per_second: 68,
       prompt_tokens_per_second: 4300,
       input_tokens: 7000,
@@ -211,6 +212,7 @@ async function seededDatabase(): Promise<{ readonly database: DatabaseSync; clea
       prompt: "Cześć",
       response: "Hej",
       turn_duration_ms: 1500,
+      total_seconds: 1.2,
       generation_tokens_per_second: 40,
       prompt_tokens_per_second: 900,
       input_tokens: 3000,
@@ -296,10 +298,12 @@ test("model performance dashboard compares imported and recorded models", async 
   try {
     const comparison = rows(database, panelSql(panel(dashboards, "pirx-models", "Porównanie modeli")));
     assert.deepEqual(
-      comparison.map((row) => [row["Model"], row["Tury"], row["Mediana czasu [s]"], row["p95 czasu [s]"]]).sort(),
+      comparison
+        .map((row) => [row["Model"], row["Tury"], row["Mediana czasu modelu [s]"], row["p95 czasu modelu [s]"]])
+        .sort(),
       [
-        ["gemma4:12b", 1, 4, 4],
-        ["qwen3:14b", 1, 1.5, 1.5],
+        ["gemma4:12b", 1, 3.6, 3.6],
+        ["qwen3:14b", 1, 1.2, 1.2],
       ],
     );
 
