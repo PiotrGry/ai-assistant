@@ -1,0 +1,12 @@
+[Unit]
+Description=Pirx GPU sampler (nvidia-smi every second into gpu.sqlite)
+Documentation=file://%h/ai-assistant/Pirx/dashboard/README.md
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node --enable-source-maps %h/ai-assistant/Pirx/agent/dist/gpu-sampler-cli.js
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
