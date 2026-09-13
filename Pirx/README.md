@@ -172,11 +172,14 @@ Konfiguracja GitHub pozostaje w procesie serwera MCP/orchestratora:
 Token jest pobierany przy każdym uruchomieniu serwera przez lokalny GitHub CLI,
 ale nie trafia do modelu, argumentów MCP, wyników narzędzi ani logów.
 
-Po ustawieniu `PIRX_GITHUB_OWNER` i `PIRX_GITHUB_REPOSITORY` serwer udostępnia
-też repository-scoped tools `github_issue_get`, `github_issue_list`,
-`github_issue_search`, `github_issue_create`, `github_issue_update`,
-`github_issue_comment`, `github_issue_close` i `github_issue_reopen`. Żaden z
-tych tooli nie przyjmuje repozytorium jako argumentu. Odczyty są read-only;
+Serwer zawsze udostępnia repository-scoped tools `github_issue_get`,
+`github_issue_list`, `github_issue_search`, `github_issue_create`,
+`github_issue_update`, `github_issue_comment`, `github_issue_close` i
+`github_issue_reopen`. Bez `PIRX_GITHUB_OWNER` i `PIRX_GITHUB_REPOSITORY`
+pozostają widoczne, ale zwracają kontrolowany błąd `configuration` z nazwą
+brakującej zmiennej, więc model nie udaje braku dostępu. `task Pirx` ustawia
+je na `PiotrGry/ai-assistant`. Żaden z tych tooli nie przyjmuje repozytorium
+jako argumentu. Odczyty są read-only;
 mutacje są wykonywane wyłącznie po autoryzacji związanej przez hosta Pirx z
 konkretnym narzędziem, celem i skrótem argumentów. Model nie może sam nadać
 sobie uprawnień przez argument narzędzia. Klucz idempotencji jest wyznaczany

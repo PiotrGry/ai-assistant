@@ -57,64 +57,59 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   registerSystemTools(server);
   registerObsidianTools(server, obsidianVault);
   registerCalendarTools(server, calendar);
-  const githubRequested = [
-    environment.PIRX_GITHUB_OWNER,
-    environment.PIRX_GITHUB_REPOSITORY,
-    environment.PIRX_GITHUB_POC_ISSUE,
-  ].some((value) => value !== undefined && value.trim().length > 0);
-  if (githubRequested) {
-    let githubConfig = options.githubPocConfig;
-    let githubConfigurationError: string | undefined;
-    if (githubConfig === undefined) {
-      try {
-        githubConfig = loadGitHubConfig(environment);
-      } catch (error: unknown) {
-        githubConfigurationError =
-          error instanceof GitHubConfigurationError
-            ? error.message
-            : "GitHub Issue tools are unavailable because their required configuration is incomplete.";
-      }
+  // Issue tools are always listed; without configuration they return a controlled
+  // `configuration` error naming what is missing instead of silently disappearing.
+  let githubConfig = options.githubPocConfig;
+  let githubConfigurationError: string | undefined;
+  if (githubConfig === undefined) {
+    try {
+      githubConfig = loadGitHubConfig(environment);
+    } catch (error: unknown) {
+      githubConfigurationError =
+        error instanceof GitHubConfigurationError
+          ? error.message
+          : "GitHub Issue tools are unavailable because their required configuration is incomplete.";
     }
-    const transport =
-      options.githubPocTransport ??
-      (githubConfig === undefined ? undefined : new GitHubTransport(githubConfig));
-    const githubQueue = githubConfig === undefined || transport === undefined
-      ? undefined
-      : new GitHubWriteQueue();
-    const githubReader = githubConfig === undefined || transport === undefined
-      ? undefined
-      : new GitHubIssueReader(transport, githubConfig);
-    const githubMutator = githubReader === undefined || githubQueue === undefined || githubConfig === undefined || transport === undefined
-      ? undefined
-      : new GitHubIssueMutator(transport, githubReader, githubQueue, githubConfig);
-    registerGitHubIssueTools(server, {
-      configurationError: githubConfigurationError,
+  }
+  const transport =
+    options.githubPocTransport ??
+    (githubConfig === undefined ? undefined : new GitHubTransport(githubConfig));
+  const githubQueue = githubConfig === undefined || transport === undefined
+    ? undefined
+    : new GitHubWriteQueue();
+  const githubReader = githubConfig === undefined || transport === undefined
+    ? undefined
+    : new GitHubIssueReader(transport, githubConfig);
+  const githubMutator = githubReader === undefined || githubQueue === undefined || githubConfig === undefined || transport === undefined
+    ? undefined
+    : new GitHubIssueMutator(transport, githubReader, githubQueue, githubConfig);
+  registerGitHubIssueTools(server, {
+    configurationError: githubConfigurationError,
+    authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
+    reader: githubReader,
+    mutator: githubMutator,
+  });
+  if ((environment.PIRX_GITHUB_POC_ISSUE?.trim().length ?? 0) > 0) {
+    registerGitHubPocTool(server, {
+      issue: config.githubPocIssue,
+      config: githubConfig,
+      transport,
+      configurationError: config.githubPocConfigurationError ?? githubConfigurationError,
       authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
       reader: githubReader,
       mutator: githubMutator,
     });
-    if ((environment.PIRX_GITHUB_POC_ISSUE?.trim().length ?? 0) > 0) {
-      registerGitHubPocTool(server, {
-        issue: config.githubPocIssue,
-        config: githubConfig,
-        transport,
-        configurationError: config.githubPocConfigurationError ?? githubConfigurationError,
-        authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
-        reader: githubReader,
-        mutator: githubMutator,
-      });
-    }
-    if (githubQueue !== undefined) {
-      const close = server.close.bind(server);
-      let closed: Promise<void> | undefined;
-      server.close = () => {
-        closed ??= (async () => {
-          await githubQueue.close({ drain: true });
-          await close();
-        })();
-        return closed;
-      };
-    }
+  }
+  if (githubQueue !== undefined) {
+    const close = server.close.bind(server);
+    let closed: Promise<void> | undefined;
+    server.close = () => {
+      closed ??= (async () => {
+        await githubQueue.close({ drain: true });
+        await close();
+      })();
+      return closed;
+    };
   }
   return server;
 }

@@ -169,6 +169,26 @@ test("GitHub POC is omitted when its fixed target is not configured", async (con
   assert.equal(listed.tools.some((tool) => tool.name === "github_issue_round_trip_poc"), false);
 });
 
+test("repository-scoped Issue tools stay listed and name the missing GitHub configuration", async (context) => {
+  const fixture = await connected({ environment: { PIRX_GOOGLE_CALENDAR_TIMEZONE: "UTC" } });
+  context.after(async () => {
+    await fixture.client.close();
+    await fixture.server.close();
+  });
+
+  const listed = await fixture.client.listTools();
+  assert.ok(listed.tools.some((tool) => tool.name === "github_issue_get"));
+
+  const get = await fixture.client.callTool({
+    name: "github_issue_get",
+    arguments: { issueNumber: 179 },
+  });
+  assert.equal(get.isError, true);
+  const content = get.structuredContent as { errorCode: string; message: string };
+  assert.equal(content.errorCode, "configuration");
+  assert.match(content.message, /PIRX_GITHUB_OWNER/u);
+});
+
 test("GitHub POC uses the fixed Issue and proves idempotent replay", async (context) => {
   const transport = new FakeGitHubTransport();
   const fixture = await connected({ transport, config: githubConfig });

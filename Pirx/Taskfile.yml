@@ -1,6 +1,9 @@
 version: "3"
 tasks:
   Pirx:
+    env:
+      PIRX_GITHUB_OWNER: PiotrGry
+      PIRX_GITHUB_REPOSITORY: ai-assistant
     cmds:
       - pnpm build
       - pnpm tui
