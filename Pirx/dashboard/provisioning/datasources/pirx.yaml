@@ -1,0 +1,12 @@
+apiVersion: 1
+
+datasources:
+  - name: Pirx SQLite
+    uid: pirx-sqlite
+    type: frser-sqlite-datasource
+    access: proxy
+    isDefault: true
+    editable: false
+    jsonData:
+      # The plugin adds _pragma=query_only(1) itself; no mode=ro because WAL readers need the -shm file.
+      path: /var/lib/pirx/pirx.sqlite

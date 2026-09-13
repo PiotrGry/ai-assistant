@@ -1,0 +1,4 @@
+creation_rules:
+  # Pirx dashboard: whole-file dotenv encryption of the local Grafana admin password.
+  - path_regex: grafana\.sops\.env$
+    age: age1rdg9cfj48m3j34x6w3wy7m0mpppn9azzns2v72k7mcpj4mw4ap3qj3gk2m
