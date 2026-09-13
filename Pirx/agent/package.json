@@ -17,7 +17,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "tsc -p ../mcp-server/tsconfig.json && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
     "start": "node --enable-source-maps dist/index.js",
-    "import:logs": "node --enable-source-maps dist/import-logs-cli.js"
+    "import:logs": "node --enable-source-maps dist/import-logs-cli.js",
+    "gpu:sampler": "node --enable-source-maps dist/gpu-sampler-cli.js"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "2.0.0",
