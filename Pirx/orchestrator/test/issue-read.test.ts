@@ -9,16 +9,32 @@ import {
   type GitHubRequestContext,
   type GitHubResponseMetadata,
 } from "../src/index.js";
-import type { GitHubGraphqlReadRequest, GitHubRestReadRequest } from "../src/transport-types.js";
+import type {
+  GitHubGraphqlReadRequest,
+  GitHubRestReadRequest,
+} from "../src/github/transport-types.js";
 
 const config = { owner: "PiotrGry", repository: "ai-assistant" } as const;
 const metadata: GitHubResponseMetadata = { status: 200, rateLimit: {} };
 
-function success<T>(value: T, correlationId = "issue-correlation", response = metadata): GitHubOperationResult<T> {
-  return { outcome: "success", value, correlationId, remoteOutcome: "accepted", response };
+function success<T>(
+  value: T,
+  correlationId = "issue-correlation",
+  response = metadata,
+): GitHubOperationResult<T> {
+  return {
+    outcome: "success",
+    value,
+    correlationId,
+    remoteOutcome: "accepted",
+    response,
+  };
 }
 
-function restIssue(number: number, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function restIssue(
+  number: number,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     node_id: `node-${number}`,
     number,
@@ -56,19 +72,43 @@ function graphqlIssue(number: number): Record<string, unknown> {
 }
 
 class FakeIssueTransport implements GitHubIssueReadTransport {
-  readonly restCalls: Array<{ request: GitHubRestReadRequest; context: GitHubRequestContext }> = [];
-  readonly graphqlCalls: Array<{ request: GitHubGraphqlReadRequest; context: GitHubRequestContext }> = [];
-  restHandler: (request: GitHubRestReadRequest, context: GitHubRequestContext) => Promise<GitHubOperationResult<unknown>> = async () => success([]);
-  graphqlHandler: (request: GitHubGraphqlReadRequest, context: GitHubRequestContext) => Promise<GitHubOperationResult<unknown>> = async () => success({});
+  readonly restCalls: Array<{
+    request: GitHubRestReadRequest;
+    context: GitHubRequestContext;
+  }> = [];
+  readonly graphqlCalls: Array<{
+    request: GitHubGraphqlReadRequest;
+    context: GitHubRequestContext;
+  }> = [];
+  restHandler: (
+    request: GitHubRestReadRequest,
+    context: GitHubRequestContext,
+  ) => Promise<GitHubOperationResult<unknown>> = async () => success([]);
+  graphqlHandler: (
+    request: GitHubGraphqlReadRequest,
+    context: GitHubRequestContext,
+  ) => Promise<GitHubOperationResult<unknown>> = async () => success({});
 
-  async restRead<T>(request: GitHubRestReadRequest, context: GitHubRequestContext): Promise<GitHubOperationResult<T>> {
+  async restRead<T>(
+    request: GitHubRestReadRequest,
+    context: GitHubRequestContext,
+  ): Promise<GitHubOperationResult<T>> {
     this.restCalls.push({ request, context });
-    return await this.restHandler(request, context) as GitHubOperationResult<T>;
+    return (await this.restHandler(
+      request,
+      context,
+    )) as GitHubOperationResult<T>;
   }
 
-  async graphqlRead<T>(request: GitHubGraphqlReadRequest, context: GitHubRequestContext): Promise<GitHubOperationResult<T>> {
+  async graphqlRead<T>(
+    request: GitHubGraphqlReadRequest,
+    context: GitHubRequestContext,
+  ): Promise<GitHubOperationResult<T>> {
     this.graphqlCalls.push({ request, context });
-    return await this.graphqlHandler(request, context) as GitHubOperationResult<T>;
+    return (await this.graphqlHandler(
+      request,
+      context,
+    )) as GitHubOperationResult<T>;
   }
 }
 
@@ -78,7 +118,11 @@ function noRetry() {
 
 test("getIssue maps REST data and omits nullable fields without exposing raw payloads", async () => {
   const transport = new FakeIssueTransport();
-  transport.restHandler = async () => success(restIssue(48, { body: null, milestone: null, assignees: [] }), "get-48");
+  transport.restHandler = async () =>
+    success(
+      restIssue(48, { body: null, milestone: null, assignees: [] }),
+      "get-48",
+    );
   const reader = new GitHubIssueReader(transport, config);
   const result = await reader.getIssue(48, { correlationId: "get-48" });
 
@@ -106,23 +150,41 @@ test("listIssues follows REST pagination, filters pull requests, and respects an
   transport.restHandler = async (request) => {
     const page = request.query?.page;
     if (page === 1) {
-      return success([restIssue(1), restIssue(2, { pull_request: { url: "pr" } })], "list", {
-        status: 200,
-        rateLimit: {},
-        pagination: { next: "https://api.github.test/repos/PiotrGry/ai-assistant/issues?page=2" },
-      });
+      return success(
+        [restIssue(1), restIssue(2, { pull_request: { url: "pr" } })],
+        "list",
+        {
+          status: 200,
+          rateLimit: {},
+          pagination: {
+            next: "https://api.github.test/repos/PiotrGry/ai-assistant/issues?page=2",
+          },
+        },
+      );
     }
     return success([restIssue(3)], "list");
   };
-  const reader = new GitHubIssueReader(transport, config, { defaultPageSize: 2, defaultMaxItems: 3 });
+  const reader = new GitHubIssueReader(transport, config, {
+    defaultPageSize: 2,
+    defaultMaxItems: 3,
+  });
   const result = await reader.listIssues(
-    { state: "all", labels: ["github", "pirx"], milestone: "none", sort: "updated", direction: "desc" },
+    {
+      state: "all",
+      labels: ["github", "pirx"],
+      milestone: "none",
+      sort: "updated",
+      direction: "desc",
+    },
     { correlationId: "list", pageSize: 2, maxItems: 3 },
   );
 
   assert.equal(result.outcome, "success");
   if (result.outcome !== "success") return;
-  assert.deepEqual(result.value.items.map((issue) => issue.number), [1, 3]);
+  assert.deepEqual(
+    result.value.items.map((issue) => issue.number),
+    [1, 3],
+  );
   assert.equal(result.value.complete, true);
   assert.equal(transport.restCalls.length, 2);
   assert.deepEqual(transport.restCalls[0]?.request.query, {
@@ -138,13 +200,19 @@ test("listIssues follows REST pagination, filters pull requests, and respects an
 
 test("listIssues returns an opaque cursor when the caller's maximum is reached", async () => {
   const transport = new FakeIssueTransport();
-  transport.restHandler = async () => success([restIssue(1), restIssue(2)], "bounded", {
-    status: 200,
-    rateLimit: {},
-    pagination: { next: "https://api.github.test/repos/PiotrGry/ai-assistant/issues?page=2" },
-  });
+  transport.restHandler = async () =>
+    success([restIssue(1), restIssue(2)], "bounded", {
+      status: 200,
+      rateLimit: {},
+      pagination: {
+        next: "https://api.github.test/repos/PiotrGry/ai-assistant/issues?page=2",
+      },
+    });
   const reader = new GitHubIssueReader(transport, config);
-  const result = await reader.listIssues({}, { correlationId: "bounded", pageSize: 2, maxItems: 2 });
+  const result = await reader.listIssues(
+    {},
+    { correlationId: "bounded", pageSize: 2, maxItems: 2 },
+  );
   assert.equal(result.outcome, "success");
   if (result.outcome !== "success") return;
   assert.equal(result.value.complete, false);
@@ -156,18 +224,47 @@ test("searchIssues uses a focused GraphQL query and follows cursor pagination", 
   transport.graphqlHandler = async (_request, _context) => {
     const call = transport.graphqlCalls.length;
     return call === 1
-      ? success({ search: { nodes: [graphqlIssue(10)], pageInfo: { hasNextPage: true, endCursor: "cursor-1" } } }, "search")
-      : success({ search: { nodes: [graphqlIssue(11)], pageInfo: { hasNextPage: false, endCursor: null } } }, "search");
+      ? success(
+          {
+            search: {
+              nodes: [graphqlIssue(10)],
+              pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+            },
+          },
+          "search",
+        )
+      : success(
+          {
+            search: {
+              nodes: [graphqlIssue(11)],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+          "search",
+        );
   };
-  const reader = new GitHubIssueReader(transport, config, { defaultPageSize: 1, defaultMaxItems: 2 });
+  const reader = new GitHubIssueReader(transport, config, {
+    defaultPageSize: 1,
+    defaultMaxItems: 2,
+  });
   const result = await reader.searchIssues(
-    { state: "open", labels: ["github"], milestone: 1, text: "rate limit", sort: "updated", direction: "asc" },
+    {
+      state: "open",
+      labels: ["github"],
+      milestone: 1,
+      text: "rate limit",
+      sort: "updated",
+      direction: "asc",
+    },
     { correlationId: "search", pageSize: 1, maxItems: 2 },
   );
 
   assert.equal(result.outcome, "success");
   if (result.outcome !== "success") return;
-  assert.deepEqual(result.value.items.map((issue) => issue.number), [10, 11]);
+  assert.deepEqual(
+    result.value.items.map((issue) => issue.number),
+    [10, 11],
+  );
   assert.equal(result.value.complete, true);
   assert.equal(transport.graphqlCalls.length, 2);
   const first = transport.graphqlCalls[0]?.request;
@@ -175,7 +272,10 @@ test("searchIssues uses a focused GraphQL query and follows cursor pagination", 
   assert.match(first.query, /labels\(first: 100\)/u);
   assert.match(first.query, /\.\.\. on Issue/u);
   assert.doesNotMatch(first.query, /comments|projectItems|history/u);
-  assert.match(String(first.variables?.query), /repo:PiotrGry\/ai-assistant is:issue is:open label:"github" milestone:1 sort:updated-asc "rate limit"/u);
+  assert.match(
+    String(first.variables?.query),
+    /repo:PiotrGry\/ai-assistant is:issue is:open label:"github" milestone:1 sort:updated-asc "rate limit"/u,
+  );
   assert.equal(first.variables?.after, undefined);
   assert.equal(transport.graphqlCalls[1]?.request.variables?.after, "cursor-1");
 });
@@ -195,11 +295,30 @@ test("invalid filters and cursors fail before a network call", async () => {
 
 test("a mid-pagination failure is partial and carries the failed cursor and items read", async () => {
   const transport = new FakeIssueTransport();
-  transport.restHandler = async (request) => request.query?.page === 1
-    ? success([restIssue(1)], "partial", { status: 200, rateLimit: {}, pagination: { next: "https://api.github.test/issues?page=2" } })
-    : failure("rate_limited", "rate_limited", "limited", "partial", "not_accepted", { status: 429, rateLimit: { retryAfterMs: 1 } });
-  const reader = new GitHubIssueReader(transport, config, { retryPolicy: noRetry(), defaultPageSize: 1, defaultMaxItems: 3 });
-  const result = await reader.listIssues({}, { correlationId: "partial", pageSize: 1, maxItems: 3 });
+  transport.restHandler = async (request) =>
+    request.query?.page === 1
+      ? success([restIssue(1)], "partial", {
+          status: 200,
+          rateLimit: {},
+          pagination: { next: "https://api.github.test/issues?page=2" },
+        })
+      : failure(
+          "rate_limited",
+          "rate_limited",
+          "limited",
+          "partial",
+          "not_accepted",
+          { status: 429, rateLimit: { retryAfterMs: 1 } },
+        );
+  const reader = new GitHubIssueReader(transport, config, {
+    retryPolicy: noRetry(),
+    defaultPageSize: 1,
+    defaultMaxItems: 3,
+  });
+  const result = await reader.listIssues(
+    {},
+    { correlationId: "partial", pageSize: 1, maxItems: 3 },
+  );
   assert.equal(result.outcome, "rate_limited");
   assert.equal(result.error.details?.itemsRead, 1);
   assert.match(String(result.error.details?.failedCursor), /^v1:rest:/u);
@@ -207,15 +326,29 @@ test("a mid-pagination failure is partial and carries the failed cursor and item
 
 test("read failures and cancellation preserve normalized outcomes", async () => {
   const transport = new FakeIssueTransport();
-  transport.restHandler = async () => failure("permanent_error", "not_found", "GitHub resource was not found.", "read-failure", "not_accepted");
-  const reader = new GitHubIssueReader(transport, config, { retryPolicy: noRetry() });
-  const notFound = await reader.getIssue(999, { correlationId: "read-failure" });
+  transport.restHandler = async () =>
+    failure(
+      "permanent_error",
+      "not_found",
+      "GitHub resource was not found.",
+      "read-failure",
+      "not_accepted",
+    );
+  const reader = new GitHubIssueReader(transport, config, {
+    retryPolicy: noRetry(),
+  });
+  const notFound = await reader.getIssue(999, {
+    correlationId: "read-failure",
+  });
   assert.equal(notFound.outcome, "permanent_error");
   assert.equal(notFound.error.code, "not_found");
 
   const controller = new AbortController();
   controller.abort();
-  const cancelled = await reader.getIssue(1, { correlationId: "cancelled", signal: controller.signal });
+  const cancelled = await reader.getIssue(1, {
+    correlationId: "cancelled",
+    signal: controller.signal,
+  });
   assert.equal(cancelled.outcome, "permanent_error");
   assert.equal(cancelled.error.code, "cancelled");
 });

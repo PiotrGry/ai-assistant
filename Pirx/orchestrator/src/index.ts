@@ -3,7 +3,7 @@ export {
   loadGitHubConfig,
   type GitHubConfig,
   type GitHubConfigOptions,
-} from "./config.js";
+} from "./github/config.js";
 export {
   failure,
   success,
@@ -16,14 +16,14 @@ export {
   type GitHubRemoteOutcome,
   type GitHubResponseMetadata,
   type GitHubSuccess,
-} from "./outcome.js";
-export { GitHubTransport } from "./transport.js";
+} from "./github/outcome.js";
+export { GitHubTransport } from "./github/transport.js";
 export {
   GitHubWriteQueue,
   type GitHubWriteExecutionContext,
   type GitHubWriteOperation,
   type GitHubWriteQueueOptions,
-} from "./write-queue.js";
+} from "./github/write-queue.js";
 export {
   executeWithGitHubRetry,
   type GitHubRetryDecision,
@@ -32,7 +32,7 @@ export {
   type GitHubRetryPolicyOptions,
   type GitHubRetryReason,
   type GitHubRetryRequest,
-} from "./retry-policy.js";
+} from "./github/retry-policy.js";
 export type {
   GitHubFetch,
   GitHubGraphqlReadRequest,
@@ -40,7 +40,7 @@ export type {
   GitHubRequestContext,
   GitHubRestReadRequest,
   GitHubRestWriteRequest,
-} from "./transport-types.js";
+} from "./github/transport-types.js";
 export {
   GitHubIssueReader,
   githubIssueQueryFields,
@@ -59,7 +59,7 @@ export {
   type GitHubIssueStateFilter,
   type GitHubIssueSummary,
   type GitHubIssueUser,
-} from "./issue-read.js";
+} from "./github/issue-read.js";
 export {
   GitHubIssueMutator,
   type GitHubCommentRef,
@@ -76,9 +76,9 @@ export {
   type GitHubLifecycleCommentEnvelope,
   type GitHubLifecycleCommentRequest,
   type GitHubLifecycleCommentResult,
-} from "./issue-mutate.js";
+} from "./github/issue-mutate.js";
 export {
   GitHubIssueLifecycleRoundTrip,
   type GitHubIssueRoundTripEvidence,
   type GitHubIssueRoundTripRequest,
-} from "./issue-round-trip.js";
+} from "./github/issue-round-trip.js";
