@@ -32,3 +32,17 @@ test("agent configuration exposes explicit storage privacy modes", () => {
     /PIRX_STORAGE_MODE musi być jednym z/u,
   );
 });
+
+test("agent configuration defaults to a context window with room for tool results", () => {
+  assert.equal(loadConfig({}).numCtx, 32_768);
+  assert.equal(loadConfig({ OLLAMA_NUM_CTX: "8192" }).numCtx, 8_192);
+});
+
+test("agent configuration enables the continuation check unless disabled", () => {
+  assert.equal(loadConfig({}).continuationCheck, true);
+  assert.equal(loadConfig({ PIRX_CONTINUATION_CHECK: "false" }).continuationCheck, false);
+  assert.throws(
+    () => loadConfig({ PIRX_CONTINUATION_CHECK: "maybe" }),
+    /PIRX_CONTINUATION_CHECK/u,
+  );
+});

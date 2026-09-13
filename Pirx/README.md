@@ -44,7 +44,7 @@ pozostaje dotychczasowym interfejsem CLI.
 Agent domyślnie używa modelu `gemma4:12b` i Ollamy pod `http://localhost:11434`. Ustawienia można nadpisać zmiennymi:
 
 - `OLLAMA_MODEL`,
-- `OLLAMA_NUM_CTX`,
+- `OLLAMA_NUM_CTX` (domyślnie `32768`; przy 8192 prompt systemowy i schematy narzędzi zajmują prawie cały budżet, więc wyniki narzędzi wypadają z kontekstu),
 - `OLLAMA_KEEP_ALIVE`,
 - `OLLAMA_BASE_URL`,
 - `OLLAMA_TEMPERATURE`,
@@ -55,6 +55,7 @@ Context and storage controls:
 
 - `PIRX_CONTEXT_SAFETY_MARGIN_TOKENS` — reserved input margin (default `512`),
 - `PIRX_MAX_TOOL_RESULT_CHARACTERS` — deterministic MCP result limit (default `12000`),
+- `PIRX_CONTINUATION_CHECK` — after a reply without a tool call, ask the model once whether a tool step is still needed, so an announced step ("Pobieram teraz…") actually runs (default `true`),
 - `PIRX_STORAGE_FILE` — SQLite path (default `$XDG_DATA_HOME/pirx/pirx.sqlite` or `~/.local/share/pirx/pirx.sqlite`),
 - `PIRX_STORAGE_MODE` — `redacted` (default), `metrics_only`, or `full_local`,
 - `PIRX_RESOURCE_SAMPLE_INTERVAL_MS` — resource sampling interval (default `1000`).

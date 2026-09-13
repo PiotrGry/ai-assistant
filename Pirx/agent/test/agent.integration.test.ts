@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { PirxAgent } from "../src/agent.js";
@@ -28,6 +28,127 @@ function sendJson(response: ServerResponse, body: unknown): void {
   response.writeHead(200, { "content-type": "application/json" });
   response.end(JSON.stringify(body));
 }
+
+interface ScriptedOllama {
+  readonly requests: Record<string, unknown>[];
+  readonly baseUrl: string;
+  close(): Promise<void>;
+}
+
+// Answers /api/chat with the scripted assistant messages in order.
+async function startScriptedOllama(replies: readonly Record<string, unknown>[]): Promise<ScriptedOllama> {
+  const requests: Record<string, unknown>[] = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/api/tags") {
+      sendJson(response, { models: [] });
+      return;
+    }
+    if (request.method !== "POST" || request.url !== "/api/chat") {
+      response.writeHead(404).end();
+      return;
+    }
+    requests.push(await requestJson(request));
+    sendJson(response, {
+      model: "pirx-test-model",
+      created_at: new Date().toISOString(),
+      message: replies[requests.length - 1] ?? { role: "assistant", content: "GOTOWE" },
+      done: true,
+      done_reason: "stop",
+      total_duration: 1_000_000,
+      load_duration: 0,
+      prompt_eval_count: 1,
+      prompt_eval_duration: 1_000_000,
+      eval_count: 1,
+      eval_duration: 1_000_000,
+    });
+  });
+  await new Promise<void>((resolveListen, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolveListen);
+  });
+  const address = server.address();
+  assert.ok(address !== null && typeof address === "object");
+  return {
+    requests,
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolveClose, reject) => {
+      server.close((error) => (error === undefined ? resolveClose() : reject(error)));
+    }),
+  };
+}
+
+async function createContinuationAgent(
+  context: TestContext,
+  replies: readonly Record<string, unknown>[],
+): Promise<{ readonly agent: PirxAgent; readonly ollama: ScriptedOllama }> {
+  const ollama = await startScriptedOllama(replies);
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "pirx-continuation-test-"));
+  const promptFile = join(temporaryDirectory, "system.md");
+  await writeFile(promptFile, "Jesteś testową asystentką.", "utf8");
+  const pirxDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+  const agent = await PirxAgent.create({
+    model: "pirx-test-model",
+    numCtx: 8_192,
+    keepAlive: "1m",
+    baseUrl: ollama.baseUrl,
+    temperature: 0,
+    timeZone: "Europe/Warsaw",
+    promptFile,
+    logDir: join(temporaryDirectory, "logs"),
+    mcpServerEntry: resolve(pirxDirectory, "mcp-server", "dist", "index.js"),
+    maxToolIterations: 8,
+    maxRepeatedToolCalls: 3,
+    llmTimeoutMs: 120_000,
+    toolTimeoutMs: 30_000,
+    continuationCheck: true,
+  });
+  context.after(async () => {
+    await agent.close();
+    await ollama.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+  return { agent, ollama };
+}
+
+test("continuation check runs a tool the model only announced, then ends on the final answer", async (context) => {
+  const { agent, ollama } = await createContinuationAgent(context, [
+    { role: "assistant", content: "Pobieram teraz powitanie." },
+    { role: "assistant", content: "", tool_calls: [{ function: { name: "hello", arguments: { name: "Piotr" } } }] },
+    { role: "assistant", content: "Narzędzie odpowiedziało: Hello, Piotr!" },
+    { role: "assistant", content: "GOTOWE" },
+  ]);
+
+  const turn = await agent.chat("Przywitaj Piotra.");
+
+  assert.equal(turn.content, "Narzędzie odpowiedziało: Hello, Piotr!");
+  assert.equal(turn.metrics.tool_calls, 1);
+  assert.equal(turn.metrics.model_calls, 4);
+  assert.equal(ollama.requests.length, 4);
+  const check = ollama.requests[1]?.messages as Array<{ role: string; content: string }>;
+  assert.equal(check.at(-2)?.content, "Pobieram teraz powitanie.");
+  assert.equal(check.at(-1)?.role, "user");
+  assert.match(check.at(-1)?.content ?? "", /kontynuacja/u);
+  assert.ok(Array.isArray(ollama.requests[1]?.tools));
+  const afterTool = ollama.requests[2]?.messages as Array<{ content: string }>;
+  assert.ok(afterTool.every((message) => !message.content.includes("[Pirx: kontynuacja]")));
+  assert.ok(turn.messages.every((message) => !message.content.includes("[Pirx: kontynuacja]")));
+  assert.ok(turn.messages.some((message) =>
+    message.content === "Pobieram teraz powitanie." && (message.tool_calls?.length ?? 0) === 1));
+});
+
+test("continuation check keeps the original answer when the model has nothing left to do", async (context) => {
+  const { agent, ollama } = await createContinuationAgent(context, [
+    { role: "assistant", content: "Cześć, Piotrze!" },
+    { role: "assistant", content: "Inna odpowiedź po sprawdzeniu." },
+  ]);
+
+  const turn = await agent.chat("Cześć.");
+
+  assert.equal(turn.content, "Cześć, Piotrze!");
+  assert.equal(turn.metrics.model_calls, 2);
+  assert.equal(turn.metrics.tool_calls, 0);
+  assert.equal(ollama.requests.length, 2);
+});
 
 test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context) => {
   const requests: Record<string, unknown>[] = [];

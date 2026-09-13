@@ -21,6 +21,11 @@ import { currentTimeSystemContext } from "./time-context.js";
 
 type ResponseWithMetrics = ChatResponse;
 
+// Local models often end a turn by announcing a step instead of calling its tool. One hidden check per
+// text-only reply lets the model make that call; this prompt is never stored in the conversation history.
+const CONTINUATION_CHECK_PROMPT =
+  "[Pirx: kontynuacja] Jeżeli do spełnienia prośby użytkownika potrzebny jest jeszcze krok wymagający narzędzia, wykonaj go teraz. W przeciwnym razie odpowiedz dokładnie: GOTOWE";
+
 export interface TurnMetrics {
   readonly timestamp: string;
   readonly model: string;
@@ -569,7 +574,85 @@ export class PirxAgent {
         this.#lastContextTokens = response.prompt_eval_count ?? undefined;
         addMetrics(totals, response);
 
-        const toolCalls = response.message.tool_calls ?? [];
+        let assistantMessage = response.message;
+        let toolCalls = response.message.tool_calls ?? [];
+        if (
+          toolCalls.length === 0 &&
+          this.#config.continuationCheck === true &&
+          mayExecuteTools &&
+          tools.length > 0
+        ) {
+          const checkOperationSequence = operationSequence;
+          operationSequence += 1;
+          const checkOperation =
+            context.operationRecorder !== undefined &&
+            context.sessionId !== undefined &&
+            context.turnId !== undefined
+              ? context.operationRecorder.start({
+                  sessionId: context.sessionId,
+                  turnId: context.turnId,
+                  sequence: checkOperationSequence,
+                  kind: "llm",
+                  startedAt: this.#now().toISOString(),
+                  payload: {
+                    schema_version: 1,
+                    model,
+                    iteration,
+                    continuation_check: true,
+                  },
+                })
+              : undefined;
+          const checkStartedAt = performance.now();
+          let check: ResponseWithMetrics;
+          try {
+            check = (await withTimeout(
+              this.#ollama.chat({
+                ...request,
+                messages: [
+                  ...messages,
+                  withoutHistoricalThinking(response.message),
+                  { role: "user", content: CONTINUATION_CHECK_PROMPT },
+                ],
+              }),
+              this.#config.llmTimeoutMs,
+              "Ollama",
+            )) as ResponseWithMetrics;
+          } catch (error: unknown) {
+            if (checkOperation !== undefined) {
+              context.operationRecorder?.finish(checkOperation, {
+                endedAt: this.#now().toISOString(),
+                status: "failed",
+                payload: {
+                  schema_version: 1,
+                  wall_duration_ms: performance.now() - checkStartedAt,
+                },
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+            throw error;
+          }
+          if (checkOperation !== undefined) {
+            context.operationRecorder?.finish(checkOperation, {
+              endedAt: this.#now().toISOString(),
+              status: "succeeded",
+              payload: {
+                schema_version: 1,
+                ...rawOllamaMetrics(check),
+                wall_duration_ms: performance.now() - checkStartedAt,
+              },
+            });
+          }
+          addMetrics(totals, check);
+          const continuedCalls = check.message.tool_calls ?? [];
+          if (continuedCalls.length > 0) {
+            toolCalls = continuedCalls;
+            assistantMessage = {
+              ...withoutHistoricalThinking(response.message),
+              tool_calls: continuedCalls,
+            };
+          }
+        }
+
         if (toolCalls.length === 0) {
           this.#messages.push(response.message);
           finalContent = response.message.content;
@@ -588,7 +671,7 @@ export class PirxAgent {
           break;
         }
 
-        this.#messages.push(response.message);
+        this.#messages.push(assistantMessage);
 
         for (const call of toolCalls) {
           const name = call.function.name;

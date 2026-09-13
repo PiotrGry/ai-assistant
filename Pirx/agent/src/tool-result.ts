@@ -9,10 +9,124 @@ export interface McpToolResultLike {
   readonly isError?: boolean | undefined;
 }
 
+// Longest text kept per string field, from the most to the least generous, when a result is too large.
+const TEXT_FIELD_LIMITS = [2_000, 1_000, 500, 300, 150, 80];
+const MAX_ARRAY_REDUCTIONS = 10;
+
+function shortenStrings(value: unknown, limit: number): unknown {
+  if (typeof value === "string") {
+    return value.length <= limit
+      ? value
+      : `${value.slice(0, limit)}… [skrócono z ${value.length} znaków]`;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => shortenStrings(item, limit));
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, shortenStrings(item, limit)]),
+    );
+  }
+  return value;
+}
+
+function annotate(value: unknown, originalCharacters: number): Record<string, unknown> {
+  const note = { truncated: true, original_characters: originalCharacters };
+  if (Array.isArray(value)) {
+    return { ...note, value_type: "array", items: value };
+  }
+  if (typeof value === "object" && value !== null) {
+    return { ...note, ...(value as Record<string, unknown>) };
+  }
+  return { ...note, value_type: typeof value, value };
+}
+
+interface ArrayLocation {
+  readonly parent: Record<string, unknown>;
+  readonly key: string;
+  readonly items: readonly unknown[];
+}
+
+function largestArray(root: unknown): ArrayLocation | undefined {
+  let best: ArrayLocation | undefined;
+  let bestSize = 0;
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (typeof value !== "object" || value === null) {
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    for (const [key, item] of Object.entries(record)) {
+      if (Array.isArray(item) && item.length > 0) {
+        const size = JSON.stringify(item).length;
+        if (size > bestSize) {
+          best = { parent: record, key, items: item };
+          bestSize = size;
+        }
+      }
+      visit(item);
+    }
+  };
+  visit(root);
+  return best;
+}
+
+// Drops trailing items from the largest arrays and records how many were left out next to each array.
+function dropArrayItems(root: Record<string, unknown>, maxCharacters: number): string | undefined {
+  for (let reduction = 0; reduction < MAX_ARRAY_REDUCTIONS; reduction += 1) {
+    if (JSON.stringify(root).length <= maxCharacters) {
+      break;
+    }
+    const target = largestArray(root);
+    if (target === undefined) {
+      return undefined;
+    }
+    const omittedKey = `${target.key}_omitted`;
+    const alreadyOmitted =
+      typeof target.parent[omittedKey] === "number" ? (target.parent[omittedKey] as number) : 0;
+    const keep = (count: number): void => {
+      target.parent[target.key] = target.items.slice(0, count);
+      target.parent[omittedKey] = alreadyOmitted + target.items.length - count;
+    };
+    let low = 0;
+    let high = target.items.length - 1;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      keep(middle);
+      if (JSON.stringify(root).length <= maxCharacters) {
+        low = middle;
+      } else {
+        high = middle - 1;
+      }
+    }
+    keep(low);
+  }
+  const serialized = JSON.stringify(root);
+  return serialized.length <= maxCharacters ? serialized : undefined;
+}
+
 function summarizeStructured(value: unknown, maxCharacters: number): string {
   const serialized = JSON.stringify(value);
   if (serialized.length <= maxCharacters) {
     return serialized;
+  }
+
+  // Keep the result's shape: shorten long text fields first, then drop trailing array items.
+  for (const limit of TEXT_FIELD_LIMITS) {
+    const candidate = JSON.stringify(annotate(shortenStrings(value, limit), serialized.length));
+    if (candidate.length <= maxCharacters) {
+      return candidate;
+    }
+  }
+  const reduced = dropArrayItems(
+    annotate(shortenStrings(value, TEXT_FIELD_LIMITS.at(-1) ?? 80), serialized.length),
+    maxCharacters,
+  );
+  if (reduced !== undefined) {
+    return reduced;
   }
 
   const summary: Record<string, unknown> = {

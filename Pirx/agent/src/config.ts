@@ -25,6 +25,7 @@ export interface AgentConfig {
 
   readonly maxToolIterations: number;
   readonly maxRepeatedToolCalls: number;
+  readonly continuationCheck?: boolean;
 
   readonly llmTimeoutMs: number;
   readonly toolTimeoutMs: number;
@@ -55,6 +56,18 @@ function finiteNumber(name: string, value: string): number {
   }
 
   return parsed;
+}
+
+function booleanFlag(name: string, value: string): boolean {
+  if (value === "true" || value === "1") {
+    return true;
+  }
+
+  if (value === "false" || value === "0") {
+    return false;
+  }
+
+  throw new Error(`${name} musi mieć wartość true albo false (otrzymano: ${value}).`);
 }
 
 function configuredStorageMode(value: string): StorageMode {
@@ -97,7 +110,7 @@ export function loadConfig(
 
     numCtx: positiveInteger(
       "OLLAMA_NUM_CTX",
-      environment.OLLAMA_NUM_CTX ?? "8192",
+      environment.OLLAMA_NUM_CTX ?? "32768",
     ),
 
     keepAlive: environment.OLLAMA_KEEP_ALIVE ?? "10m",
@@ -168,6 +181,11 @@ export function loadConfig(
     maxRepeatedToolCalls: positiveInteger(
       "PIRX_MAX_REPEATED_TOOL_CALLS",
       environment.PIRX_MAX_REPEATED_TOOL_CALLS ?? "3",
+    ),
+
+    continuationCheck: booleanFlag(
+      "PIRX_CONTINUATION_CHECK",
+      environment.PIRX_CONTINUATION_CHECK?.trim() ?? "true",
     ),
 
     llmTimeoutMs: positiveInteger(
