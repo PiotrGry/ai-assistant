@@ -182,3 +182,49 @@ test("SQLite recovery closes interrupted work without hiding MCP uncertainty", a
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("SQLite store reports whether a session exists", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-storage-test-"));
+  const store = SqliteStore.open({ filename: join(directory, "pirx.db") });
+  try {
+    store.insertRunEnvironment({ id: "env-1", createdAt: "2026-09-13T10:00:00.000Z", payload: {} });
+    store.insertSession({
+      id: "session-1",
+      environmentId: "env-1",
+      startedAt: "2026-09-13T10:00:00.000Z",
+      status: "active",
+    });
+
+    assert.equal(store.sessionExists("session-1"), true);
+    assert.equal(store.sessionExists("missing"), false);
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("SQLite store transaction commits the result or rolls back every write", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-storage-test-"));
+  const store = SqliteStore.open({ filename: join(directory, "pirx.db") });
+  try {
+    assert.throws(
+      () =>
+        store.transaction(() => {
+          store.insertRunEnvironment({ id: "env-1", createdAt: "2026-09-13T10:00:00.000Z", payload: {} });
+          throw new Error("boom");
+        }),
+      /boom/u,
+    );
+    assert.equal(store.count("run_environments"), 0);
+
+    const result = store.transaction(() => {
+      store.insertRunEnvironment({ id: "env-2", createdAt: "2026-09-13T10:00:00.000Z", payload: {} });
+      return 42;
+    });
+    assert.equal(result, 42);
+    assert.equal(store.count("run_environments"), 1);
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

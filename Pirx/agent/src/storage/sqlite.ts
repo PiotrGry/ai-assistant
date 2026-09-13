@@ -298,6 +298,26 @@ export class SqliteStore {
     return this.#filename;
   }
 
+  sessionExists(id: string): boolean {
+    this.#assertOpen();
+    return this.#database
+      .prepare("SELECT 1 AS found FROM sessions WHERE id = ?")
+      .get(id) !== undefined;
+  }
+
+  transaction<T>(operation: () => T): T {
+    this.#assertOpen();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = operation();
+      this.#database.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   insertRunEnvironment(record: RunEnvironmentRecord): void {
     this.#assertOpen();
     this.#database
