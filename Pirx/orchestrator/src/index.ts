@@ -220,6 +220,7 @@ export {
   DEFAULT_RUNTIME_BUSY_TIMEOUT_MS,
   RUNTIME_STORAGE_SCHEMA_VERSION,
   AttemptRepository,
+  CheckpointRepository,
   ProjectionRepository,
   RuntimeSqliteStore,
   RuntimeStorageError,

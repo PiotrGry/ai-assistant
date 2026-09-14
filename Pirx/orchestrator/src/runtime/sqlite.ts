@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -23,8 +24,14 @@ import {
   type UtcTimestamp,
   utcTimestamp,
 } from "./task-domain.js";
+import {
+  deserializeCheckpoint,
+  serializeCheckpoint,
+  validateCheckpoint,
+  type Checkpoint,
+} from "./checkpoint.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 6 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 7 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -118,6 +125,7 @@ export interface RuntimeWebhookAcceptance {
 export interface RuntimeTransaction {
   readonly tasks: TaskRepository;
   readonly attempts: AttemptRepository;
+  readonly checkpoints: CheckpointRepository;
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
 }
@@ -312,6 +320,21 @@ const MIGRATIONS: readonly string[] = [
     ALTER TABLE runtime_attempts ADD COLUMN progress TEXT;
     ALTER TABLE runtime_attempts ADD COLUMN test_summary TEXT;
   `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_checkpoints (
+      id TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT,
+      previous_attempt_id TEXT NOT NULL REFERENCES runtime_attempts(id) ON DELETE RESTRICT,
+      trigger TEXT NOT NULL CHECK (trigger IN ('PROVIDER_QUOTA', 'WORKER_INTERRUPTION', 'MACHINE_RESTART', 'EXPLICIT_PAUSE', 'RECOVERABLE_FAILURE', 'REQUIRED_ATTEMPT')),
+      created_at TEXT NOT NULL,
+      created_sequence INTEGER NOT NULL UNIQUE CHECK (created_sequence > 0),
+      content_json TEXT NOT NULL CHECK (json_valid(content_json)),
+      content_hash TEXT NOT NULL CHECK (length(trim(content_hash)) = 64)
+    );
+    CREATE INDEX IF NOT EXISTS runtime_checkpoints_task_order
+      ON runtime_checkpoints (task_id, created_sequence, created_at, id);
+  `,
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -348,6 +371,9 @@ function jsonValue(value: unknown): string {
 function jsonParse(value: unknown): unknown {
   if (typeof value !== "string") throw new Error("invalid json");
   return JSON.parse(value) as unknown;
+}
+function checkpointHash(serialized: string): string {
+  return createHash("sha256").update(serialized, "utf8").digest("hex");
 }
 function taskFromRow(row: TaskRow): StorageResult<TaskSnapshot> {
   try {
@@ -566,6 +592,102 @@ export class AttemptRepository {
   }
 }
 
+interface StoredCheckpoint {
+  readonly checkpoint: Checkpoint;
+  readonly serialized: string;
+  readonly contentHash: string;
+  readonly sequence: number;
+}
+
+function checkpointFromRow(row: Record<string, unknown>): StorageResult<StoredCheckpoint> {
+  if (typeof row.id !== "string" || typeof row.schema_version !== "number" || typeof row.task_id !== "string" || typeof row.previous_attempt_id !== "string" || typeof row.trigger !== "string" || typeof row.created_at !== "string" || typeof row.created_sequence !== "number" || typeof row.content_json !== "string" || typeof row.content_hash !== "string") return invalidRecord();
+  const parsed = deserializeCheckpoint(row.content_json);
+  if (!parsed.ok) return invalidRecord();
+  const serialized = serializeCheckpoint(parsed.value);
+  if (row.schema_version !== parsed.value.schemaVersion || row.id !== parsed.value.id || row.task_id !== parsed.value.taskId || row.previous_attempt_id !== parsed.value.previousAttemptId || row.trigger !== parsed.value.trigger || row.created_at !== parsed.value.createdAt || serialized !== row.content_json || checkpointHash(serialized) !== row.content_hash || checkpointHash(serialized).length !== 64 || !Number.isSafeInteger(row.created_sequence) || row.created_sequence <= 0) return invalidRecord();
+  return success({ checkpoint: parsed.value, serialized, contentHash: row.content_hash, sequence: row.created_sequence });
+}
+
+export class CheckpointRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public save(checkpoint: Checkpoint): StorageResult<Checkpoint> {
+    const validated = validateCheckpoint(checkpoint);
+    if (!validated.ok) return invalidRecord();
+    const canonical = validated.value;
+    const serialized = serializeCheckpoint(canonical);
+    const contentHash = checkpointHash(serialized);
+    return this.#store.execute(() => {
+      try {
+        const existingRow = this.#store.database.prepare("SELECT * FROM runtime_checkpoints WHERE id = ?").get(canonical.id) as Record<string, unknown> | undefined;
+        if (existingRow !== undefined) {
+          const existing = checkpointFromRow(existingRow);
+          if (existing.outcome !== "success") return existing;
+          return existing.value.serialized === serialized && existing.value.contentHash === contentHash ? success(existing.value.checkpoint) : conflict("Checkpoint ID conflicts with different content.");
+        }
+        const task = this.#store.tasks.get(canonical.taskId);
+        if (task.outcome !== "success") return task;
+        const attempt = this.#store.attempts.get(canonical.previousAttemptId);
+        if (attempt.outcome !== "success") return attempt;
+        if (attempt.value.taskId !== canonical.taskId) return conflict("Checkpoint previous Attempt belongs to another Task.");
+        const next = this.#store.database.prepare("SELECT COALESCE(MAX(created_sequence), 0) + 1 AS sequence FROM runtime_checkpoints").get() as { sequence: number };
+        this.#store.database.prepare("INSERT INTO runtime_checkpoints (id, schema_version, task_id, previous_attempt_id, trigger, created_at, created_sequence, content_json, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(canonical.id, canonical.schemaVersion, canonical.taskId, canonical.previousAttemptId, canonical.trigger, canonical.createdAt, next.sequence, serialized, contentHash);
+        return this.get(canonical.id);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public get(id: string): StorageResult<Checkpoint> {
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_checkpoints WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+        if (row === undefined) return notFound("Checkpoint was not found.");
+        const parsed = checkpointFromRow(row);
+        if (parsed.outcome !== "success") return parsed;
+        return this.verifyRelationship(parsed.value);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public latestByTask(taskId: string): StorageResult<Checkpoint> {
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_checkpoints WHERE task_id = ? ORDER BY created_sequence DESC, created_at DESC, id DESC LIMIT 1").get(taskId) as Record<string, unknown> | undefined;
+        if (row === undefined) return notFound("No Checkpoint was found for the Task.");
+        const parsed = checkpointFromRow(row);
+        if (parsed.outcome !== "success") return parsed;
+        return this.verifyRelationship(parsed.value);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public listByTask(taskId: string): StorageResult<readonly Checkpoint[]> {
+    return this.#store.execute(() => {
+      try {
+        const rows = this.#store.database.prepare("SELECT * FROM runtime_checkpoints WHERE task_id = ? ORDER BY created_sequence ASC, created_at ASC, id ASC").all(taskId) as Record<string, unknown>[];
+        const values: Checkpoint[] = [];
+        for (const row of rows) {
+          const parsed = checkpointFromRow(row);
+          if (parsed.outcome !== "success") return parsed;
+          const verified = this.verifyRelationship(parsed.value);
+          if (verified.outcome !== "success") return verified;
+          values.push(verified.value);
+        }
+        return success(Object.freeze(values));
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  private verifyRelationship(stored: StoredCheckpoint): StorageResult<Checkpoint> {
+    const task = this.#store.database.prepare("SELECT id FROM runtime_tasks WHERE id = ?").get(stored.checkpoint.taskId) as { id: string } | undefined;
+    const attempt = this.#store.database.prepare("SELECT task_id FROM runtime_attempts WHERE id = ?").get(stored.checkpoint.previousAttemptId) as { task_id: string } | undefined;
+    if (task === undefined || attempt === undefined) return invalidRecord();
+    if (attempt.task_id !== stored.checkpoint.taskId) return invalidRecord();
+    return success(stored.checkpoint);
+  }
+}
+
 export class ProjectionRepository {
   readonly #store: RuntimeSqliteStore;
   public constructor(store: RuntimeSqliteStore) { this.#store = store; }
@@ -744,6 +866,7 @@ export class RuntimeSqliteStore {
   #inTransaction = false;
   readonly tasks: TaskRepository;
   readonly attempts: AttemptRepository;
+  readonly checkpoints: CheckpointRepository;
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
 
@@ -752,6 +875,7 @@ export class RuntimeSqliteStore {
     this.#filename = filename;
     this.tasks = new TaskRepository(this);
     this.attempts = new AttemptRepository(this);
+    this.checkpoints = new CheckpointRepository(this);
     this.projections = new ProjectionRepository(this);
     this.webhooks = new WebhookRepository(this);
   }
@@ -803,14 +927,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, projections: this.projections, webhooks: this.webhooks }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, projections: this.projections, webhooks: this.webhooks }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, projections: this.projections, webhooks: this.webhooks });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, projections: this.projections, webhooks: this.webhooks });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;

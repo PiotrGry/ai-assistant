@@ -206,6 +206,8 @@ Migration inventory:
    intents, keyed by delivery ID and retained without storing raw payloads.
 5. Attempt progress and test-summary evidence columns, with immutable Attempt
    identity and compare-and-set updates for terminal transitions.
+6. Immutable Checkpoint payloads with Task/previous-Attempt foreign keys,
+   deterministic creation sequence, serialized content, and SHA-256 integrity.
 
 `RuntimeSqliteStore.transaction()` is the reusable `BEGIN IMMEDIATE` boundary;
 successful work commits and typed failures roll back. `TaskRepository` and
@@ -254,6 +256,15 @@ deduplicated while preserving order; the full conversation transcript is not
 part of the schema. Serialization is bounded to 50,000 bytes, and the
 current implementation deliberately rejects forward versions until an
 explicit migration is added.
+
+`CheckpointRepository.save()` validates before opening the write transaction,
+then verifies the Task and previous Attempt relationship before inserting an
+immutable payload. It is idempotent for an identical checkpoint ID and returns
+`conflict` for different content. `get()`, `latestByTask()`, and
+`listByTask()` verify schema, relationships, canonical serialized JSON, and
+the SHA-256 content hash on every read. The repository is part of
+`RuntimeSqliteStore.transaction()`, so a checkpoint can commit or roll back
+with an Attempt transition; it never schedules a new Attempt itself.
 
 ## Runtime Task-to-GitHub Issue linkage and lifecycle projection
 
