@@ -172,3 +172,33 @@ completion is explicit and requires the Attempt ID, final commit, and an
 evidence reference. `transitionTask`, `transitionAttempt`, `startInitialAttempt`
 and `retryTask` are pure functions: callers provide the expected current state
 and evaluation timestamp; no clock, persistence, provider, or network is read.
+
+## Runtime SQLite storage
+
+`RuntimeSqliteStore` uses Node.js 22+ `node:sqlite`, which avoids an ORM and
+native npm addon build while matching the workspace runtime. The trade-off is
+that the POC requires the Node runtime's built-in SQLite API; a future support
+matrix can replace this boundary with a maintained addon without changing the
+repositories.
+
+The store uses the configured `PIRX_STORAGE_FILE`, or
+`$XDG_DATA_HOME/pirx/pirx.sqlite` (falling back to
+`~/.local/share/pirx/pirx.sqlite`). It enables foreign keys, WAL,
+`synchronous=FULL`, and a finite 5-second busy timeout by default. SQLite
+files and WAL/journal sidecars are ignored by Git. Runtime tables use their
+own `runtime_schema_migrations` table so the same local database can coexist
+with the agent's existing storage tables.
+
+Migration inventory:
+
+1. `runtime_schema_migrations`, normalized `runtime_tasks` and
+   `runtime_attempts` tables, JSON checks for only collection/evidence fields,
+   foreign-key linkage, task/ordinal uniqueness, and state/result checks.
+2. At-most-one-running-Attempt partial uniqueness plus task/state/ordinal
+   indexes.
+
+`RuntimeSqliteStore.transaction()` is the reusable `BEGIN IMMEDIATE` boundary;
+successful work commits and typed failures roll back. `TaskRepository` and
+`AttemptRepository` expose create/get/list/update compare-and-set operations,
+returning `success`, `not_found`, `conflict`, `invalid_record`, or
+`storage_error` without leaking SQLite exceptions into orchestration code.

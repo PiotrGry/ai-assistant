@@ -163,3 +163,17 @@ export {
   type TerminalAttemptSnapshot,
   type UtcTimestamp,
 } from "./runtime/task-domain.js";
+export {
+  DEFAULT_RUNTIME_BUSY_TIMEOUT_MS,
+  RUNTIME_STORAGE_SCHEMA_VERSION,
+  AttemptRepository,
+  RuntimeSqliteStore,
+  RuntimeStorageError,
+  TaskRepository,
+  defaultRuntimeStoragePath,
+  type RuntimeSqliteStoreOptions,
+  type RuntimeTransaction,
+  type StorageOutcome,
+  type StorageResult,
+  type TaskCompareAndSet,
+} from "./runtime/sqlite.js";

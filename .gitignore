@@ -22,6 +22,12 @@ logs/
 # Pamiec dlugoterminowa asystenta - stan runtime
 memory/
 
+# Pirx local SQLite runtime state, including WAL/journal sidecars
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
 # --- Narzedzia / lokalne ustawienia ---
 .claude/settings.local.json
 .env
