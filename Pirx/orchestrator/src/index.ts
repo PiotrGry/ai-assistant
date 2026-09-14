@@ -282,6 +282,7 @@ export {
   RUNTIME_STORAGE_SCHEMA_VERSION,
   AttemptRepository,
   CheckpointRepository,
+  LeaseRepository,
   ProjectionRepository,
   RuntimeSqliteStore,
   RuntimeStorageError,
@@ -306,6 +307,21 @@ export {
   type StorageResult,
   type TaskCompareAndSet,
 } from "./runtime/sqlite.js";
+export {
+  LEASE_LIMITS,
+  leaseDuration,
+  leaseExpiresAt,
+  leaseId,
+  leaseIsExpired,
+  leaseTimestamp,
+  leaseWorkerId,
+  type LeaseAcquireInput,
+  type LeaseId,
+  type LeaseOwnershipToken,
+  type LeaseRecord,
+  type LeaseRecoveryReason,
+  type LeaseState,
+} from "./runtime/lease.js";
 export {
   GITHUB_LIFECYCLE_EVENT_TYPES,
   GitHubLifecycleProjectionPublisher,

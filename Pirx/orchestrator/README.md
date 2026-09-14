@@ -287,6 +287,22 @@ Attempt. `startResumedAttempt()` rechecks the context inside a
 Attempt together. It never reopens the predecessor; a concurrent successor is
 reported explicitly.
 
+## Runtime Task Leases
+
+SQLite schema version 9 stores durable `LeaseRecord` rows. Partial unique
+indexes allow at most one active Lease for a Task and one active execution
+Lease globally for the MVP worker. `LeaseRepository` exposes atomic acquire,
+Attempt attachment, renew, release, uncertainty marking, recovery, and
+inspection operations. Every ownership mutation checks the lease ID,
+ownership token, and expected version; valid ownership uses the exclusive
+expiry rule `now < expiresAt`, so equality is already expired.
+
+Expired or uncertain Leases remain recorded and recoverable. They are never
+stolen automatically: an explicit recovery records `expired` or `uncertain`
+as the prior outcome before another Lease can be acquired. The repository
+uses the surrounding SQLite transaction boundary, so failed composite work
+rolls back ownership changes together with related runtime records.
+
 ## Runtime capability policy
 
 `runtime/capabilities.ts` is the closed, provider-independent capability

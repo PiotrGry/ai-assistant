@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -12,6 +12,7 @@ import {
   serializeAttempt,
   serializeTask,
   startInitialAttempt,
+  type AttemptId,
   type AttemptSnapshot,
   type AttemptProgressUpdate,
   type AttemptState,
@@ -21,6 +22,7 @@ import {
   type GitHubTaskReference,
   type TaskSnapshot,
   type TaskState,
+  type TaskId,
   type UtcTimestamp,
   utcTimestamp,
 } from "./task-domain.js";
@@ -30,8 +32,22 @@ import {
   validateCheckpoint,
   type Checkpoint,
 } from "./checkpoint.js";
+import {
+  leaseDuration,
+  leaseExpiresAt,
+  leaseId,
+  leaseIsExpired,
+  leaseTimestamp,
+  leaseWorkerId,
+  type LeaseAcquireInput,
+  type LeaseId,
+  type LeaseOwnershipToken,
+  type LeaseRecord,
+  type LeaseRecoveryReason,
+  type LeaseState,
+} from "./lease.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 8 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 9 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -126,6 +142,7 @@ export interface RuntimeTransaction {
   readonly tasks: TaskRepository;
   readonly attempts: AttemptRepository;
   readonly checkpoints: CheckpointRepository;
+  readonly leases: LeaseRepository;
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
 }
@@ -337,6 +354,34 @@ const MIGRATIONS: readonly string[] = [
   `,
   `
     ALTER TABLE runtime_attempts ADD COLUMN predecessor_attempt_id TEXT REFERENCES runtime_attempts(id) ON DELETE RESTRICT;
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_leases (
+      id TEXT PRIMARY KEY CHECK (length(trim(id)) > 0),
+      task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT,
+      attempt_id TEXT REFERENCES runtime_attempts(id) ON DELETE RESTRICT,
+      worker_id TEXT NOT NULL CHECK (length(trim(worker_id)) > 0),
+      acquired_at TEXT NOT NULL,
+      renewed_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('active', 'released', 'recovered', 'uncertain')),
+      ownership_token TEXT NOT NULL UNIQUE CHECK (length(trim(ownership_token)) > 0),
+      version INTEGER NOT NULL CHECK (version > 0),
+      released_at TEXT,
+      recovered_at TEXT,
+      recovery_reason TEXT CHECK (recovery_reason IS NULL OR recovery_reason IN ('expired', 'uncertain')),
+      CHECK (state <> 'released' OR released_at IS NOT NULL),
+      CHECK (state <> 'recovered' OR (recovered_at IS NOT NULL AND recovery_reason IS NOT NULL)),
+      CHECK (state <> 'uncertain' OR recovery_reason = 'uncertain')
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS runtime_leases_one_task_active
+      ON runtime_leases (task_id) WHERE state = 'active';
+    CREATE UNIQUE INDEX IF NOT EXISTS runtime_leases_one_global_active
+      ON runtime_leases (state) WHERE state = 'active';
+    CREATE INDEX IF NOT EXISTS runtime_leases_worker_state
+      ON runtime_leases (worker_id, state, expires_at, id);
+    CREATE INDEX IF NOT EXISTS runtime_leases_recoverable
+      ON runtime_leases (state, expires_at, id);
   `,
 ];
 
@@ -692,6 +737,223 @@ export class CheckpointRepository {
   }
 }
 
+function leaseFromRow(row: Record<string, unknown>): StorageResult<LeaseRecord> {
+  try {
+    if (typeof row.id !== "string" || typeof row.task_id !== "string" || typeof row.worker_id !== "string" || typeof row.acquired_at !== "string" || typeof row.renewed_at !== "string" || typeof row.expires_at !== "string" || typeof row.state !== "string" || typeof row.ownership_token !== "string" || typeof row.version !== "number" || !["active", "released", "recovered", "uncertain"].includes(row.state)) return invalidRecord();
+    const state = row.state as LeaseState;
+    const id = leaseId(row.id);
+    const acquiredAt = leaseTimestamp(row.acquired_at);
+    const renewedAt = leaseTimestamp(row.renewed_at);
+    const expiresAt = leaseTimestamp(row.expires_at);
+    const releasedAt = row.released_at === null || row.released_at === undefined ? undefined : leaseTimestamp(String(row.released_at));
+    const recoveredAt = row.recovered_at === null || row.recovered_at === undefined ? undefined : leaseTimestamp(String(row.recovered_at));
+    if (!Number.isSafeInteger(row.version) || row.version <= 0 || row.task_id.trim().length === 0 || row.worker_id.trim().length === 0 || row.ownership_token.trim().length === 0) return invalidRecord();
+    if (state === "released" && typeof row.released_at !== "string") return invalidRecord();
+    if (state === "recovered" && (typeof row.recovered_at !== "string" || !["expired", "uncertain"].includes(String(row.recovery_reason)))) return invalidRecord();
+    if (state === "uncertain" && row.recovery_reason !== "uncertain") return invalidRecord();
+    return success({
+      id,
+      taskId: row.task_id as TaskId,
+      ...(row.attempt_id === null || row.attempt_id === undefined ? {} : { attemptId: row.attempt_id as AttemptId }),
+      workerId: row.worker_id,
+      acquiredAt,
+      renewedAt,
+      expiresAt,
+      state,
+      ownershipToken: row.ownership_token as LeaseOwnershipToken,
+      version: row.version,
+      ...(releasedAt === undefined ? {} : { releasedAt }),
+      ...(recoveredAt === undefined ? {} : { recoveredAt }),
+      ...(row.recovery_reason === null || row.recovery_reason === undefined ? {} : { recoveryReason: row.recovery_reason as LeaseRecoveryReason }),
+    });
+  } catch {
+    return invalidRecord();
+  }
+}
+
+function leaseInputError(input: LeaseAcquireInput): string | undefined {
+  try {
+    leaseId(input.id);
+    leaseTimestamp(input.now);
+    leaseDuration(input.durationMs);
+    leaseWorkerId(input.workerId);
+    if (typeof input.taskId !== "string" || input.taskId.trim().length === 0) return "Task ID is invalid.";
+    return undefined;
+  } catch (error: unknown) {
+    return error instanceof Error ? error.message : "Lease input is invalid.";
+  }
+}
+
+function leaseOperationInput(leaseIdValue: string, token: string, expectedVersion: number, now: string): string | undefined {
+  try {
+    leaseId(leaseIdValue);
+    leaseTimestamp(now);
+    if (typeof token !== "string" || token.trim().length === 0 || !Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) return "Lease ownership token or version is invalid.";
+    return undefined;
+  } catch (error: unknown) {
+    return error instanceof Error ? error.message : "Lease operation input is invalid.";
+  }
+}
+
+export class LeaseRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public acquire(input: LeaseAcquireInput): StorageResult<LeaseRecord> {
+    const inputError = leaseInputError(input);
+    if (inputError !== undefined) return { outcome: "invalid_record", message: inputError };
+    const expiresAt = leaseExpiresAt(input.now, input.durationMs);
+    const token = randomUUID() as LeaseOwnershipToken;
+    return this.#store.execute(() => {
+      try {
+        const task = this.#store.database.prepare("SELECT state FROM runtime_tasks WHERE id = ?").get(input.taskId) as { state: string } | undefined;
+        if (task === undefined) return notFound("Task was not found.");
+        if (task.state !== "ready" && task.state !== "in_progress") return conflict("Task is not eligible for a Lease in its current state.");
+        const taskLease = this.#store.database.prepare("SELECT id FROM runtime_leases WHERE task_id = ? AND state = 'active'").get(input.taskId);
+        if (taskLease !== undefined) return conflict("Task already has an active Lease.");
+        const globalLease = this.#store.database.prepare("SELECT id FROM runtime_leases WHERE state = 'active' LIMIT 1").get();
+        if (globalLease !== undefined) return conflict("The single-worker Lease slot is occupied.");
+        this.#store.database.prepare("INSERT INTO runtime_leases (id, task_id, attempt_id, worker_id, acquired_at, renewed_at, expires_at, state, ownership_token, version, released_at, recovered_at, recovery_reason) VALUES (?, ?, NULL, ?, ?, ?, ?, 'active', ?, 1, NULL, NULL, NULL)").run(input.id, input.taskId, leaseWorkerId(input.workerId), input.now, input.now, expiresAt, token);
+        return this.get(input.id);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public get(id: string): StorageResult<LeaseRecord> {
+    try { leaseId(id); } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Lease ID is invalid." }; }
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_leases WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound("Lease was not found.") : leaseFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public getActiveByTask(taskId: string): StorageResult<LeaseRecord> {
+    return this.#getActive("task_id", taskId, "No active Lease was found for the Task.");
+  }
+
+  public getActiveByWorker(workerId: string): StorageResult<LeaseRecord> {
+    return this.#getActive("worker_id", workerId, "No active Lease was found for the worker.");
+  }
+
+  public listRecoverable(now: UtcTimestamp): StorageResult<readonly LeaseRecord[]> {
+    try { leaseTimestamp(now); } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Lease timestamp is invalid." }; }
+    return this.#store.execute(() => {
+      try {
+        const rows = this.#store.database.prepare("SELECT * FROM runtime_leases WHERE state = 'uncertain' OR (state = 'active' AND expires_at <= ?) ORDER BY expires_at, id").all(now) as Record<string, unknown>[];
+        const values: LeaseRecord[] = [];
+        for (const row of rows) { const parsed = leaseFromRow(row); if (parsed.outcome !== "success") return parsed; values.push(parsed.value); }
+        return success(Object.freeze(values));
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public attachAttempt(id: string, token: string, expectedVersion: number, attemptId: string, now: UtcTimestamp): StorageResult<LeaseRecord> {
+    const inputError = leaseOperationInput(id, token, expectedVersion, now);
+    if (inputError !== undefined || typeof attemptId !== "string" || attemptId.trim().length === 0) return { outcome: "invalid_record", message: inputError ?? "Attempt ID is invalid." };
+    return this.#store.execute(() => {
+      const current = this.get(id);
+      if (current.outcome !== "success") return current;
+      const ownership = this.#checkActive(current.value, token, expectedVersion, now);
+      if (ownership !== undefined) return ownership;
+      const attempt = this.#store.database.prepare("SELECT task_id, state FROM runtime_attempts WHERE id = ?").get(attemptId) as { task_id: string; state: string } | undefined;
+      if (attempt === undefined) return notFound("Attempt was not found.");
+      if (attempt.task_id !== current.value.taskId) return conflict("Attempt belongs to another Task.");
+      if (attempt.state !== "running") return conflict("Only a running Attempt can be attached to a Lease.");
+      try {
+        const updated = this.#store.database.prepare("UPDATE runtime_leases SET attempt_id = ?, renewed_at = ?, version = version + 1 WHERE id = ? AND state = 'active' AND ownership_token = ? AND version = ?").run(attemptId, now, id, token, expectedVersion);
+        if (updated.changes !== 1) return conflict("Lease compare-and-set failed.");
+        return this.get(id);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public renew(id: string, token: string, expectedVersion: number, now: UtcTimestamp, durationMs: number): StorageResult<LeaseRecord> {
+    const inputError = leaseOperationInput(id, token, expectedVersion, now);
+    if (inputError !== undefined) return { outcome: "invalid_record", message: inputError };
+    try { leaseDuration(durationMs); } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Lease duration is invalid." }; }
+    const expiresAt = leaseExpiresAt(now, durationMs);
+    return this.#store.execute(() => {
+      const current = this.get(id);
+      if (current.outcome !== "success") return current;
+      const ownership = this.#checkActive(current.value, token, expectedVersion, now);
+      if (ownership !== undefined) return ownership;
+      try {
+        const updated = this.#store.database.prepare("UPDATE runtime_leases SET renewed_at = ?, expires_at = ?, version = version + 1 WHERE id = ? AND state = 'active' AND ownership_token = ? AND version = ?").run(now, expiresAt, id, token, expectedVersion);
+        if (updated.changes !== 1) return conflict("Lease compare-and-set failed.");
+        return this.get(id);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public release(id: string, token: string, expectedVersion: number, now: UtcTimestamp): StorageResult<LeaseRecord> {
+    const inputError = leaseOperationInput(id, token, expectedVersion, now);
+    if (inputError !== undefined) return { outcome: "invalid_record", message: inputError };
+    return this.#store.execute(() => {
+      const current = this.get(id);
+      if (current.outcome !== "success") return current;
+      const ownership = this.#checkActive(current.value, token, expectedVersion, now);
+      if (ownership !== undefined) return ownership;
+      try {
+        const updated = this.#store.database.prepare("UPDATE runtime_leases SET state = 'released', released_at = ?, renewed_at = ?, version = version + 1 WHERE id = ? AND state = 'active' AND ownership_token = ? AND version = ?").run(now, now, id, token, expectedVersion);
+        if (updated.changes !== 1) return conflict("Lease compare-and-set failed.");
+        return this.get(id);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public markUncertain(id: string, token: string, expectedVersion: number, now: UtcTimestamp): StorageResult<LeaseRecord> {
+    const inputError = leaseOperationInput(id, token, expectedVersion, now);
+    if (inputError !== undefined) return { outcome: "invalid_record", message: inputError };
+    return this.#store.execute(() => {
+      const current = this.get(id);
+      if (current.outcome !== "success") return current;
+      const ownership = this.#checkActive(current.value, token, expectedVersion, now);
+      if (ownership !== undefined) return ownership;
+      try {
+        const updated = this.#store.database.prepare("UPDATE runtime_leases SET state = 'uncertain', recovery_reason = 'uncertain', renewed_at = ?, version = version + 1 WHERE id = ? AND state = 'active' AND ownership_token = ? AND version = ?").run(now, id, token, expectedVersion);
+        if (updated.changes !== 1) return conflict("Lease compare-and-set failed.");
+        return this.get(id);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public recover(id: string, token: string, expectedVersion: number, now: UtcTimestamp): StorageResult<LeaseRecord> {
+    const inputError = leaseOperationInput(id, token, expectedVersion, now);
+    if (inputError !== undefined) return { outcome: "invalid_record", message: inputError };
+    return this.#store.execute(() => {
+      const current = this.get(id);
+      if (current.outcome !== "success") return current;
+      if (current.value.ownershipToken !== token || current.value.version !== expectedVersion) return conflict("Lease ownership token or version is stale.");
+      const reason: LeaseRecoveryReason | undefined = current.value.state === "uncertain" ? "uncertain" : current.value.state === "active" && leaseIsExpired(current.value, now) ? "expired" : undefined;
+      if (reason === undefined) return current.value.state === "active" ? conflict("Lease is still active and has not reached its expiry boundary.") : conflict("Lease is not recoverable in its current state.");
+      try {
+        const updated = this.#store.database.prepare("UPDATE runtime_leases SET state = 'recovered', recovered_at = ?, recovery_reason = ?, version = version + 1 WHERE id = ? AND state IN ('active', 'uncertain') AND ownership_token = ? AND version = ?").run(now, reason, id, token, expectedVersion);
+        if (updated.changes !== 1) return conflict("Lease compare-and-set failed.");
+        return this.get(id);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  #getActive(field: "task_id" | "worker_id", value: string, missingMessage: string): StorageResult<LeaseRecord> {
+    if (typeof value !== "string" || value.trim().length === 0) return { outcome: "invalid_record", message: "Lease lookup value is invalid." };
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare(`SELECT * FROM runtime_leases WHERE ${field} = ? AND state = 'active' ORDER BY acquired_at, id LIMIT 1`).get(value) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound(missingMessage) : leaseFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  #checkActive(current: LeaseRecord, token: string, expectedVersion: number, now: UtcTimestamp): StorageResult<LeaseRecord> | undefined {
+    if (current.state !== "active") return conflict("Lease is not active; recover or inspect its terminal outcome.");
+    if (current.ownershipToken !== token || current.version !== expectedVersion) return conflict("Lease ownership token or version is stale.");
+    if (leaseIsExpired(current, now)) return conflict("Lease is expired and must be recovered.");
+    return undefined;
+  }
+}
+
 export class ProjectionRepository {
   readonly #store: RuntimeSqliteStore;
   public constructor(store: RuntimeSqliteStore) { this.#store = store; }
@@ -871,6 +1133,7 @@ export class RuntimeSqliteStore {
   readonly tasks: TaskRepository;
   readonly attempts: AttemptRepository;
   readonly checkpoints: CheckpointRepository;
+  readonly leases: LeaseRepository;
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
 
@@ -880,6 +1143,7 @@ export class RuntimeSqliteStore {
     this.tasks = new TaskRepository(this);
     this.attempts = new AttemptRepository(this);
     this.checkpoints = new CheckpointRepository(this);
+    this.leases = new LeaseRepository(this);
     this.projections = new ProjectionRepository(this);
     this.webhooks = new WebhookRepository(this);
   }
@@ -931,14 +1195,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, projections: this.projections, webhooks: this.webhooks }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, projections: this.projections, webhooks: this.webhooks }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, projections: this.projections, webhooks: this.webhooks });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, projections: this.projections, webhooks: this.webhooks });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;
