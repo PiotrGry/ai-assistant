@@ -9,7 +9,7 @@ import {
 import { executeWithGitHubRetry, type GitHubRetryPolicyOptions } from "./retry-policy.js";
 import type { GitHubRequestContext, GitHubRestReadRequest } from "./transport-types.js";
 
-export type GitHubActionsRunStatus = "queued" | "in_progress" | "completed" | "unknown";
+export type GitHubActionsRunStatus = "requested" | "queued" | "waiting" | "pending" | "in_progress" | "completed" | "unknown";
 export type GitHubActionsRunConclusion =
   | "success"
   | "failure"
@@ -139,8 +139,10 @@ function url(value: unknown): string | undefined {
   return candidate !== undefined && /^https:\/\//u.test(candidate) ? candidate : undefined;
 }
 
+const RUN_STATUSES: ReadonlySet<string> = new Set(["requested", "queued", "waiting", "pending", "in_progress", "completed"]);
+
 function runStatus(value: unknown): GitHubActionsRunStatus {
-  return value === "queued" ? "queued" : value === "in_progress" ? "in_progress" : value === "completed" ? "completed" : "unknown";
+  return typeof value === "string" && RUN_STATUSES.has(value) ? value as GitHubActionsRunStatus : "unknown";
 }
 
 function runConclusion(value: unknown): GitHubActionsRunConclusion | undefined {
@@ -329,6 +331,8 @@ export interface GitHubActionsWatchTerminalResult extends WatchIdentity {
   readonly runUrl: string;
   readonly workflowName?: string;
   readonly failedJobs?: readonly GitHubActionsFailedJobReference[];
+  /** Set when the run failed but its job details could not be read; failedJobs is then absent. */
+  readonly failedJobsErrorCode?: string;
   readonly polls: number;
   readonly providerAttempts: number;
 }
@@ -505,6 +509,7 @@ export class GitHubActionsWatcher {
                 })),
               };
             }
+            return { ...terminal, failedJobsErrorCode: jobs.error.code };
           }
           return terminal;
         }

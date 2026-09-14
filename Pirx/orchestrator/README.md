@@ -167,9 +167,14 @@ cancelled   -> terminal
 Attempts are `running` or `terminal`. A Task can have at most one running
 Attempt. Terminal results are `CODE_PUSHED`, `BLOCKED`, `FAILED`,
 `QUOTA_EXHAUSTED`, `CANCELLED`, and `UNKNOWN`; non-code-pushed results require
-a bounded blocking reason, while `CODE_PUSHED` requires a final commit. Task
-completion is explicit and requires the Attempt ID, final commit, and an
-evidence reference. `transitionTask`, `transitionAttempt`, `startInitialAttempt`
+a bounded blocking reason, while `CODE_PUSHED` requires a final commit.
+`blocked`, `failed`, and `cancelled` Tasks require a blocking reason; other
+states reject one. Task completion is explicit: it takes the Attempt ID, final
+commit, and an evidence reference, plus the Task's Attempts, and succeeds only
+when the referenced Attempt belongs to the Task, is terminal `CODE_PUSHED` with
+the same final commit, and no Attempt is still running. The SQLite
+`TaskRepository` re-checks that against stored Attempts and returns `conflict`
+otherwise. `transitionTask`, `transitionAttempt`, `startInitialAttempt`
 and `retryTask` are pure functions: callers provide the expected current state
 and evaluation timestamp; no clock, persistence, provider, or network is read.
 

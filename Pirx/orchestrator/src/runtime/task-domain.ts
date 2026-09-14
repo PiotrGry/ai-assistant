@@ -113,7 +113,7 @@ export type TaskTransition =
   | { readonly type: "block"; readonly reason: string }
   | { readonly type: "fail"; readonly reason: string }
   | { readonly type: "cancel"; readonly reason: string }
-  | { readonly type: "complete"; readonly evidence: TaskCompletionEvidence };
+  | { readonly type: "complete"; readonly evidence: TaskCompletionEvidence; readonly attempts: readonly AttemptSnapshot[] };
 
 export type AttemptTransition =
   | {
@@ -282,7 +282,9 @@ export function createTask(input: TaskInput): DomainResult<TaskSnapshot> {
   if (!reference.ok) return reference;
   const blocking = safeOptionalText(input.blockingReason, "blockingReason");
   if (!blocking.ok) return blocking;
-  if ((input.state ?? "ready") !== "blocked" && blocking.value !== undefined) return error("invariant_violation", "blockingReason requires blocked state.", "blockingReason");
+  const state = input.state ?? "ready";
+  const requiresReason = state === "blocked" || state === "failed" || state === "cancelled";
+  if (requiresReason !== (blocking.value !== undefined)) return error("invariant_violation", "blockingReason is required for blocked, failed, and cancelled Tasks only.", "blockingReason");
   const completionEvidence = validateCompletionEvidence(input.completionEvidence);
   if (!completionEvidence.ok) return completionEvidence;
   if ((input.state ?? "ready") === "completed" && completionEvidence.value === undefined) return error("invariant_violation", "completed Task requires completionEvidence.", "completionEvidence");
@@ -417,6 +419,13 @@ export function transitionTask(task: TaskSnapshot, expectedState: TaskState, tra
       const evidence = validateCompletionEvidence(transition.evidence);
       if (!evidence.ok) return evidence;
       if (evidence.value === undefined) return error("invariant_violation", "completed Task requires completionEvidence.", "completionEvidence");
+      const attempts = validateAttemptSet(task, transition.attempts);
+      if (!attempts.ok) return attempts;
+      const { attemptId: evidenceAttemptId, finalCommit } = evidence.value;
+      const backing = transition.attempts.find((attempt) => attempt.id === evidenceAttemptId);
+      if (backing?.state !== "terminal" || backing.result !== "CODE_PUSHED" || backing.finalCommit !== finalCommit || transition.attempts.some((attempt) => attempt.state === "running")) {
+        return error("invariant_violation", "completionEvidence must reference a terminal CODE_PUSHED Attempt of this Task with the same finalCommit.", "completionEvidence");
+      }
       completionEvidence = evidence.value;
       next = "completed";
       break;

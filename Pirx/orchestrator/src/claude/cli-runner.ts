@@ -241,17 +241,22 @@ export class ClaudeCodeCliRunner {
     let spawnError: NodeJS.ErrnoException | undefined;
     let exitCode: number | null = null;
     await new Promise<void>((resolve) => {
-      let settled = false;
-      const settle = (): void => { if (!settled) { settled = true; resolve(); } };
-      child.once("error", (error: Error) => { spawnError = error as NodeJS.ErrnoException; settle(); });
-      child.once("close", (code: number | null) => { exitCode = code; settle(); });
       const timeout = setTimeout(() => { if (trigger === undefined) trigger = "timeout"; terminate(); }, input.timeoutMs);
       timeout.unref();
       const onAbort = (): void => { if (trigger === undefined) trigger = "cancelled"; terminate(); };
       input.signal?.addEventListener("abort", onAbort, { once: true });
-      const cleanup = (): void => { clearTimeout(timeout); if (terminationTimer !== undefined) clearTimeout(terminationTimer); input.signal?.removeEventListener("abort", onAbort); };
-      child.once("close", cleanup);
-      child.once("error", cleanup);
+      let settled = false;
+      const settle = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (terminationTimer !== undefined) clearTimeout(terminationTimer);
+        input.signal?.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      // A spawned child can emit error (e.g. a failed kill) while still running; only close proves it exited.
+      child.on("error", (error: Error) => { spawnError ??= error as NodeJS.ErrnoException; if (child.pid === undefined) settle(); });
+      child.once("close", (code: number | null) => { exitCode = code; settle(); });
     });
     if (trigger !== undefined) return failure(trigger, input.requestId, input.startedAt, exitCode);
     if (spawnError !== undefined) return failure(spawnError.code === "ENOENT" ? "claude_not_installed" : "process_error", input.requestId, input.startedAt, exitCode);

@@ -87,19 +87,50 @@ class FakeGateway implements GitHubActionsReadGateway {
 
 test("watcher polls internally from pending to success for an exact run", async () => {
   const clock = new FakeClock();
-  const gateway = new FakeGateway([run(), run({ status: "completed", conclusion: "success" })]);
+  const gateway = new FakeGateway([
+    run({ status: "requested" }),
+    run({ status: "waiting" }),
+    run({ status: "pending" }),
+    run({ status: "queued" }),
+    run(),
+    run({ status: "completed", conclusion: "success" }),
+  ]);
   const result = await new GitHubActionsWatcher(gateway, config, { clock }).watch({
     workflowRunId: 901,
-    timeoutMs: 10,
+    timeoutMs: 20,
     pollIntervalMs: 2,
   });
 
   assert.equal(result.outcome, "success");
   assert.equal(result.workflowRunId, 901);
   assert.equal(result.testedRevision, "sha-current");
-  assert.equal(result.polls, 2);
-  assert.deepEqual(clock.sleeps, [2]);
-  assert.equal(gateway.getRunCalls, 2);
+  assert.equal(result.polls, 6);
+  assert.deepEqual(clock.sleeps, [2, 2, 2, 2, 2]);
+  assert.equal(gateway.getRunCalls, 6);
+});
+
+test("Actions gateway keeps every non-terminal GitHub run status observable", async () => {
+  for (const status of ["requested", "waiting", "pending", "queued", "in_progress"]) {
+    const transport = {
+      async restRead<T>(_request: unknown, context: GitHubRequestContext) {
+        return success({ id: 901, status, conclusion: null, head_sha: "sha-current", html_url: "https://github.com/PiotrGry/ai-assistant/actions/runs/901" }, context.correlationId) as GitHubOperationResult<T>;
+      },
+    };
+    const result = await new GitHubActionsGateway(transport, config, { retryPolicy: { maxAttempts: 1 } }).getWorkflowRun(901, { correlationId: "status" });
+    assert.equal(result.outcome === "success" ? result.value.status : result.outcome, status);
+  }
+});
+
+test("watcher marks failed-run evidence incomplete when job lookup fails", async () => {
+  const clock = new FakeClock();
+  const gateway = new FakeGateway([run({ status: "completed", conclusion: "failure" })]);
+  gateway.jobFailure = failure("rate_limited", "rate_limited", "rate limited", "ci-test", "not_accepted");
+  const result = await new GitHubActionsWatcher(gateway, config, { clock }).watch({ workflowRunId: 901, timeoutMs: 10 });
+
+  assert.equal(result.outcome, "failed");
+  if (result.outcome !== "failed") return;
+  assert.equal(result.failedJobs, undefined);
+  assert.equal(result.failedJobsErrorCode, "rate_limited");
 });
 
 test("watcher returns bounded failed job and step references", async () => {

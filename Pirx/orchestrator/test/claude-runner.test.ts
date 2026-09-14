@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
+import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { spawn, type ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import {
   ClaudeCodeCliRunner,
@@ -45,12 +49,40 @@ interface Fixture {
 }
 
 async function fixture(): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), "pirx-claude-test-"));
+  // Resolve symlinked temp roots (macOS /var -> /private/var) so cwd comparisons match the child's view.
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pirx-claude-test-")));
   const executable = join(root, "fake claude executable.js");
   await writeFile(executable, FAKE_CLAUDE, { mode: 0o755 });
   await chmod(executable, 0o755);
   return { root, executable };
 }
+
+test("waits for close after a child process error before removing the temporary cwd", async () => {
+  const value = await fixture();
+  try {
+    let child: EventEmitter | undefined;
+    let cwd = "";
+    const spawnProcess: ClaudeSpawn = (_file, _args, options) => {
+      cwd = options.cwd;
+      child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), pid: 4242, kill: () => true });
+      return child as unknown as ChildProcess;
+    };
+    let settled = false;
+    const pending = new ClaudeCodeCliRunner({ executable: value.executable, tempParentDirectory: value.root, environment: {}, requestIdFactory: () => "error-then-close", spawnProcess })
+      .run()
+      .finally(() => { settled = true; });
+    while (child === undefined) await delay(1);
+    child.emit("error", Object.assign(new Error("kill failed"), { code: "EPERM" }));
+    await delay(20);
+    assert.equal(settled, false);
+    assert.equal(existsSync(cwd), true);
+    child.emit("close", 1);
+    assert.equal((await pending).outcome, "process_error");
+    assert.equal(existsSync(cwd), false);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
 
 function runner(fixtureValue: Fixture, mode: string, captureFile?: string, extra: Record<string, string> = {}): ClaudeCodeCliRunner {
   return new ClaudeCodeCliRunner({

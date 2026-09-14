@@ -156,6 +156,38 @@ test("maps malformed stored data and locked writers to typed outcomes", async ()
   }
 });
 
+test("persists reasoned terminal Tasks and rejects completion not backed by a stored CODE_PUSHED Attempt", async () => {
+  const fixture = await databaseFixture();
+  const store = RuntimeSqliteStore.open({ filename: fixture.filename });
+  try {
+    const cancelledId = "task-storage-cancelled" as TaskId;
+    assert.equal(store.tasks.create(makeTask({ id: cancelledId })).outcome, "success");
+    const cancelled = transitionTask(makeTask({ id: cancelledId }), "ready", { type: "cancel", reason: "dropped from queue" }, t1);
+    if (!cancelled.ok) throw new Error(cancelled.error.message);
+    assert.equal(store.tasks.update(cancelled.value, { state: "ready", updatedAt: t0 }).outcome, "success");
+    assert.equal(store.tasks.get(cancelledId).outcome, "success");
+
+    assert.equal(store.tasks.create(makeTask()).outcome, "success");
+    const started = startInitialAttempt(makeTask(), [], { id: attemptId, worker: "pirx", provider: "test" }, t1);
+    if (!started.ok) throw new Error(started.error.message);
+    assert.equal(store.tasks.update(started.value.task, { state: "ready", updatedAt: t0 }).outcome, "success");
+    assert.equal(store.attempts.create(started.value.attempt).outcome, "success");
+    const completedWith = (finalCommit: string) => makeTask({ state: "completed", updatedAt: t2, completionEvidence: { attemptId, finalCommit, evidenceReference: "ci://storage" } });
+    const inProgress = { state: "in_progress" as const, updatedAt: t1 };
+    assert.equal(store.tasks.update(completedWith("abc123"), inProgress).outcome, "conflict", "Attempt is still running");
+
+    const pushed = transitionAttempt(started.value.attempt, "running", { type: "finish", result: "CODE_PUSHED", finalCommit: "abc123" }, t2);
+    if (!pushed.ok) throw new Error(pushed.error.message);
+    assert.equal(store.attempts.update(pushed.value, "running").outcome, "success");
+    assert.equal(store.tasks.update(completedWith("fake"), inProgress).outcome, "conflict", "commit mismatch");
+    assert.equal(store.tasks.create(makeTask({ id: "task-storage-forged" as TaskId, state: "completed", completionEvidence: { attemptId, finalCommit: "abc123", evidenceReference: "ci://forged" } })).outcome, "conflict", "Attempt of another Task");
+    assert.equal(store.tasks.update(completedWith("abc123"), inProgress).outcome, "success");
+  } finally {
+    store.close();
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test("migration failure rolls back without advancing the runtime schema", async () => {
   const fixture = await databaseFixture();
   const raw = new DatabaseSync(fixture.filename);

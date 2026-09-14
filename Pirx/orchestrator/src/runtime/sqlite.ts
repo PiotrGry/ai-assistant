@@ -213,6 +213,12 @@ function attemptFromRow(row: AttemptRow): StorageResult<AttemptSnapshot> {
     return invalidRecord();
   }
 }
+function completionIsBacked(database: DatabaseSync, task: TaskSnapshot): boolean {
+  const evidence = task.completionEvidence;
+  if (evidence === undefined) return true;
+  return database.prepare(`SELECT 1 FROM runtime_attempts WHERE id = ? AND task_id = ? AND state = 'terminal' AND result = 'CODE_PUSHED' AND final_commit = ?
+    AND NOT EXISTS (SELECT 1 FROM runtime_attempts WHERE task_id = ? AND state = 'running')`).get(evidence.attemptId, task.id, evidence.finalCommit, task.id) !== undefined;
+}
 function storedRecord<T>(result: StorageResult<T>): StorageResult<T> {
   return result;
 }
@@ -225,6 +231,7 @@ export class TaskRepository {
     return this.#store.execute(() => {
       const validated = deserializeTask(serializeTask(task));
       if (!validated.ok) return invalidRecord();
+      if (!completionIsBacked(this.#store.database, validated.value)) return conflict("Task completion evidence is not backed by a terminal CODE_PUSHED Attempt of this Task.");
       try {
         this.#store.database.prepare(`INSERT INTO runtime_tasks (id, schema_version, github_owner, github_repository, github_issue_number, goal, scope, acceptance_criteria_json, priority, risk, required_capabilities_json, state, created_at, updated_at, blocking_reason, completion_evidence_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
           task.id, 1, task.githubReference?.owner ?? null, task.githubReference?.repository ?? null, task.githubReference?.issueNumber ?? null,
@@ -260,6 +267,7 @@ export class TaskRepository {
     return this.#store.execute(() => {
       const validated = deserializeTask(serializeTask(task));
       if (!validated.ok) return invalidRecord();
+      if (!completionIsBacked(this.#store.database, validated.value)) return conflict("Task completion evidence is not backed by a terminal CODE_PUSHED Attempt of this Task.");
       try {
         const result = this.#store.database.prepare(`UPDATE runtime_tasks SET schema_version = ?, github_owner = ?, github_repository = ?, github_issue_number = ?, goal = ?, scope = ?, acceptance_criteria_json = ?, priority = ?, risk = ?, required_capabilities_json = ?, state = ?, created_at = ?, updated_at = ?, blocking_reason = ?, completion_evidence_json = ? WHERE id = ? AND state = ? AND updated_at = ?`).run(
           1, task.githubReference?.owner ?? null, task.githubReference?.repository ?? null, task.githubReference?.issueNumber ?? null,

@@ -103,9 +103,18 @@ test("requires explicit completion evidence and never completes from CODE_PUSHED
   const pushed = transitionAttempt(running.attempt, "running", { type: "finish", result: "CODE_PUSHED", finalCommit: "abc123" }, t2);
   assert.equal(pushed.ok, true);
   if (!pushed.ok) return;
-  const missing = transitionTask(running.task, "in_progress", { type: "complete", evidence: { attemptId: attemptOne, finalCommit: "", evidenceReference: "" } }, t3);
-  assert.equal(missing.ok, false);
-  const completed = transitionTask(running.task, "in_progress", { type: "complete", evidence: { attemptId: attemptOne, finalCommit: "abc123", evidenceReference: "ci://attempt-runtime-1" } }, t3);
+  const evidence = { attemptId: attemptOne, finalCommit: "abc123", evidenceReference: "ci://attempt-runtime-1" };
+  const complete = (attempts: readonly AttemptSnapshot[], overrides: Partial<typeof evidence> = {}) =>
+    transitionTask(running.task, "in_progress", { type: "complete", attempts, evidence: { ...evidence, ...overrides } }, t3);
+  assert.equal(complete([pushed.value], { finalCommit: "", evidenceReference: "" }).ok, false);
+  assert.equal(complete([running.attempt]).ok, false, "Attempt is still running");
+  assert.equal(complete([pushed.value], { attemptId: "attempt-does-not-exist" as AttemptId }).ok, false, "unknown Attempt");
+  assert.equal(complete([pushed.value], { finalCommit: "fake" }).ok, false, "commit mismatch");
+  assert.equal(complete([{ ...pushed.value, taskId: "other-task" as TaskId }]).ok, false, "Attempt of another Task");
+  const failed = transitionAttempt(running.attempt, "running", { type: "finish", result: "FAILED", finalCommit: "abc123", blockingReason: "tests failed" }, t2);
+  if (!failed.ok) throw new Error(failed.error.message);
+  assert.equal(complete([failed.value]).ok, false, "Attempt did not push code");
+  const completed = complete([pushed.value]);
   assert.equal(completed.ok, true);
   if (completed.ok) {
     assert.equal(completed.value.state, "completed");
@@ -149,4 +158,17 @@ test("serializes and validates Task and Attempt snapshots without accepting unkn
   assert.equal(unknownAttempt.ok, false);
   if (!unknownAttempt.ok) assert.equal(unknownAttempt.error.code, "serialization_error");
   assert.equal(deserializeTask("not-json").ok, false);
+});
+
+test("requires a reason exactly for blocked, failed, and cancelled Tasks and round-trips them", () => {
+  for (const state of ["blocked", "failed", "cancelled"] as const) {
+    assert.equal(createTask({ ...task(), state }).ok, false, `${state} without reason`);
+  }
+  assert.equal(createTask({ ...task(), blockingReason: "not blocked" }).ok, false);
+  const running = start().task;
+  for (const transition of [{ type: "block", reason: "waiting for input" }, { type: "fail", reason: "provider failure" }, { type: "cancel", reason: "dropped" }] as const) {
+    const moved = transitionTask(running, "in_progress", transition, t2);
+    assert.equal(moved.ok, true, transition.type);
+    if (moved.ok) assert.deepEqual(deserializeTask(serializeTask(moved.value)), { ok: true, value: moved.value }, transition.type);
+  }
 });
