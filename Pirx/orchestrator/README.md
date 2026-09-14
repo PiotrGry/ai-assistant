@@ -208,6 +208,8 @@ Migration inventory:
    identity and compare-and-set updates for terminal transitions.
 6. Immutable Checkpoint payloads with Task/previous-Attempt foreign keys,
    deterministic creation sequence, serialized content, and SHA-256 integrity.
+7. Resume predecessor links on Attempts, added with a forward-compatible
+   nullable migration.
 
 `RuntimeSqliteStore.transaction()` is the reusable `BEGIN IMMEDIATE` boundary;
 successful work commits and typed failures roll back. `TaskRepository` and
@@ -265,6 +267,25 @@ immutable payload. It is idempotent for an identical checkpoint ID and returns
 the SHA-256 content hash on every read. The repository is part of
 `RuntimeSqliteStore.transaction()`, so a checkpoint can commit or roll back
 with an Attempt transition; it never schedules a new Attempt itself.
+
+## Runtime resume context
+
+`buildResumeContext()` consumes the Task, its latest integrity-checked
+Checkpoint, and the ordered Attempt history. It returns a bounded,
+provider-independent context or one of the explicit outcomes `blocked`,
+`human_action_required`, and `invalid_checkpoint`. Required resume material
+is retained first (goal, remaining work, last action, tests, and resume
+instruction); optional collections are deterministically trimmed and listed
+in `truncatedFields` when the 12,000-byte context limit is reached.
+
+`WorkspaceReferencePort` is the side-effect-free checker boundary for
+repository, worktree, branch, and commit presence/currentness. Missing or
+stale references produce a precise human-action result and never create an
+Attempt. `startResumedAttempt()` rechecks the context inside a
+`BEGIN IMMEDIATE` transaction, allocates a new ordinal, stores its
+`predecessorAttemptId` and checkpoint reference, and updates the Task and
+Attempt together. It never reopens the predecessor; a concurrent successor is
+reported explicitly.
 
 ## Runtime Task-to-GitHub Issue linkage and lifecycle projection
 

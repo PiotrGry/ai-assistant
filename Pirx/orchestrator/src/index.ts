@@ -217,6 +217,22 @@ export {
   type CheckpointViolationCode,
 } from "./runtime/checkpoint.js";
 export {
+  RESUME_CONTEXT_LIMITS,
+  RESUME_CONTEXT_SCHEMA_VERSION,
+  buildResumeContext,
+  startResumedAttempt,
+  type ResumeContext,
+  type ResumeContextResult,
+  type ResumeFailure,
+  type ResumeReason,
+  type ResumeStartResult,
+  type ResumeWorkspaceReference,
+  type StartedResumeAttempt,
+  type WorkspaceReferenceCheck,
+  type WorkspaceReferencePort,
+  type WorkspaceReferenceStatus,
+} from "./runtime/resume.js";
+export {
   DEFAULT_RUNTIME_BUSY_TIMEOUT_MS,
   RUNTIME_STORAGE_SCHEMA_VERSION,
   AttemptRepository,

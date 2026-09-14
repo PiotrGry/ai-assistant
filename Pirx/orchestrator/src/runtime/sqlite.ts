@@ -31,7 +31,7 @@ import {
   type Checkpoint,
 } from "./checkpoint.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 7 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 8 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -335,6 +335,9 @@ const MIGRATIONS: readonly string[] = [
     CREATE INDEX IF NOT EXISTS runtime_checkpoints_task_order
       ON runtime_checkpoints (task_id, created_sequence, created_at, id);
   `,
+  `
+    ALTER TABLE runtime_attempts ADD COLUMN predecessor_attempt_id TEXT REFERENCES runtime_attempts(id) ON DELETE RESTRICT;
+  `,
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -398,6 +401,7 @@ function attemptFromRow(row: AttemptRow): StorageResult<AttemptSnapshot> {
     const parsed = deserializeAttempt(JSON.stringify({
       kind: "attempt", schemaVersion: row.schema_version, id: row.id, taskId: row.task_id, ordinal: row.ordinal,
       worker: row.worker, provider: row.provider, state: row.state, startedAt: row.started_at,
+      ...(row.predecessor_attempt_id === null || row.predecessor_attempt_id === undefined ? {} : { predecessorAttemptId: row.predecessor_attempt_id }),
       ...(row.result === null ? {} : { result: row.result }), ...(row.ended_at === null ? {} : { endedAt: row.ended_at }),
       ...(row.branch === null ? {} : { branch: row.branch }), ...(row.worktree === null ? {} : { worktree: row.worktree }),
       ...(row.current_commit === null ? {} : { currentCommit: row.current_commit }), ...(row.final_commit === null ? {} : { finalCommit: row.final_commit }),
@@ -521,8 +525,8 @@ export class AttemptRepository {
       const validated = deserializeAttempt(serializeAttempt(attempt));
       if (!validated.ok) return invalidRecord();
       try {
-        this.#store.database.prepare(`INSERT INTO runtime_attempts (id, schema_version, task_id, ordinal, worker, provider, state, result, started_at, ended_at, branch, worktree, current_commit, final_commit, checkpoint_reference, progress, test_summary, blocking_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-          attempt.id, 1, attempt.taskId, attempt.ordinal, attempt.worker, attempt.provider, attempt.state, attempt.state === "terminal" ? attempt.result : null,
+        this.#store.database.prepare(`INSERT INTO runtime_attempts (id, schema_version, task_id, predecessor_attempt_id, ordinal, worker, provider, state, result, started_at, ended_at, branch, worktree, current_commit, final_commit, checkpoint_reference, progress, test_summary, blocking_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          attempt.id, 1, attempt.taskId, attempt.predecessorAttemptId ?? null, attempt.ordinal, attempt.worker, attempt.provider, attempt.state, attempt.state === "terminal" ? attempt.result : null,
           attempt.startedAt, attempt.state === "terminal" ? attempt.endedAt : null, attempt.branch ?? null, attempt.worktree ?? null, attempt.currentCommit ?? null,
           attempt.state === "terminal" ? attempt.finalCommit ?? null : null, attempt.checkpointReference ?? null, attempt.progress ?? null, attempt.testSummary ?? null, attempt.state === "terminal" ? attempt.blockingReason ?? null : null,
         );
@@ -577,13 +581,13 @@ export class AttemptRepository {
       if (!validated.ok) return invalidRecord();
       const current = this.get(attempt.id);
       if (current.outcome !== "success") return current;
-      if (current.value.taskId !== attempt.taskId || current.value.ordinal !== attempt.ordinal || current.value.worker !== attempt.worker || current.value.provider !== attempt.provider || current.value.startedAt !== attempt.startedAt) return conflict("Attempt identity and ordinal are immutable.");
+      if (current.value.taskId !== attempt.taskId || current.value.predecessorAttemptId !== attempt.predecessorAttemptId || current.value.ordinal !== attempt.ordinal || current.value.worker !== attempt.worker || current.value.provider !== attempt.provider || current.value.startedAt !== attempt.startedAt) return conflict("Attempt identity, predecessor, and ordinal are immutable.");
       if (current.value.state === "terminal" && attempt.state === "terminal") return serializeAttempt(current.value) === serializeAttempt(validated.value) ? success(current.value) : conflict("Terminal Attempt completion conflicts with the stored result or evidence.");
       try {
-        const result = this.#store.database.prepare(`UPDATE runtime_attempts SET state = ?, result = ?, ended_at = ?, branch = ?, worktree = ?, current_commit = ?, final_commit = ?, checkpoint_reference = ?, progress = ?, test_summary = ?, blocking_reason = ? WHERE id = ? AND state = ? AND task_id = ? AND ordinal = ? AND started_at = ?`).run(
+        const result = this.#store.database.prepare(`UPDATE runtime_attempts SET state = ?, result = ?, ended_at = ?, branch = ?, worktree = ?, current_commit = ?, final_commit = ?, checkpoint_reference = ?, progress = ?, test_summary = ?, blocking_reason = ? WHERE id = ? AND state = ? AND task_id = ? AND ordinal = ? AND started_at = ? AND ((predecessor_attempt_id = ?) OR (predecessor_attempt_id IS NULL AND ? IS NULL))`).run(
           attempt.state, attempt.state === "terminal" ? attempt.result : null, attempt.state === "terminal" ? attempt.endedAt : null, attempt.branch ?? null, attempt.worktree ?? null, attempt.currentCommit ?? null,
           attempt.state === "terminal" ? attempt.finalCommit ?? null : null, attempt.checkpointReference ?? null, attempt.progress ?? null, attempt.testSummary ?? null, attempt.state === "terminal" ? attempt.blockingReason ?? null : null,
-          attempt.id, expectedState, attempt.taskId, attempt.ordinal, attempt.startedAt,
+          attempt.id, expectedState, attempt.taskId, attempt.ordinal, attempt.startedAt, attempt.predecessorAttemptId ?? null, attempt.predecessorAttemptId ?? null,
         );
         if (result.changes !== 1) return this.#store.exists("runtime_attempts", attempt.id) ? conflict("Attempt compare-and-set failed.") : notFound("Attempt was not found.");
         return success(validated.value);

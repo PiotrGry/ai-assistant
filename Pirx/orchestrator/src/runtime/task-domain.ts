@@ -54,6 +54,7 @@ export interface RunningAttemptSnapshot {
   readonly schemaVersion: typeof TASK_DOMAIN_SCHEMA_VERSION;
   readonly id: AttemptId;
   readonly taskId: TaskId;
+  readonly predecessorAttemptId?: AttemptId;
   readonly ordinal: number;
   readonly worker: string;
   readonly provider: string;
@@ -97,6 +98,7 @@ export interface StartAttemptInput {
   readonly id: AttemptId;
   readonly worker: string;
   readonly provider: string;
+  readonly predecessorAttemptId?: AttemptId;
   readonly branch?: string;
   readonly worktree?: string;
   readonly currentCommit?: string;
@@ -348,11 +350,13 @@ function validateAttemptSnapshot(value: unknown): DomainResult<AttemptSnapshot> 
   if (!isRecord(value) || value.kind !== "attempt" || value.schemaVersion !== TASK_DOMAIN_SCHEMA_VERSION) return error("serialization_error", "Attempt snapshot schema version or kind is unsupported.");
   const parsedId = id(value.id, "AttemptId");
   const parsedTaskId = id(value.taskId, "TaskId");
+  const predecessorAttemptId = value.predecessorAttemptId === undefined ? undefined : id(value.predecessorAttemptId, "AttemptId");
   const worker = text(value.worker, "worker", 200);
   const provider = text(value.provider, "provider", 200);
   const startedAt = timestamp(value.startedAt, "startedAt");
   if (typeof parsedId !== "string") return { ok: false, error: parsedId };
   if (typeof parsedTaskId !== "string") return { ok: false, error: parsedTaskId };
+  if (predecessorAttemptId !== undefined && typeof predecessorAttemptId !== "string") return { ok: false, error: predecessorAttemptId };
   if (typeof worker !== "string") return { ok: false, error: worker };
   if (typeof provider !== "string") return { ok: false, error: provider };
   if (!Number.isSafeInteger(value.ordinal) || (value.ordinal as number) <= 0) return error("invariant_violation", "ordinal must be a positive integer.", "ordinal");
@@ -364,7 +368,7 @@ function validateAttemptSnapshot(value: unknown): DomainResult<AttemptSnapshot> 
     if (!parsed.ok) return parsed;
     if (parsed.value !== undefined) normalized[field] = parsed.value;
   }
-  const common = { kind: "attempt" as const, schemaVersion: TASK_DOMAIN_SCHEMA_VERSION, id: parsedId as AttemptId, taskId: parsedTaskId as TaskId, ordinal: value.ordinal as number, worker, provider, state: "running" as const, startedAt, ...normalized };
+  const common = { kind: "attempt" as const, schemaVersion: TASK_DOMAIN_SCHEMA_VERSION, id: parsedId as AttemptId, taskId: parsedTaskId as TaskId, ...(predecessorAttemptId === undefined ? {} : { predecessorAttemptId: predecessorAttemptId as AttemptId }), ordinal: value.ordinal as number, worker, provider, state: "running" as const, startedAt, ...normalized };
   if (value.state === "running") return ok(freezeAttempt(common as RunningAttemptSnapshot));
   if (value.state !== "terminal" || !isAttemptResult(value.result)) return error("invalid_enum", "Attempt state or result is unsupported.", "state");
   const endedAt = timestamp(value.endedAt, "endedAt");
@@ -400,22 +404,25 @@ function makeRunningAttempt(taskId: TaskId, ordinal: number, input: StartAttempt
   const parsedId = id(input.id, "AttemptId");
   const worker = text(input.worker, "worker", 200);
   const provider = text(input.provider, "provider", 200);
+  const predecessorAttemptId = input.predecessorAttemptId === undefined ? undefined : id(input.predecessorAttemptId, "AttemptId");
   if (typeof parsedId !== "string") return { ok: false, error: parsedId };
   if (typeof worker !== "string") return { ok: false, error: worker };
   if (typeof provider !== "string") return { ok: false, error: provider };
+  if (predecessorAttemptId !== undefined && typeof predecessorAttemptId !== "string") return { ok: false, error: predecessorAttemptId };
   const fields: Record<string, string> = {};
   for (const [field, raw, max] of [["branch", input.branch, 512], ["worktree", input.worktree, 1_000], ["currentCommit", input.currentCommit, 256], ["checkpointReference", input.checkpointReference, 1_000], ["progress", input.progress, 2_000], ["testSummary", input.testSummary, 2_000]] as const) {
     const parsed = safeOptionalText(raw, field, max);
     if (!parsed.ok) return parsed;
     if (parsed.value !== undefined) fields[field] = parsed.value;
   }
-  return ok(freezeAttempt({ kind: "attempt", schemaVersion: TASK_DOMAIN_SCHEMA_VERSION, id: parsedId as AttemptId, taskId, ordinal, worker, provider, state: "running", startedAt: evaluatedAt, ...fields }));
+  return ok(freezeAttempt({ kind: "attempt", schemaVersion: TASK_DOMAIN_SCHEMA_VERSION, id: parsedId as AttemptId, taskId, ...(predecessorAttemptId === undefined ? {} : { predecessorAttemptId: predecessorAttemptId as AttemptId }), ordinal, worker, provider, state: "running", startedAt: evaluatedAt, ...fields }));
 }
 
 export function startInitialAttempt(task: TaskSnapshot, attempts: readonly AttemptSnapshot[], input: StartAttemptInput, evaluatedAt: UtcTimestamp): DomainResult<StartedAttempt> {
   const valid = validateAttemptSet(task, attempts);
   if (!valid.ok) return valid;
   if (task.state !== "ready" || attempts.length !== 0) return error("invalid_transition", "Initial Attempt requires a ready Task with no previous Attempts.");
+  if (input.predecessorAttemptId !== undefined) return error("invariant_violation", "Initial Attempt cannot have a predecessorAttemptId.", "predecessorAttemptId");
   const attempt = makeRunningAttempt(task.id, 1, input, evaluatedAt);
   if (!attempt.ok) return attempt;
   const transitioned = transitionTask(task, task.state, { type: "start" }, evaluatedAt);
@@ -427,6 +434,7 @@ export function retryTask(task: TaskSnapshot, attempts: readonly AttemptSnapshot
   if (!valid.ok) return valid;
   if (attempts.length === 0 || (task.state !== "in_progress" && task.state !== "blocked" && task.state !== "failed")) return error("invalid_transition", "Task is not eligible for retry.");
   if (attempts.some((attempt) => attempt.state === "running")) return error("invariant_violation", "A Task with an active Attempt cannot be retried.");
+  if (input.predecessorAttemptId !== undefined && input.predecessorAttemptId !== attempts[attempts.length - 1]?.id) return error("invariant_violation", "predecessorAttemptId must reference the latest Attempt of the Task.", "predecessorAttemptId");
   if (!laterThanOrEqual(evaluatedAt, task.updatedAt)) return error("invalid_timestamp", "Retry evaluation time cannot precede Task updatedAt.", "evaluatedAt");
   const attempt = makeRunningAttempt(task.id, attempts.length + 1, input, evaluatedAt);
   if (!attempt.ok) return attempt;
