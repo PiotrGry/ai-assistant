@@ -316,6 +316,23 @@ require every capability; the helpers expose explicit worker-start and
 mutating-tool actions. The gate never upgrades authority based on a downstream
 result and does not record prompts, commands, tokens, or provider payloads.
 
+## Runtime sensitive-resource safety policy
+
+`runtime/safety-policy.ts` publishes the reviewed `SAFETY_POLICY_MATRIX` for
+CI/CD, workflow, infrastructure, cost, deployment, application-log, metrics,
+and production actions. Only explicit read actions represented by the
+capability vocabulary reach `SafetyEnforcementGate`; they still require the
+Task/workspace binding and any sensitive approval enforced by the capability
+gate. Infrastructure, cost, deployment, workflow, and production mutations
+have no capability and return `human_action_required` without invoking an
+external client. Unknown, ambiguous, malformed, or missing-scope actions fail
+closed.
+
+`HumanActionRecord` is bounded and allowlisted: it contains only the Task,
+normalized action, repository/branch/worktree scope, stable reason,
+required capability/approval marker, and a fixed next instruction. It never
+echoes command, prompt, credential, token, or provider payload data.
+
 ## Runtime Task-to-GitHub Issue linkage and lifecycle projection
 
 Tasks may carry one canonical GitHub Issue identity: owner, repository, Issue

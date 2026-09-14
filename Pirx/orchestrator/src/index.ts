@@ -262,6 +262,22 @@ export {
   type CapabilityGateResult,
 } from "./runtime/capability-gate.js";
 export {
+  SAFETY_POLICY_ACTIONS,
+  SAFETY_POLICY_MATRIX,
+  SAFETY_POLICY_SCHEMA_VERSION,
+  SafetyEnforcementGate,
+  enforceSafetyInvocation,
+  evaluateSafetyPolicy,
+  type HumanActionRecord,
+  type SafetyInvocationRequest,
+  type SafetyInvocationResult,
+  type SafetyPolicyAction,
+  type SafetyPolicyDecision,
+  type SafetyPolicyReasonCode,
+  type SafetyPolicyRequest,
+  type SafetyPolicyRow,
+} from "./runtime/safety-policy.js";
+export {
   DEFAULT_RUNTIME_BUSY_TIMEOUT_MS,
   RUNTIME_STORAGE_SCHEMA_VERSION,
   AttemptRepository,
