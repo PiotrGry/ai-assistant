@@ -233,6 +233,23 @@ export {
   type WorkspaceReferenceStatus,
 } from "./runtime/resume.js";
 export {
+  CAPABILITY_VOCABULARY,
+  SENSITIVE_CAPABILITIES,
+  evaluateCapabilities,
+  normalizeCapabilitySet,
+  validateCapabilityApproval,
+  type Capability,
+  type CapabilityApproval,
+  type CapabilityApprovalRequirement,
+  type CapabilityApprovalState,
+  type CapabilityEvaluation,
+  type CapabilityEvaluationInput,
+  type CapabilityReasonCode,
+  type CapabilityResourceScope,
+  type CapabilityValidationResult,
+  type CapabilityValidationViolation,
+} from "./runtime/capabilities.js";
+export {
   DEFAULT_RUNTIME_BUSY_TIMEOUT_MS,
   RUNTIME_STORAGE_SCHEMA_VERSION,
   AttemptRepository,

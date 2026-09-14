@@ -287,6 +287,25 @@ Attempt. `startResumedAttempt()` rechecks the context inside a
 Attempt together. It never reopens the predecessor; a concurrent successor is
 reported explicitly.
 
+## Runtime capability policy
+
+`runtime/capabilities.ts` is the closed, provider-independent capability
+boundary. The initial vocabulary is `repository.read`, `repository.write`,
+`tests.run`, `git.commit`, `git.push_assigned_branch`, `ci.read`,
+`ci.logs.read`, `application_logs.read`, `metrics.read`, and
+`production.read`. Capability sets are validated, deduplicated, and sorted;
+unknown values, wildcards, and implicit inheritance are denied.
+
+`evaluateCapabilities()` compares normalized Task requirements with normalized
+worker grants and returns stable reason codes plus sorted missing and sensitive
+requirements. Push permission requires an assigned branch and matching scope.
+CI and operational reads are sensitive and require an active approval bound to
+the Task, capability, resource scope, approver, issuance/expiry interval, and
+one-use/revocation state. Expired, used, revoked, wrong-Task, future-issued,
+or cross-repository approvals never fall back to permission. Production is
+read-only in this vocabulary; no deployment or arbitrary production mutation
+capability exists.
+
 ## Runtime Task-to-GitHub Issue linkage and lifecycle projection
 
 Tasks may carry one canonical GitHub Issue identity: owner, repository, Issue
