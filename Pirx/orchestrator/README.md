@@ -207,3 +207,23 @@ successful work commits and typed failures roll back. `TaskRepository` and
 `AttemptRepository` expose create/get/list/update compare-and-set operations,
 returning `success`, `not_found`, `conflict`, `invalid_record`, or
 `storage_error` without leaking SQLite exceptions into orchestration code.
+
+## Runtime Task-to-GitHub Issue linkage and lifecycle projection
+
+Tasks may carry one canonical GitHub Issue identity: owner, repository, Issue
+number, GraphQL node ID, and canonical HTTPS URL. SQLite stores the identity in
+`runtime_task_issue_links` with one-to-one uniqueness and exposes both Issue-to-
+Task and Task-to-Issue lookups. Older Task records without the node ID and URL
+remain readable, but lifecycle publication requires the complete canonical
+identity.
+
+`GitHubLifecycleProjectionPublisher` accepts only these durable event types:
+`task_accepted`, `attempt_started`, `attempt_result`, `branch_prepared`,
+`code_pushed`, `blocked_human_action_required`, `retry_cooldown`, and
+`task_completed`. Each event is stored in
+`runtime_github_projections` before the existing read-safe lifecycle comment
+mutator is called. Event IDs and `(Task, sequence)` are unique; replays are
+idempotent, older sequences are marked `ignored`, and pending provider or
+missing-link failures can be replayed after restart. GitHub failures never
+roll back the runtime Task or Attempt, and only bounded, sanitized summaries,
+branch names, commits, and correlation IDs reach the Issue comment boundary.

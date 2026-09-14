@@ -10,11 +10,13 @@ import {
   serializeTask,
   type AttemptSnapshot,
   type AttemptState,
+  type GitHubTaskReference,
   type TaskSnapshot,
   type TaskState,
+  utcTimestamp,
 } from "./task-domain.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 2 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 4 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -33,9 +35,43 @@ export interface TaskCompareAndSet {
   readonly updatedAt: string;
 }
 
+export interface CanonicalIssueIdentity {
+  readonly owner: string;
+  readonly repository: string;
+  readonly issueNumber: number;
+  readonly nodeId: string;
+  readonly url: string;
+}
+
+export interface RuntimeProjectionInput {
+  readonly eventId: string;
+  readonly taskId: string;
+  readonly attemptId?: string;
+  readonly sequence: number;
+  readonly eventType: string;
+  readonly timestamp: string;
+  readonly summary: string;
+  readonly branch?: string;
+  readonly commit?: string;
+}
+
+export type RuntimeProjectionStatus = "pending" | "published" | "ignored";
+export interface RuntimeProjectionRecord extends RuntimeProjectionInput {
+  readonly status: RuntimeProjectionStatus;
+  readonly commentId?: number;
+  readonly commentUrl?: string;
+  readonly lastError?: string;
+  readonly updatedAt: string;
+}
+export interface ProjectionCommentReference {
+  readonly id: number;
+  readonly url: string;
+}
+
 export interface RuntimeTransaction {
   readonly tasks: TaskRepository;
   readonly attempts: AttemptRepository;
+  readonly projections: ProjectionRepository;
 }
 
 export class RuntimeStorageError extends Error {
@@ -62,6 +98,13 @@ function invalidRecord<T>(): StorageResult<T> {
 }
 function storageFailure<T>(): StorageResult<T> {
   return { outcome: "storage_error", message: "SQLite runtime storage operation failed." };
+}
+function validCanonicalIdentity(value: CanonicalIssueIdentity): boolean {
+  if (typeof value.owner !== "string" || typeof value.repository !== "string" || typeof value.nodeId !== "string" || typeof value.url !== "string" || value.owner.trim().length === 0 || value.repository.trim().length === 0 || value.nodeId.trim().length === 0 || !Number.isSafeInteger(value.issueNumber) || value.issueNumber <= 0) return false;
+  try {
+    const url = new URL(value.url);
+    return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" && url.search === "" && url.hash === "" && url.pathname === `/${value.owner}/${value.repository}/issues/${String(value.issueNumber)}`;
+  } catch { return false; }
 }
 function asErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -147,7 +190,46 @@ const MIGRATIONS: readonly string[] = [
     CREATE INDEX IF NOT EXISTS runtime_attempts_task_state
       ON runtime_attempts (task_id, state, ordinal);
   `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_task_issue_links (
+      task_id TEXT PRIMARY KEY REFERENCES runtime_tasks(id) ON DELETE CASCADE,
+      owner TEXT NOT NULL CHECK (length(trim(owner)) > 0),
+      repository TEXT NOT NULL CHECK (length(trim(repository)) > 0),
+      issue_number INTEGER NOT NULL CHECK (issue_number > 0),
+      node_id TEXT NOT NULL UNIQUE CHECK (length(trim(node_id)) > 0),
+      url TEXT NOT NULL CHECK (length(trim(url)) > 0),
+      linked_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (owner, repository, issue_number)
+    );
+    CREATE INDEX IF NOT EXISTS runtime_task_issue_links_issue
+      ON runtime_task_issue_links (owner, repository, issue_number);
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_github_projections (
+      event_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE CASCADE,
+      attempt_id TEXT,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      event_type TEXT NOT NULL CHECK (event_type IN ('task_accepted', 'attempt_started', 'attempt_result', 'branch_prepared', 'code_pushed', 'blocked_human_action_required', 'retry_cooldown', 'task_completed')),
+      timestamp TEXT NOT NULL,
+      summary TEXT NOT NULL CHECK (length(trim(summary)) > 0),
+      branch TEXT,
+      commit_sha TEXT,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'published', 'ignored')),
+      comment_id INTEGER,
+      comment_url TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (task_id, sequence)
+    );
+    CREATE INDEX IF NOT EXISTS runtime_github_projections_pending
+      ON runtime_github_projections (task_id, status, sequence);
+  `,
 ];
+
+const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
 
 function bootstrap(database: DatabaseSync, timeoutMs: number): void {
   database.exec(`PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = ${timeoutMs};`);
@@ -184,7 +266,9 @@ function jsonParse(value: unknown): unknown {
 }
 function taskFromRow(row: TaskRow): StorageResult<TaskSnapshot> {
   try {
-    const githubReference = row.github_owner === null ? undefined : { owner: row.github_owner, repository: row.github_repository, issueNumber: row.github_issue_number };
+    const githubReference = row.link_node_id !== null
+      ? { owner: row.link_owner, repository: row.link_repository, issueNumber: row.link_issue_number, nodeId: row.link_node_id, url: row.link_url }
+      : row.github_owner === null ? undefined : { owner: row.github_owner, repository: row.github_repository, issueNumber: row.github_issue_number };
     const completionEvidence = row.completion_evidence_json === null ? undefined : jsonParse(row.completion_evidence_json);
     const parsed = deserializeTask(JSON.stringify({
       kind: "task", schemaVersion: row.schema_version, id: row.id, githubReference,
@@ -238,6 +322,8 @@ export class TaskRepository {
           task.goal, task.scope, jsonValue(task.acceptanceCriteria), task.priority, task.risk, jsonValue(task.requiredCapabilities), task.state, task.createdAt, task.updatedAt,
           task.blockingReason ?? null, task.completionEvidence === undefined ? null : jsonValue(task.completionEvidence),
         );
+        const linkResult = this.#store.syncIssueLink(validated.value);
+        if (linkResult.outcome !== "success") return linkResult;
         return success(validated.value);
       } catch (error: unknown) { return classifyStorageError(error); }
     });
@@ -246,8 +332,40 @@ export class TaskRepository {
   public get(id: string): StorageResult<TaskSnapshot> {
     return this.#store.execute(() => {
       try {
-        const row = this.#store.database.prepare("SELECT * FROM runtime_tasks WHERE id = ?").get(id) as TaskRow | undefined;
+        const row = this.#store.database.prepare(`${TASK_SELECT} WHERE t.id = ?`).get(id) as TaskRow | undefined;
         return row === undefined ? notFound("Task was not found.") : storedRecord(taskFromRow(row));
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public getByIssue(identity: Pick<CanonicalIssueIdentity, "owner" | "repository" | "issueNumber">): StorageResult<TaskSnapshot> {
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare(`${TASK_SELECT} WHERE l.owner = ? AND l.repository = ? AND l.issue_number = ?`).get(identity.owner, identity.repository, identity.issueNumber) as TaskRow | undefined;
+        return row === undefined ? notFound("Task was not found for the GitHub Issue.") : taskFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public getByNodeId(nodeId: string): StorageResult<TaskSnapshot> {
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare(`${TASK_SELECT} WHERE l.node_id = ?`).get(nodeId) as TaskRow | undefined;
+        return row === undefined ? notFound("Task was not found for the GitHub Issue node.") : taskFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public linkIssue(taskId: string, identity: CanonicalIssueIdentity, linkedAt: string): StorageResult<TaskSnapshot> {
+    return this.#store.execute(() => {
+      if (!validCanonicalIdentity(identity)) return { outcome: "invalid_record", message: "Canonical GitHub Issue identity is invalid." };
+      if (!utcTimestamp(linkedAt).ok) return { outcome: "invalid_record", message: "Issue linkage timestamp must be canonical UTC." };
+      const existing = this.get(taskId);
+      if (existing.outcome !== "success") return existing;
+      try {
+        this.#store.database.prepare("UPDATE runtime_tasks SET github_owner = ?, github_repository = ?, github_issue_number = ? WHERE id = ?").run(identity.owner, identity.repository, identity.issueNumber, taskId);
+        this.#store.database.prepare(`INSERT INTO runtime_task_issue_links (task_id, owner, repository, issue_number, node_id, url, linked_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET owner = excluded.owner, repository = excluded.repository, issue_number = excluded.issue_number, node_id = excluded.node_id, url = excluded.url, updated_at = excluded.updated_at`).run(taskId, identity.owner, identity.repository, identity.issueNumber, identity.nodeId, identity.url, linkedAt, linkedAt);
+        return this.get(taskId);
       } catch (error: unknown) { return classifyStorageError(error); }
     });
   }
@@ -255,7 +373,7 @@ export class TaskRepository {
   public list(): StorageResult<readonly TaskSnapshot[]> {
     return this.#store.execute(() => {
       try {
-        const rows = this.#store.database.prepare("SELECT * FROM runtime_tasks ORDER BY created_at, id").all() as TaskRow[];
+        const rows = this.#store.database.prepare(`${TASK_SELECT} ORDER BY t.created_at, t.id`).all() as TaskRow[];
         const values: TaskSnapshot[] = [];
         for (const row of rows) { const parsed = taskFromRow(row); if (parsed.outcome !== "success") return parsed; values.push(parsed.value); }
         return success(Object.freeze(values));
@@ -275,6 +393,8 @@ export class TaskRepository {
           task.blockingReason ?? null, task.completionEvidence === undefined ? null : jsonValue(task.completionEvidence), task.id, expected.state, expected.updatedAt,
         );
         if (result.changes !== 1) return this.#store.exists("runtime_tasks", task.id) ? conflict("Task compare-and-set failed.") : notFound("Task was not found.");
+        const linkResult = this.#store.syncIssueLink(task);
+        if (linkResult.outcome !== "success") return linkResult;
         return success(validated.value);
       } catch (error: unknown) { return classifyStorageError(error); }
     });
@@ -338,6 +458,85 @@ export class AttemptRepository {
   }
 }
 
+export class ProjectionRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public get(eventId: string): StorageResult<RuntimeProjectionRecord> {
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_github_projections WHERE event_id = ?").get(eventId) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound("GitHub projection event was not found.") : this.#fromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public prepare(input: RuntimeProjectionInput, now: string): StorageResult<RuntimeProjectionRecord> {
+    return this.#store.execute(() => {
+      try {
+        const existing = this.#store.database.prepare("SELECT * FROM runtime_github_projections WHERE event_id = ?").get(input.eventId) as Record<string, unknown> | undefined;
+        if (existing !== undefined) {
+          const current = this.#fromRow(existing);
+          if (current.outcome !== "success") return current;
+          if (current.value.taskId !== input.taskId || current.value.attemptId !== input.attemptId || current.value.sequence !== input.sequence || current.value.eventType !== input.eventType || current.value.timestamp !== input.timestamp || current.value.summary !== input.summary || current.value.branch !== input.branch || current.value.commit !== input.commit) return conflict("Projection event identity conflicts with the stored event.");
+          if (current.value.status === "pending") {
+            const latest = this.#store.database.prepare("SELECT MAX(sequence) AS sequence FROM runtime_github_projections WHERE task_id = ? AND status = 'published'").get(input.taskId) as { sequence: number | null };
+            if (latest.sequence !== null && latest.sequence >= input.sequence) {
+              this.#store.database.prepare("UPDATE runtime_github_projections SET status = 'ignored', last_error = ?, updated_at = ? WHERE event_id = ? AND status = 'pending'").run("Out-of-order event superseded by a later published event.", now, input.eventId);
+              return this.get(input.eventId);
+            }
+          }
+          return current;
+        }
+        const latest = this.#store.database.prepare("SELECT MAX(sequence) AS sequence FROM runtime_github_projections WHERE task_id = ? AND status = 'published'").get(input.taskId) as { sequence: number | null };
+        const status: RuntimeProjectionStatus = latest.sequence !== null && latest.sequence >= input.sequence ? "ignored" : "pending";
+        this.#store.database.prepare("INSERT INTO runtime_github_projections (event_id, task_id, attempt_id, sequence, event_type, timestamp, summary, branch, commit_sha, status, comment_id, comment_url, last_error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)").run(input.eventId, input.taskId, input.attemptId ?? null, input.sequence, input.eventType, input.timestamp, input.summary, input.branch ?? null, input.commit ?? null, status, now, now);
+        return this.get(input.eventId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public markPublished(eventId: string, comment: ProjectionCommentReference, now: string): StorageResult<RuntimeProjectionRecord> {
+    return this.#store.execute(() => {
+      try {
+        const result = this.#store.database.prepare("UPDATE runtime_github_projections SET status = 'published', comment_id = ?, comment_url = ?, last_error = NULL, updated_at = ? WHERE event_id = ? AND status = 'pending'").run(comment.id, comment.url, now, eventId);
+        if (result.changes === 0) return this.get(eventId);
+        return this.get(eventId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public markPending(eventId: string, message: string, now: string): StorageResult<RuntimeProjectionRecord> {
+    return this.#store.execute(() => {
+      try {
+        const result = this.#store.database.prepare("UPDATE runtime_github_projections SET status = 'pending', last_error = ?, updated_at = ? WHERE event_id = ? AND status = 'pending'").run(message.slice(0, 500), now, eventId);
+        if (result.changes === 0) return this.get(eventId);
+        return this.get(eventId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public listPending(): StorageResult<readonly RuntimeProjectionRecord[]> {
+    return this.#store.execute(() => {
+      try {
+        const rows = this.#store.database.prepare("SELECT * FROM runtime_github_projections WHERE status = 'pending' ORDER BY task_id, sequence").all() as Record<string, unknown>[];
+        const values: RuntimeProjectionRecord[] = [];
+        for (const row of rows) { const parsed = this.#fromRow(row); if (parsed.outcome !== "success") return parsed; values.push(parsed.value); }
+        return success(Object.freeze(values));
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  #fromRow(row: Record<string, unknown>): StorageResult<RuntimeProjectionRecord> {
+    if (typeof row.event_id !== "string" || typeof row.task_id !== "string" || typeof row.sequence !== "number" || typeof row.event_type !== "string" || typeof row.timestamp !== "string" || typeof row.summary !== "string" || typeof row.status !== "string" || !["pending", "published", "ignored"].includes(row.status) || typeof row.updated_at !== "string") return invalidRecord();
+    return success({
+      eventId: row.event_id, taskId: row.task_id, ...(row.attempt_id === null ? {} : { attemptId: row.attempt_id as string }), sequence: row.sequence,
+      eventType: row.event_type, timestamp: row.timestamp, summary: row.summary, ...(row.branch === null ? {} : { branch: row.branch as string }), ...(row.commit_sha === null ? {} : { commit: row.commit_sha as string }), status: row.status as RuntimeProjectionStatus,
+      ...(row.comment_id === null ? {} : { commentId: row.comment_id as number }), ...(row.comment_url === null ? {} : { commentUrl: row.comment_url as string }), ...(row.last_error === null ? {} : { lastError: row.last_error as string }), updatedAt: row.updated_at,
+    });
+  }
+}
+
 export class RuntimeSqliteStore {
   readonly #database: DatabaseSync;
   readonly #filename: string;
@@ -345,12 +544,14 @@ export class RuntimeSqliteStore {
   #inTransaction = false;
   readonly tasks: TaskRepository;
   readonly attempts: AttemptRepository;
+  readonly projections: ProjectionRepository;
 
   private constructor(database: DatabaseSync, filename: string) {
     this.#database = database;
     this.#filename = filename;
     this.tasks = new TaskRepository(this);
     this.attempts = new AttemptRepository(this);
+    this.projections = new ProjectionRepository(this);
   }
 
   public static open(options: RuntimeSqliteStoreOptions = {}): RuntimeSqliteStore {
@@ -379,14 +580,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, projections: this.projections }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, projections: this.projections });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;
@@ -414,6 +615,20 @@ export class RuntimeSqliteStore {
   public exists(table: "runtime_tasks" | "runtime_attempts", id: string): boolean {
     this.assertOpen();
     return this.#database.prepare(`SELECT 1 AS found FROM ${table} WHERE id = ?`).get(id) !== undefined;
+  }
+
+  public syncIssueLink(task: TaskSnapshot): StorageResult<void> {
+    const reference = task.githubReference;
+    try {
+      if (reference?.nodeId === undefined || reference.url === undefined) {
+        this.#database.prepare("DELETE FROM runtime_task_issue_links WHERE task_id = ?").run(task.id);
+        return success(undefined);
+      }
+      const identity: CanonicalIssueIdentity = { owner: reference.owner, repository: reference.repository, issueNumber: reference.issueNumber, nodeId: reference.nodeId, url: reference.url };
+      if (!validCanonicalIdentity(identity)) return { outcome: "invalid_record", message: "Canonical GitHub Issue identity is invalid." };
+      this.#database.prepare("INSERT INTO runtime_task_issue_links (task_id, owner, repository, issue_number, node_id, url, linked_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET owner = excluded.owner, repository = excluded.repository, issue_number = excluded.issue_number, node_id = excluded.node_id, url = excluded.url, updated_at = excluded.updated_at").run(task.id, identity.owner, identity.repository, identity.issueNumber, identity.nodeId, identity.url, task.createdAt, task.updatedAt);
+      return success(undefined);
+    } catch (error: unknown) { return classifyStorageError(error); }
   }
 
   private assertOpen(): void {

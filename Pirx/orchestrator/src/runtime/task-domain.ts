@@ -27,6 +27,8 @@ export interface GitHubTaskReference {
   readonly owner: string;
   readonly repository: string;
   readonly issueNumber: number;
+  readonly nodeId?: string;
+  readonly url?: string;
 }
 
 export interface TaskSnapshot {
@@ -229,7 +231,20 @@ function validateGitHubReference(value: unknown): DomainResult<GitHubTaskReferen
   if (typeof owner !== "string") return { ok: false, error: owner };
   if (typeof repository !== "string") return { ok: false, error: repository };
   if (!Number.isSafeInteger(value.issueNumber) || (value.issueNumber as number) <= 0) return error("invalid_input", "issueNumber must be a positive integer.", "githubReference.issueNumber");
-  return ok(freezeReference({ owner, repository, issueNumber: value.issueNumber as number }));
+  const nodeId = safeOptionalText(value.nodeId, "githubReference.nodeId", 256);
+  const url = safeOptionalText(value.url, "githubReference.url", 2_048);
+  if (!nodeId.ok) return nodeId;
+  if (!url.ok) return url;
+  if ((nodeId.value === undefined) !== (url.value === undefined)) return error("invariant_violation", "nodeId and url must be supplied together.", "githubReference");
+  if (url.value !== undefined) {
+    try {
+      const parsed = new URL(url.value);
+      if (parsed.protocol !== "https:" || parsed.hostname !== "github.com" || parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "" || parsed.pathname !== `/${owner}/${repository}/issues/${String(value.issueNumber)}`) return error("invalid_input", "githubReference.url must be the canonical HTTPS GitHub Issue URL.", "githubReference.url");
+    } catch {
+      return error("invalid_input", "githubReference.url must be a valid canonical URL.", "githubReference.url");
+    }
+  }
+  return ok(freezeReference({ owner, repository, issueNumber: value.issueNumber as number, ...(nodeId.value === undefined ? {} : { nodeId: nodeId.value, url: url.value as string }) }));
 }
 function validTaskPriority(value: unknown): value is TaskPriority {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 100;
