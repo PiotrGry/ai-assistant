@@ -306,6 +306,16 @@ or cross-repository approvals never fall back to permission. Production is
 read-only in this vocabulary; no deployment or arbitrary production mutation
 capability exists.
 
+`CapabilityEnforcementGate` is the invocation boundary for workers and tools.
+It binds the grant to the exact Task and worker, requires a canonical
+repository, branch, and worktree scope, evaluates the closed capability set
+before the downstream closure, and writes a bounded sanitized allow/deny audit
+decision. Denied decisions, invalid input, cancellation, evaluator failures,
+and audit failures never call the downstream operation. Composite requests
+require every capability; the helpers expose explicit worker-start and
+mutating-tool actions. The gate never upgrades authority based on a downstream
+result and does not record prompts, commands, tokens, or provider payloads.
+
 ## Runtime Task-to-GitHub Issue linkage and lifecycle projection
 
 Tasks may carry one canonical GitHub Issue identity: owner, repository, Issue

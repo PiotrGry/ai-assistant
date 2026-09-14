@@ -22,6 +22,7 @@ const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 export interface CapabilityResourceScope {
   readonly repository?: string;
   readonly branch?: string;
+  readonly worktree?: string;
   readonly environment?: string;
 }
 
@@ -56,6 +57,7 @@ export type CapabilityReasonCode =
   | "RESOURCE_SCOPE_MISMATCH"
   | "ASSIGNED_BRANCH_REQUIRED"
   | "ASSIGNED_BRANCH_MISMATCH"
+  | "ASSIGNED_WORKTREE_MISMATCH"
   | "SENSITIVE_APPROVAL_REQUIRED"
   | "EXPIRED_APPROVAL"
   | "REVOKED_APPROVAL"
@@ -76,6 +78,7 @@ export interface CapabilityEvaluationInput {
   readonly workerGrants: readonly unknown[];
   readonly repository?: unknown;
   readonly assignedBranch?: unknown;
+  readonly assignedWorktree?: unknown;
   readonly resourceScope?: unknown;
   readonly approvals?: readonly unknown[];
   readonly now: UtcTimestamp;
@@ -112,23 +115,23 @@ function canonicalTimestamp(value: unknown, field: string): UtcTimestamp | Capab
 }
 function normalizeScope(value: unknown, field: string): CapabilityValidationResult<CapabilityResourceScope> {
   if (!isRecord(value)) return failure(violation("invalid_scope", field, `${field} must be a non-empty scope object.`));
-  const allowed = new Set(["repository", "branch", "environment"]);
+  const allowed = new Set(["repository", "branch", "worktree", "environment"]);
   for (const key of Object.keys(value)) if (!allowed.has(key)) return failure(violation("invalid_scope", `${field}.${key}`, "Unknown resource scope field."));
   const values: Record<string, string> = {};
-  for (const key of ["repository", "branch", "environment"] as const) {
+  for (const key of ["repository", "branch", "worktree", "environment"] as const) {
     if (value[key] === undefined) continue;
     const parsed = canonicalText(value[key], `${field}.${key}`);
     if (typeof parsed !== "string") return failure(violation("invalid_scope", parsed.field, parsed.message));
     values[key] = parsed;
   }
   if (Object.keys(values).length === 0) return failure(violation("invalid_scope", field, `${field} must contain at least one resource.`));
-  return success(Object.freeze({ ...(values.repository === undefined ? {} : { repository: values.repository }), ...(values.branch === undefined ? {} : { branch: values.branch }), ...(values.environment === undefined ? {} : { environment: values.environment }) }));
+  return success(Object.freeze({ ...(values.repository === undefined ? {} : { repository: values.repository }), ...(values.branch === undefined ? {} : { branch: values.branch }), ...(values.worktree === undefined ? {} : { worktree: values.worktree }), ...(values.environment === undefined ? {} : { environment: values.environment }) }));
 }
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function scopeEqual(left: CapabilityResourceScope, right: CapabilityResourceScope): boolean {
-  return left.repository === right.repository && left.branch === right.branch && left.environment === right.environment;
+  return left.repository === right.repository && left.branch === right.branch && left.worktree === right.worktree && left.environment === right.environment;
 }
 function normalizeList(value: unknown, field: string, allowEmpty: boolean): CapabilityValidationResult<readonly Capability[]> {
   if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) return failure(violation("invalid_input", field, `${field} must be a ${allowEmpty ? "possibly empty " : "non-empty "}array.`));
@@ -177,13 +180,16 @@ export function evaluateCapabilities(input: CapabilityEvaluationInput): Capabili
   const sensitive = required.value.filter((capability) => SENSITIVE_SET.has(capability));
   const repository = input.repository === undefined ? undefined : canonicalText(input.repository, "repository");
   const branch = input.assignedBranch === undefined ? undefined : canonicalText(input.assignedBranch, "assignedBranch");
+  const worktree = input.assignedWorktree === undefined ? undefined : canonicalText(input.assignedWorktree, "assignedWorktree");
   const scope = input.resourceScope === undefined ? undefined : normalizeScope(input.resourceScope, "resourceScope");
   if (repository !== undefined && typeof repository !== "string") return denied({ requiredCapabilities: required.value, grantedCapabilities: grants.value, missingCapabilities: missing, sensitiveRequirements: sensitive, approvalRequirements: [] }, "INVALID_RESOURCE_SCOPE");
   if (branch !== undefined && typeof branch !== "string") return denied({ requiredCapabilities: required.value, grantedCapabilities: grants.value, missingCapabilities: missing, sensitiveRequirements: sensitive, approvalRequirements: [] }, "INVALID_RESOURCE_SCOPE");
+  if (worktree !== undefined && typeof worktree !== "string") return denied({ requiredCapabilities: required.value, grantedCapabilities: grants.value, missingCapabilities: missing, sensitiveRequirements: sensitive, approvalRequirements: [] }, "INVALID_RESOURCE_SCOPE");
   if (scope !== undefined && !scope.ok) return denied({ requiredCapabilities: required.value, grantedCapabilities: grants.value, missingCapabilities: missing, sensitiveRequirements: sensitive, approvalRequirements: [] }, "INVALID_RESOURCE_SCOPE");
   const normalizedScope = scope === undefined ? undefined : scope.value;
   if (repository !== undefined && normalizedScope?.repository !== undefined && repository !== normalizedScope.repository) return denied({ requiredCapabilities: required.value, grantedCapabilities: grants.value, missingCapabilities: missing, sensitiveRequirements: sensitive, approvalRequirements: [] }, "RESOURCE_SCOPE_MISMATCH");
   if (branch !== undefined && normalizedScope?.branch !== undefined && branch !== normalizedScope.branch) return denied({ requiredCapabilities: required.value, grantedCapabilities: grants.value, missingCapabilities: missing, sensitiveRequirements: sensitive, approvalRequirements: [] }, "ASSIGNED_BRANCH_MISMATCH");
+  if (worktree !== undefined && normalizedScope?.worktree !== undefined && worktree !== normalizedScope.worktree) return denied({ requiredCapabilities: required.value, grantedCapabilities: grants.value, missingCapabilities: missing, sensitiveRequirements: sensitive, approvalRequirements: [] }, "ASSIGNED_WORKTREE_MISMATCH");
   if (required.value.includes("git.push_assigned_branch") && branch === undefined) return denied({ requiredCapabilities: required.value, grantedCapabilities: grants.value, missingCapabilities: missing, sensitiveRequirements: sensitive, approvalRequirements: [] }, "ASSIGNED_BRANCH_REQUIRED");
   const approvals: CapabilityApproval[] = [];
   for (const [index, value] of (input.approvals ?? []).entries()) {

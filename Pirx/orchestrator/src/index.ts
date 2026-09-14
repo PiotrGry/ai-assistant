@@ -250,6 +250,18 @@ export {
   type CapabilityValidationViolation,
 } from "./runtime/capabilities.js";
 export {
+  CAPABILITY_ACTIONS,
+  CapabilityEnforcementGate,
+  enforceMutatingToolInvocation,
+  enforceWorkerInvocation,
+  type CapabilityAuditDecision,
+  type CapabilityAuditSink,
+  type CapabilityGateDecision,
+  type CapabilityGateReasonCode,
+  type CapabilityGateRequest,
+  type CapabilityGateResult,
+} from "./runtime/capability-gate.js";
+export {
   DEFAULT_RUNTIME_BUSY_TIMEOUT_MS,
   RUNTIME_STORAGE_SCHEMA_VERSION,
   AttemptRepository,
