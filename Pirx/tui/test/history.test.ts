@@ -39,3 +39,41 @@ test("history wraps long answers to the chat viewport width", () => {
     "",
   ]);
 });
+
+test("history renders Markdown tables with aligned cells and a compact frame", () => {
+  const lines = buildHistoryLines([
+    {
+      kind: "assistant",
+      content: "| Task | Status |\n| :--- | ---: |\n| #189 | Done |\n| #191 | Blocked |",
+    },
+  ], 32);
+
+  assert.deepEqual(lines.map((line) => line.text), [
+    "┌─ Pirx ───────────────────────┐",
+    "│ ┌────┬───────┐",
+    "│ │ Task │  Status │",
+    "│ ├────┼───────┤",
+    "│ │ #189 │    Done │",
+    "│ ├────┼───────┤",
+    "│ │ #191 │ Blocked │",
+    "│ └────┴───────┘",
+    "└──────────────────────────────┘",
+    "",
+  ]);
+});
+
+test("history keeps table-looking lines inside fenced Markdown code blocks unchanged", () => {
+  const lines = buildHistoryLines([
+    { kind: "assistant", content: "```markdown\n| A | B |\n|---|---|\n```" },
+  ], 24);
+
+  assert.deepEqual(lines.map((line) => line.text), [
+    "┌─ Pirx ───────────────┐",
+    "│ ```markdown",
+    "│ | A | B |",
+    "│ |---|---|",
+    "│ ```",
+    "└──────────────────────┘",
+    "",
+  ]);
+});
