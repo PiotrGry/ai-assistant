@@ -320,6 +320,23 @@ Order, unknown dependency state, unknown blockers, invalid worker metadata,
 or an unavailable projection. It never acquires a Lease, creates an Attempt,
 or asks an LLM to infer scheduling intent.
 
+## Single-worker scheduler cycle
+
+`SingleWorkerScheduler` is a provider-independent one-cycle coordinator. It
+reconciles durable recovery state before selection, checks worker availability,
+authorizes the selected Task, acquires exclusive Lease ownership, creates and
+attaches an Attempt, invokes the execution port, persists the execution or
+interruption result, and releases the Lease. A worker invocation is reachable
+only after both Lease and Attempt ports succeed.
+
+The cycle returns explicit `started`, `idle`, `deferred`, `blocked`,
+`reconciliation_required`, and `failed` outcomes. Reentrant cycles are
+deferred; shutdown aborts the active signal, persists an interruption when the
+port is available, and waits up to the configured bound. Failures after
+ownership preserve an uncertain Lease for recovery rather than starting a
+second worker. Claude/Codex adapters, parallel scheduling, and worktree
+creation remain outside this boundary.
+
 ## Runtime capability policy
 
 `runtime/capabilities.ts` is the closed, provider-independent capability

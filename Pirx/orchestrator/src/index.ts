@@ -342,6 +342,25 @@ export {
   type TaskSelectionWorker,
 } from "./runtime/task-selection.js";
 export {
+  SingleWorkerScheduler,
+  type SchedulerAttemptPort,
+  type SchedulerAuthorizationRequest,
+  type SchedulerCapabilityPort,
+  type SchedulerClock,
+  type SchedulerCycleResult,
+  type SchedulerExecutionPort,
+  type SchedulerLeasePort,
+  type SchedulerPersistenceInput,
+  type SchedulerPersistencePort,
+  type SchedulerPortResult,
+  type SchedulerRecoveryPort,
+  type SchedulerSelectionPort,
+  type SchedulerShutdownResult,
+  type SchedulerWorkerPort,
+  type WorkerAvailability,
+  type WorkerExecutionResult,
+} from "./runtime/scheduler.js";
+export {
   GITHUB_LIFECYCLE_EVENT_TYPES,
   GitHubLifecycleProjectionPublisher,
   type GitHubLifecycleEventType,
