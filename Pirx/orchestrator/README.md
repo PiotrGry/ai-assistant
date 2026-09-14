@@ -123,3 +123,24 @@ watcher bounds timeout, polling, provider retries, and failed job/step evidence
 and maps rate limits, missing data, ambiguity, provider errors, cancellation,
 and timeout explicitly. The MCP surface is `github_actions_watch`; the model
 does not issue one GitHub call per poll.
+
+## Local Claude Code structured round-trip POC
+
+`ClaudeCodeCliRunner` is a bounded, read-only local POC. It starts the
+configured `claude` executable directly with `shell: false`, an empty temporary
+working directory, an allowlisted environment, no tools, no MCP tools, one
+turn, and JSON Schema output. The runner generates a UUID request ID, sends
+the literal `hello world` payload, validates the complete structured envelope,
+and returns one of the documented normalized outcomes without exposing raw
+stdout, stderr, environment values, or credentials.
+
+The CLI is an explicitly manual smoke entry point and is not part of
+`pnpm check`:
+
+```sh
+PIRX_CLAUDE_EXECUTABLE=claude pnpm claude:round-trip
+```
+
+It does not create or modify repositories, pull requests, workflows, tools,
+worktrees, commits, deployments, or MCP sessions. The temporary working
+directory is removed after every attempt.

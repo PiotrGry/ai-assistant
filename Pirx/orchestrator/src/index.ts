@@ -102,3 +102,23 @@ export {
   type GitHubActionsWatcherOptions,
   type GitHubActionsWorkflowRun,
 } from "./github/ci-watch.js";
+export {
+  CLAUDE_CLI_ENV_ALLOWLIST,
+  CLAUDE_ROUND_TRIP_OUTCOMES,
+  CLAUDE_TERMINATION_GRACE_MS,
+  DEFAULT_CLAUDE_STDERR_BYTES,
+  DEFAULT_CLAUDE_STDOUT_BYTES,
+  DEFAULT_CLAUDE_TIMEOUT_MS,
+  MAX_CLAUDE_OUTPUT_BYTES,
+  MAX_CLAUDE_TIMEOUT_MS,
+  buildClaudeArguments,
+  ClaudeCodeCliRunner,
+  type ClaudeCodeCliRunnerOptions,
+  type ClaudeRoundTripFailure,
+  type ClaudeRoundTripOutcome,
+  type ClaudeRoundTripRequest,
+  type ClaudeRoundTripResult,
+  type ClaudeRoundTripSuccess,
+  type ClaudeSpawn,
+  type ClaudeSpawnOptions,
+} from "./claude/cli-runner.js";
