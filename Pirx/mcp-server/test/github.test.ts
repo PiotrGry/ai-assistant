@@ -54,12 +54,30 @@ function success<T>(value: T, correlationId: string): GitHubOperationResult<T> {
 class FakeGitHubTransport implements GitHubPocTransport {
   readonly writes: unknown[] = [];
   readonly comments: Array<Record<string, unknown>> = [];
+  readonly actionRuns: Array<Record<string, unknown>> = [];
+  actionRunCalls = 0;
   failureResult: GitHubOperationResult<unknown> | undefined;
   largeBody = false;
 
   async restRead<T>(request: { path: string }, context: { correlationId: string }): Promise<GitHubOperationResult<T>> {
     if (this.failureResult !== undefined) {
       return this.failureResult as GitHubOperationResult<T>;
+    }
+    if (request.path.endsWith("/actions/runs/901/jobs")) {
+      return success({ jobs: [] }, context.correlationId) as GitHubOperationResult<T>;
+    }
+    if (request.path.endsWith("/actions/runs/901")) {
+      this.actionRunCalls += 1;
+      const actionRun = this.actionRuns.shift() ?? {
+        id: 901,
+        name: "CI",
+        status: "completed",
+        conclusion: "success",
+        head_sha: "sha-current",
+        html_url: "https://github.com/PiotrGry/ai-assistant/actions/runs/901",
+        pull_requests: [{ number: 189 }],
+      };
+      return success(actionRun, context.correlationId) as GitHubOperationResult<T>;
     }
     if (request.path.endsWith("/comments")) {
       return success(this.comments, context.correlationId) as GitHubOperationResult<T>;
@@ -167,6 +185,44 @@ test("GitHub POC is omitted when its fixed target is not configured", async (con
 
   const listed = await fixture.client.listTools();
   assert.equal(listed.tools.some((tool) => tool.name === "github_issue_round_trip_poc"), false);
+});
+
+test("GitHub Actions watch is one read-only MCP call with internal polling", async (context) => {
+  const transport = new FakeGitHubTransport();
+  transport.actionRuns.push(
+    {
+      id: 901,
+      name: "CI",
+      status: "in_progress",
+      conclusion: null,
+      head_sha: "sha-current",
+      html_url: "https://github.com/PiotrGry/ai-assistant/actions/runs/901",
+      pull_requests: [{ number: 189 }],
+    },
+    {
+      id: 901,
+      name: "CI",
+      status: "completed",
+      conclusion: "success",
+      head_sha: "sha-current",
+      html_url: "https://github.com/PiotrGry/ai-assistant/actions/runs/901",
+      pull_requests: [{ number: 189 }],
+    },
+  );
+  const fixture = await connected({ transport, config: githubConfig });
+  context.after(async () => {
+    await fixture.client.close();
+    await fixture.server.close();
+  });
+
+  const result = await fixture.client.callTool({
+    name: "github_actions_watch",
+    arguments: { workflowRunId: 901, timeoutMs: 50, pollIntervalMs: 1 },
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal((result.structuredContent as { outcome: string }).outcome, "success");
+  assert.equal(transport.actionRunCalls, 2);
+  assert.equal(transport.writes.length, 0);
 });
 
 test("repository-scoped Issue tools stay listed and name the missing GitHub configuration", async (context) => {

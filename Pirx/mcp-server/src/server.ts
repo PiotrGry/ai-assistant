@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import {
   GitHubIssueMutator,
   GitHubIssueReader,
+  GitHubActionsGateway,
   GitHubTransport,
   GitHubWriteQueue,
   GitHubConfigurationError,
@@ -22,6 +23,7 @@ import { registerSystemTools } from "./tools/system.js";
 import { registerObsidianTools } from "./tools/obsidian.js";
 import { registerGitHubPocTool } from "./tools/github.js";
 import { registerGitHubIssueTools } from "./tools/github-issues.js";
+import { registerGitHubActionsWatchTool } from "./tools/github-actions.js";
 
 export type GitHubPocTransport = GitHubIssueReadTransport & GitHubIssueMutationTransport;
 
@@ -83,11 +85,19 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   const githubMutator = githubReader === undefined || githubQueue === undefined || githubConfig === undefined || transport === undefined
     ? undefined
     : new GitHubIssueMutator(transport, githubReader, githubQueue, githubConfig);
+  const githubActionsGateway = githubConfig === undefined || transport === undefined
+    ? undefined
+    : new GitHubActionsGateway(transport, githubConfig);
   registerGitHubIssueTools(server, {
     configurationError: githubConfigurationError,
     authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
     reader: githubReader,
     mutator: githubMutator,
+  });
+  registerGitHubActionsWatchTool(server, {
+    config: githubConfig,
+    gateway: githubActionsGateway,
+    configurationError: githubConfigurationError,
   });
   if ((environment.PIRX_GITHUB_POC_ISSUE?.trim().length ?? 0) > 0) {
     registerGitHubPocTool(server, {

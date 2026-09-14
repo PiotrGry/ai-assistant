@@ -82,3 +82,23 @@ export {
   type GitHubIssueRoundTripEvidence,
   type GitHubIssueRoundTripRequest,
 } from "./github/issue-round-trip.js";
+export {
+  GitHubActionsGateway,
+  GitHubActionsWatcher,
+  type GitHubActionsFailedJobReference,
+  type GitHubActionsGatewayOptions,
+  type GitHubActionsReadGateway,
+  type GitHubActionsReadTransport,
+  type GitHubActionsRunConclusion,
+  type GitHubActionsRunJobs,
+  type GitHubActionsRunStatus,
+  type GitHubActionsStepReference,
+  type GitHubActionsWatchClock,
+  type GitHubActionsWatchErrorOutcome,
+  type GitHubActionsWatchErrorResult,
+  type GitHubActionsWatchRequest,
+  type GitHubActionsWatchResult,
+  type GitHubActionsWatchTerminalResult,
+  type GitHubActionsWatcherOptions,
+  type GitHubActionsWorkflowRun,
+} from "./github/ci-watch.js";

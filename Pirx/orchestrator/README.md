@@ -111,3 +111,15 @@ to 100 and is capped at 1,000. Returned cursors are opaque and operation-
 specific. A failed later page remains a normalized failure and includes the
 failed cursor plus the number of items already read; it is never marked as a
 complete page.
+
+## GitHub Actions watch
+
+`GitHubActionsGateway` is the read-only provider adapter for workflow runs and
+jobs. `GitHubActionsWatcher` owns the bounded polling loop: the caller gives
+either an exact workflow run ID or a pull request number plus its expected head
+revision, and receives one normalized terminal result. A pull request head is
+rejected when no run matches it or when more than one run matches it. The
+watcher bounds timeout, polling, provider retries, and failed job/step evidence
+and maps rate limits, missing data, ambiguity, provider errors, cancellation,
+and timeout explicitly. The MCP surface is `github_actions_watch`; the model
+does not issue one GitHub call per poll.

@@ -88,6 +88,7 @@ test("server exposes complete tools with safe annotations", async (context) => {
       "calendar_list_calendars",
       "calendar_list_events",
       "calendar_update_event",
+      "github_actions_watch",
       "github_issue_close",
       "github_issue_comment",
       "github_issue_create",
@@ -119,6 +120,8 @@ test("server exposes complete tools with safe annotations", async (context) => {
   assert.equal(byName.get("calendar_create_event")?.annotations?.readOnlyHint, false);
   assert.equal(byName.get("calendar_create_event")?.annotations?.idempotentHint, false);
   assert.equal(byName.get("calendar_delete_event")?.annotations?.destructiveHint, true);
+  assert.equal(byName.get("github_actions_watch")?.annotations?.readOnlyHint, true);
+  assert.equal(byName.get("github_actions_watch")?.annotations?.idempotentHint, true);
   assert.equal(byName.get("obsidian_read")?.annotations?.readOnlyHint, true);
   assert.equal(byName.get("obsidian_write")?.annotations?.destructiveHint, true);
   assert.match(byName.get("calendar_get_event")?.description ?? "", /current external state/u);
