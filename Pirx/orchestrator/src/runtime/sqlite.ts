@@ -16,7 +16,7 @@ import {
   utcTimestamp,
 } from "./task-domain.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 4 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 5 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -68,10 +68,50 @@ export interface ProjectionCommentReference {
   readonly url: string;
 }
 
+export type RuntimeWebhookDeliveryStatus = "accepted" | "ignored";
+export interface RuntimeWebhookDelivery {
+  readonly deliveryId: string;
+  readonly eventName: string;
+  readonly action: string;
+  readonly payloadDigest: string;
+  readonly status: RuntimeWebhookDeliveryStatus;
+  readonly receivedAt: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+export type RuntimeSyncIntentKind = "issue" | "issue_relationship" | "project" | "repository";
+export type RuntimeSyncIntentStatus = "pending" | "reconciled";
+export interface RuntimeSyncIntentInput {
+  readonly intentId: string;
+  readonly deliveryId: string;
+  readonly kind: RuntimeSyncIntentKind;
+  readonly owner?: string;
+  readonly repository?: string;
+  readonly issueNumber?: number;
+  readonly issueNodeId?: string;
+  readonly projectId?: string;
+  readonly projectItemId?: string;
+  readonly eventName: string;
+  readonly action: string;
+  readonly eventTimestamp: string;
+}
+export interface RuntimeSyncIntent extends RuntimeSyncIntentInput {
+  readonly status: RuntimeSyncIntentStatus;
+  readonly lastError?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+export interface RuntimeWebhookAcceptance {
+  readonly duplicate: boolean;
+  readonly delivery: RuntimeWebhookDelivery;
+  readonly intents: readonly RuntimeSyncIntent[];
+}
+
 export interface RuntimeTransaction {
   readonly tasks: TaskRepository;
   readonly attempts: AttemptRepository;
   readonly projections: ProjectionRepository;
+  readonly webhooks: WebhookRepository;
 }
 
 export class RuntimeStorageError extends Error {
@@ -226,6 +266,39 @@ const MIGRATIONS: readonly string[] = [
     );
     CREATE INDEX IF NOT EXISTS runtime_github_projections_pending
       ON runtime_github_projections (task_id, status, sequence);
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_webhook_deliveries (
+      delivery_id TEXT PRIMARY KEY CHECK (length(trim(delivery_id)) > 0),
+      event_name TEXT NOT NULL CHECK (length(trim(event_name)) > 0),
+      action TEXT NOT NULL CHECK (length(trim(action)) > 0),
+      payload_digest TEXT NOT NULL CHECK (length(trim(payload_digest)) > 0),
+      status TEXT NOT NULL CHECK (status IN ('accepted', 'ignored')),
+      received_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS runtime_sync_intents (
+      intent_id TEXT PRIMARY KEY CHECK (length(trim(intent_id)) > 0),
+      delivery_id TEXT NOT NULL REFERENCES runtime_webhook_deliveries(delivery_id) ON DELETE RESTRICT,
+      kind TEXT NOT NULL CHECK (kind IN ('issue', 'issue_relationship', 'project', 'repository')),
+      owner TEXT,
+      repository TEXT,
+      issue_number INTEGER CHECK (issue_number IS NULL OR issue_number > 0),
+      issue_node_id TEXT,
+      project_id TEXT,
+      project_item_id TEXT,
+      event_name TEXT NOT NULL,
+      action TEXT NOT NULL,
+      event_timestamp TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'reconciled')),
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (delivery_id, kind, owner, repository, issue_number, issue_node_id, project_id, project_item_id)
+    );
+    CREATE INDEX IF NOT EXISTS runtime_sync_intents_pending
+      ON runtime_sync_intents (status, created_at, intent_id);
   `,
 ];
 
@@ -537,6 +610,98 @@ export class ProjectionRepository {
   }
 }
 
+export class WebhookRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public getDelivery(deliveryId: string): StorageResult<RuntimeWebhookDelivery> {
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_webhook_deliveries WHERE delivery_id = ?").get(deliveryId) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound("Webhook delivery was not found.") : this.#deliveryFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public accept(delivery: RuntimeWebhookDelivery, intents: readonly RuntimeSyncIntentInput[]): StorageResult<RuntimeWebhookAcceptance> {
+    return this.#store.execute(() => {
+      try {
+        const existing = this.#store.database.prepare("SELECT * FROM runtime_webhook_deliveries WHERE delivery_id = ?").get(delivery.deliveryId) as Record<string, unknown> | undefined;
+        if (existing !== undefined) {
+          const stored = this.#deliveryFromRow(existing);
+          if (stored.outcome !== "success") return stored;
+          if (stored.value.payloadDigest !== delivery.payloadDigest || stored.value.eventName !== delivery.eventName || stored.value.action !== delivery.action) return conflict("GitHub delivery ID was reused with different content.");
+          return success({ duplicate: true, delivery: stored.value, intents: this.#listDeliveryIntents(delivery.deliveryId) });
+        }
+        this.#store.database.prepare("INSERT INTO runtime_webhook_deliveries (delivery_id, event_name, action, payload_digest, status, received_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(delivery.deliveryId, delivery.eventName, delivery.action, delivery.payloadDigest, delivery.status, delivery.receivedAt, delivery.createdAt, delivery.updatedAt);
+        for (const intent of intents) {
+          this.#store.database.prepare("INSERT INTO runtime_sync_intents (intent_id, delivery_id, kind, owner, repository, issue_number, issue_node_id, project_id, project_item_id, event_name, action, event_timestamp, status, last_error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)").run(intent.intentId, intent.deliveryId, intent.kind, intent.owner ?? null, intent.repository ?? null, intent.issueNumber ?? null, intent.issueNodeId ?? null, intent.projectId ?? null, intent.projectItemId ?? null, intent.eventName, intent.action, intent.eventTimestamp, intent.eventTimestamp, intent.eventTimestamp);
+        }
+        const stored = this.#deliveryFromRow(this.#store.database.prepare("SELECT * FROM runtime_webhook_deliveries WHERE delivery_id = ?").get(delivery.deliveryId) as Record<string, unknown>);
+        if (stored.outcome !== "success") return stored;
+        return success({ duplicate: false, delivery: stored.value, intents: this.#listDeliveryIntents(delivery.deliveryId) });
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public getIntent(intentId: string): StorageResult<RuntimeSyncIntent> {
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_sync_intents WHERE intent_id = ?").get(intentId) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound("Synchronization intent was not found.") : this.#intentFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public listPendingIntents(): StorageResult<readonly RuntimeSyncIntent[]> {
+    return this.#store.execute(() => {
+      try {
+        const rows = this.#store.database.prepare("SELECT * FROM runtime_sync_intents WHERE status = 'pending' ORDER BY created_at, intent_id").all() as Record<string, unknown>[];
+        const values: RuntimeSyncIntent[] = [];
+        for (const row of rows) { const parsed = this.#intentFromRow(row); if (parsed.outcome !== "success") return parsed; values.push(parsed.value); }
+        return success(Object.freeze(values));
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public markReconciled(intentId: string, updatedAt: string): StorageResult<RuntimeSyncIntent> {
+    return this.#store.execute(() => {
+      try {
+        this.#store.database.prepare("UPDATE runtime_sync_intents SET status = 'reconciled', last_error = NULL, updated_at = ? WHERE intent_id = ? AND status = 'pending'").run(updatedAt, intentId);
+        return this.getIntent(intentId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public markPending(intentId: string, message: string, updatedAt: string): StorageResult<RuntimeSyncIntent> {
+    return this.#store.execute(() => {
+      try {
+        this.#store.database.prepare("UPDATE runtime_sync_intents SET status = 'pending', last_error = ?, updated_at = ? WHERE intent_id = ?").run(message.slice(0, 500), updatedAt, intentId);
+        return this.getIntent(intentId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  #listDeliveryIntents(deliveryId: string): readonly RuntimeSyncIntent[] {
+    const rows = this.#store.database.prepare("SELECT * FROM runtime_sync_intents WHERE delivery_id = ? ORDER BY intent_id").all(deliveryId) as Record<string, unknown>[];
+    const values: RuntimeSyncIntent[] = [];
+    for (const row of rows) { const parsed = this.#intentFromRow(row); if (parsed.outcome === "success") values.push(parsed.value); }
+    return Object.freeze(values);
+  }
+
+  #deliveryFromRow(row: Record<string, unknown>): StorageResult<RuntimeWebhookDelivery> {
+    if (typeof row.delivery_id !== "string" || typeof row.event_name !== "string" || typeof row.action !== "string" || typeof row.payload_digest !== "string" || !["accepted", "ignored"].includes(String(row.status)) || typeof row.received_at !== "string" || typeof row.created_at !== "string" || typeof row.updated_at !== "string") return invalidRecord();
+    return success({ deliveryId: row.delivery_id, eventName: row.event_name, action: row.action, payloadDigest: row.payload_digest, status: row.status as RuntimeWebhookDeliveryStatus, receivedAt: row.received_at, createdAt: row.created_at, updatedAt: row.updated_at });
+  }
+
+  #intentFromRow(row: Record<string, unknown>): StorageResult<RuntimeSyncIntent> {
+    const kinds: readonly RuntimeSyncIntentKind[] = ["issue", "issue_relationship", "project", "repository"];
+    const statuses: readonly RuntimeSyncIntentStatus[] = ["pending", "reconciled"];
+    if (typeof row.intent_id !== "string" || typeof row.delivery_id !== "string" || typeof row.kind !== "string" || !kinds.includes(row.kind as RuntimeSyncIntentKind) || typeof row.event_name !== "string" || typeof row.action !== "string" || typeof row.event_timestamp !== "string" || typeof row.status !== "string" || !statuses.includes(row.status as RuntimeSyncIntentStatus) || typeof row.created_at !== "string" || typeof row.updated_at !== "string") return invalidRecord();
+    return success({ intentId: row.intent_id, deliveryId: row.delivery_id, kind: row.kind as RuntimeSyncIntentKind, ...(row.owner === null ? {} : { owner: row.owner as string }), ...(row.repository === null ? {} : { repository: row.repository as string }), ...(row.issue_number === null ? {} : { issueNumber: row.issue_number as number }), ...(row.issue_node_id === null ? {} : { issueNodeId: row.issue_node_id as string }), ...(row.project_id === null ? {} : { projectId: row.project_id as string }), ...(row.project_item_id === null ? {} : { projectItemId: row.project_item_id as string }), eventName: row.event_name, action: row.action, eventTimestamp: row.event_timestamp, status: row.status as RuntimeSyncIntentStatus, ...(row.last_error === null ? {} : { lastError: row.last_error as string }), createdAt: row.created_at, updatedAt: row.updated_at });
+  }
+}
+
 export class RuntimeSqliteStore {
   readonly #database: DatabaseSync;
   readonly #filename: string;
@@ -545,6 +710,7 @@ export class RuntimeSqliteStore {
   readonly tasks: TaskRepository;
   readonly attempts: AttemptRepository;
   readonly projections: ProjectionRepository;
+  readonly webhooks: WebhookRepository;
 
   private constructor(database: DatabaseSync, filename: string) {
     this.#database = database;
@@ -552,6 +718,7 @@ export class RuntimeSqliteStore {
     this.tasks = new TaskRepository(this);
     this.attempts = new AttemptRepository(this);
     this.projections = new ProjectionRepository(this);
+    this.webhooks = new WebhookRepository(this);
   }
 
   public static open(options: RuntimeSqliteStoreOptions = {}): RuntimeSqliteStore {
@@ -580,14 +747,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, projections: this.projections }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, projections: this.projections, webhooks: this.webhooks }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, projections: this.projections });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, projections: this.projections, webhooks: this.webhooks });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;

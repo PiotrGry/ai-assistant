@@ -201,6 +201,9 @@ Migration inventory:
    foreign-key linkage, task/ordinal uniqueness, and state/result checks.
 2. At-most-one-running-Attempt partial uniqueness plus task/state/ordinal
    indexes.
+3. Canonical Task-to-Issue links and durable lifecycle projections.
+4. Authenticated GitHub webhook deliveries and pending synchronization
+   intents, keyed by delivery ID and retained without storing raw payloads.
 
 `RuntimeSqliteStore.transaction()` is the reusable `BEGIN IMMEDIATE` boundary;
 successful work commits and typed failures roll back. `TaskRepository` and
@@ -246,3 +249,28 @@ pending. Rate limits, uncertain mutations, missing items, invalid mappings,
 and provider failures remain explicit outcomes. The synchronizer does not
 store runtime Attempts, leases, checkpoints, or execution history in Project
 fields.
+
+## GitHub webhook intake and reconciliation
+
+`GitHubWebhookHandler` is a framework-neutral boundary for a raw request. It
+checks the configured out-of-repository secret against the exact request bytes
+with `x-hub-signature-256` before parsing JSON, enforces a byte limit, and
+returns explicit missing-header, signature, size, JSON, payload, and storage
+outcomes. Supported events are `issues`, `issue_dependencies`,
+`projects_v2_item`, `projects_v2`, `projects_v2_field`, `repository`,
+`installation`, and `installation_repositories`, each with a bounded action
+matrix exported as `GITHUB_WEBHOOK_EVENT_ACTIONS`. Unsupported events are
+acknowledged as durable `ignored` deliveries.
+
+Accepted deliveries and normalized Issue, relationship, Project, or repository
+intents are committed together in `runtime_webhook_deliveries` and
+`runtime_sync_intents`. Delivery IDs are idempotent; reusing one with a
+different digest is a conflict. The handler stores only bounded identity,
+action, timestamp, and SHA-256 digest data, never the raw payload or secret.
+
+`GitHubWebhookReconciliationService` exposes startup replay,
+Issue/Project-targeted reconciliation, and an `afterUnknownWrite` entry point.
+It asks an adapter to read current remote state and converge through the
+existing idempotent clients; webhook payloads are hints, so out-of-order
+events cannot regress state. Successful or no-op convergence marks an intent
+reconciled, while provider, rate-limit, and unknown outcomes leave it pending.
