@@ -284,6 +284,7 @@ export {
   CheckpointRepository,
   LeaseRepository,
   ProjectionRepository,
+  TaskSelectionRepository,
   RuntimeSqliteStore,
   RuntimeStorageError,
   TaskRepository,
@@ -322,6 +323,24 @@ export {
   type LeaseRecoveryReason,
   type LeaseState,
 } from "./runtime/lease.js";
+export {
+  TASK_SELECTION_REASON_CODES,
+  cooldownIsActive,
+  missingWorkerCapabilities,
+  normalizeWorkerCapabilities,
+  requiredCapabilities,
+  validateTaskSelectionMetadata,
+  type DependencyProjectionState,
+  type RunnableTaskCandidate,
+  type TaskEligibilityExplanation,
+  type TaskSelectionMetadata,
+  type TaskSelectionMetadataInput,
+  type TaskSelectionReasonCode,
+  type TaskSelectionRequest,
+  type TaskSelectionResult,
+  type TaskSelectionValidationResult,
+  type TaskSelectionWorker,
+} from "./runtime/task-selection.js";
 export {
   GITHUB_LIFECYCLE_EVENT_TYPES,
   GitHubLifecycleProjectionPublisher,

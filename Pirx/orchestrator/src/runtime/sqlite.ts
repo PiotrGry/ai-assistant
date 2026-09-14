@@ -46,8 +46,20 @@ import {
   type LeaseRecoveryReason,
   type LeaseState,
 } from "./lease.js";
+import {
+  cooldownIsActive,
+  missingWorkerCapabilities,
+  normalizeWorkerCapabilities,
+  validateTaskSelectionMetadata,
+  type TaskEligibilityExplanation,
+  type RunnableTaskCandidate,
+  type TaskSelectionMetadata,
+  type TaskSelectionMetadataInput,
+  type TaskSelectionRequest,
+  type TaskSelectionResult,
+} from "./task-selection.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 9 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 10 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -143,6 +155,7 @@ export interface RuntimeTransaction {
   readonly attempts: AttemptRepository;
   readonly checkpoints: CheckpointRepository;
   readonly leases: LeaseRepository;
+  readonly selection: TaskSelectionRepository;
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
 }
@@ -383,6 +396,25 @@ const MIGRATIONS: readonly string[] = [
     CREATE INDEX IF NOT EXISTS runtime_leases_recoverable
       ON runtime_leases (state, expires_at, id);
   `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_task_selection (
+      task_id TEXT PRIMARY KEY REFERENCES runtime_tasks(id) ON DELETE CASCADE,
+      queue_order INTEGER CHECK (queue_order IS NULL OR queue_order > 0),
+      cooldown_until TEXT,
+      dependency_state TEXT NOT NULL CHECK (dependency_state IN ('known', 'unknown')),
+      synchronized_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS runtime_task_blockers (
+      task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE CASCADE,
+      prerequisite_task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT,
+      PRIMARY KEY (task_id, prerequisite_task_id),
+      CHECK (task_id <> prerequisite_task_id)
+    );
+    CREATE INDEX IF NOT EXISTS runtime_task_selection_queue
+      ON runtime_task_selection (queue_order, task_id);
+    CREATE INDEX IF NOT EXISTS runtime_task_blockers_task
+      ON runtime_task_blockers (task_id, prerequisite_task_id);
+  `,
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -482,6 +514,7 @@ export class TaskRepository {
           task.goal, task.scope, jsonValue(task.acceptanceCriteria), task.priority, task.risk, jsonValue(task.requiredCapabilities), task.state, task.createdAt, task.updatedAt,
           task.blockingReason ?? null, task.completionEvidence === undefined ? null : jsonValue(task.completionEvidence),
         );
+        this.#store.database.prepare("INSERT INTO runtime_task_selection (task_id, queue_order, cooldown_until, dependency_state, synchronized_at) VALUES (?, NULL, NULL, 'unknown', ?)").run(task.id, task.updatedAt);
         const linkResult = this.#store.syncIssueLink(validated.value);
         if (linkResult.outcome !== "success") return linkResult;
         return success(validated.value);
@@ -954,6 +987,104 @@ export class LeaseRepository {
   }
 }
 
+export class TaskSelectionRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public synchronize(input: TaskSelectionMetadataInput): StorageResult<TaskSelectionMetadata> {
+    const validated = validateTaskSelectionMetadata(input);
+    if (!validated.ok) return { outcome: "invalid_record", message: validated.message };
+    return this.#store.execute(() => {
+      try {
+        const task = this.#store.database.prepare("SELECT id FROM runtime_tasks WHERE id = ?").get(input.taskId);
+        if (task === undefined) return notFound("Task was not found.");
+        this.#store.database.prepare("INSERT INTO runtime_task_selection (task_id, queue_order, cooldown_until, dependency_state, synchronized_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET queue_order = excluded.queue_order, cooldown_until = excluded.cooldown_until, dependency_state = excluded.dependency_state, synchronized_at = excluded.synchronized_at").run(input.taskId, input.queueOrder ?? null, input.cooldownUntil ?? null, input.dependencyState, input.synchronizedAt);
+        this.#store.database.prepare("DELETE FROM runtime_task_blockers WHERE task_id = ?").run(input.taskId);
+        for (const blocker of input.blockers) this.#store.database.prepare("INSERT INTO runtime_task_blockers (task_id, prerequisite_task_id) VALUES (?, ?)").run(input.taskId, blocker);
+        return this.get(input.taskId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public get(taskId: string): StorageResult<TaskSelectionMetadata> {
+    if (typeof taskId !== "string" || taskId.trim().length === 0) return { outcome: "invalid_record", message: "Task selection metadata lookup ID is invalid." };
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_task_selection WHERE task_id = ?").get(taskId) as Record<string, unknown> | undefined;
+        if (row === undefined) return notFound("Task selection metadata was not found.");
+        const blockers = this.#store.database.prepare("SELECT prerequisite_task_id FROM runtime_task_blockers WHERE task_id = ? ORDER BY prerequisite_task_id").all(taskId) as Array<{ prerequisite_task_id: unknown }>;
+        if (typeof row.task_id !== "string" || (row.queue_order !== null && (typeof row.queue_order !== "number" || !Number.isSafeInteger(row.queue_order))) || (row.cooldown_until !== null && typeof row.cooldown_until !== "string") || typeof row.dependency_state !== "string" || typeof row.synchronized_at !== "string" || blockers.some((blocker) => typeof blocker.prerequisite_task_id !== "string")) return invalidRecord();
+        const parsed = validateTaskSelectionMetadata({
+          taskId: row.task_id as TaskId,
+          ...(row.queue_order === null ? {} : { queueOrder: row.queue_order }),
+          ...(row.cooldown_until === null ? {} : { cooldownUntil: row.cooldown_until as UtcTimestamp }),
+          dependencyState: row.dependency_state as "known" | "unknown",
+          synchronizedAt: row.synchronized_at as UtcTimestamp,
+          blockers: blockers.map((blocker) => blocker.prerequisite_task_id as TaskId),
+        });
+        return parsed.ok ? success(parsed.value) : invalidRecord();
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public select(request: TaskSelectionRequest): TaskSelectionResult {
+    if (!Number.isFinite(Date.parse(request.evaluatedAt)) || new Date(request.evaluatedAt).toISOString() !== request.evaluatedAt) return { outcome: "reconciliation_required", reasons: ["invalid_evaluation_time"], explanations: [] };
+    const capabilities = normalizeWorkerCapabilities(request.worker.capabilities);
+    if (!capabilities.ok) return { outcome: "reconciliation_required", reasons: ["invalid_worker_capabilities"], explanations: [] };
+    const tasks = this.#store.tasks.list();
+    if (tasks.outcome !== "success") return { outcome: "reconciliation_required", reasons: ["task_projection_unavailable"], explanations: [] };
+    const explanations: TaskEligibilityExplanation[] = [];
+    const reconciliationReasons: string[] = [];
+    const metadataByTask = new Map<string, TaskSelectionMetadata>();
+    const ready = tasks.value.filter((task) => task.state === "ready");
+    for (const task of ready) {
+      const metadata = this.get(task.id);
+      if (metadata.outcome !== "success") {
+        reconciliationReasons.push(`missing_selection_metadata:${task.id}`);
+        continue;
+      }
+      metadataByTask.set(task.id, metadata.value);
+      if (metadata.value.queueOrder === undefined) reconciliationReasons.push(`missing_queue_order:${task.id}`);
+      if (metadata.value.dependencyState !== "known") reconciliationReasons.push(`unknown_dependency_state:${task.id}`);
+    }
+    const queueOrders = new Map<number, string[]>();
+    for (const metadata of metadataByTask.values()) {
+      if (metadata.queueOrder === undefined) continue;
+      const values = queueOrders.get(metadata.queueOrder) ?? [];
+      values.push(metadata.taskId);
+      queueOrders.set(metadata.queueOrder, values);
+    }
+    for (const [order, ids] of queueOrders) if (ids.length > 1) reconciliationReasons.push(`duplicate_queue_order:${order}`);
+    for (const task of tasks.value) {
+      const metadata = metadataByTask.get(task.id);
+      if (task.state !== "ready") {
+        explanations.push({ taskId: task.id, eligible: false, reasonCode: "NOT_READY", priority: task.priority, ...(metadata?.queueOrder === undefined ? {} : { queueOrder: metadata.queueOrder }), missingCapabilities: [], blockers: metadata?.blockers ?? [] });
+      }
+    }
+    if (reconciliationReasons.length > 0) return { outcome: "reconciliation_required", reasons: Object.freeze([...new Set(reconciliationReasons)].sort()), explanations: Object.freeze(explanations) };
+    const eligible: RunnableTaskCandidate[] = [];
+    for (const task of ready) {
+      const metadata = metadataByTask.get(task.id);
+      if (metadata === undefined || metadata.queueOrder === undefined) continue;
+      const missingBlocker = metadata.blockers.find((blocker) => !tasks.value.some((candidate) => candidate.id === blocker));
+      if (missingBlocker !== undefined) {
+        reconciliationReasons.push(`unknown_blocker:${task.id}:${missingBlocker}`);
+        continue;
+      }
+      const unfinished = metadata.blockers.filter((blocker) => tasks.value.some((candidate) => candidate.id === blocker && candidate.state !== "completed"));
+      const missing = missingWorkerCapabilities(task, capabilities.value);
+      const activeCooldown = cooldownIsActive(metadata.cooldownUntil, request.evaluatedAt) ? metadata.cooldownUntil : undefined;
+      const reasonCode = unfinished.length > 0 ? "BLOCKED_BY_PREREQUISITE" : activeCooldown !== undefined ? "COOLDOWN_ACTIVE" : missing.length > 0 ? "MISSING_CAPABILITY" : "ELIGIBLE";
+      const explanation: TaskEligibilityExplanation = { taskId: task.id, eligible: reasonCode === "ELIGIBLE", reasonCode, priority: task.priority, queueOrder: metadata.queueOrder, missingCapabilities: missing, blockers: metadata.blockers, ...(activeCooldown === undefined ? {} : { activeCooldown }) };
+      explanations.push(explanation);
+      if (explanation.eligible) eligible.push({ task, explanation });
+    }
+    if (reconciliationReasons.length > 0) return { outcome: "reconciliation_required", reasons: Object.freeze([...new Set(reconciliationReasons)].sort()), explanations: Object.freeze(explanations) };
+    eligible.sort((left, right) => left.task.priority - right.task.priority || (left.explanation.queueOrder ?? Number.MAX_SAFE_INTEGER) - (right.explanation.queueOrder ?? Number.MAX_SAFE_INTEGER) || left.task.id.localeCompare(right.task.id));
+    return eligible[0] === undefined ? { outcome: "no_runnable_task", explanations: Object.freeze(explanations) } : { outcome: "selected", candidate: eligible[0], explanations: Object.freeze(explanations) };
+  }
+}
+
 export class ProjectionRepository {
   readonly #store: RuntimeSqliteStore;
   public constructor(store: RuntimeSqliteStore) { this.#store = store; }
@@ -1134,6 +1265,7 @@ export class RuntimeSqliteStore {
   readonly attempts: AttemptRepository;
   readonly checkpoints: CheckpointRepository;
   readonly leases: LeaseRepository;
+  readonly selection: TaskSelectionRepository;
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
 
@@ -1144,6 +1276,7 @@ export class RuntimeSqliteStore {
     this.attempts = new AttemptRepository(this);
     this.checkpoints = new CheckpointRepository(this);
     this.leases = new LeaseRepository(this);
+    this.selection = new TaskSelectionRepository(this);
     this.projections = new ProjectionRepository(this);
     this.webhooks = new WebhookRepository(this);
   }
@@ -1195,14 +1328,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, projections: this.projections, webhooks: this.webhooks }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, projections: this.projections, webhooks: this.webhooks }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, projections: this.projections, webhooks: this.webhooks });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, projections: this.projections, webhooks: this.webhooks });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;

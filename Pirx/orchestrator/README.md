@@ -303,6 +303,23 @@ as the prior outcome before another Lease can be acquired. The repository
 uses the surrounding SQLite transaction boundary, so failed composite work
 rolls back ownership changes together with related runtime records.
 
+## Deterministic runnable Task selection
+
+Schema version 10 stores Queue Order, cooldown, dependency projection state,
+and normalized blocker relationships in `runtime_task_selection` and
+`runtime_task_blockers`. `TaskSelectionRepository.select()` evaluates only
+the durable runtime projection at the supplied time: ready Tasks need known
+dependencies and a unique positive Queue Order, unfinished blockers and
+active cooldowns exclude them, and every required Task capability must be
+present in the supplied worker capability set.
+
+Eligible candidates are ordered by numeric Priority, ascending Queue Order,
+then stable Task ID. The selector returns one candidate, an explicit
+`no_runnable_task`, or `reconciliation_required` for missing/duplicate Queue
+Order, unknown dependency state, unknown blockers, invalid worker metadata,
+or an unavailable projection. It never acquires a Lease, creates an Attempt,
+or asks an LLM to infer scheduling intent.
+
 ## Runtime capability policy
 
 `runtime/capabilities.ts` is the closed, provider-independent capability
