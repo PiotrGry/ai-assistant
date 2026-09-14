@@ -83,6 +83,23 @@ export {
   type GitHubIssueRoundTripRequest,
 } from "./github/issue-round-trip.js";
 export {
+  GITHUB_PROJECT_FIELD_NAMES,
+  GitHubProjectSchemaResolver,
+  GitHubProjectSynchronizer,
+  projectFailureFromGitHub,
+  type GitHubProjectField,
+  type GitHubProjectFieldName,
+  type GitHubProjectItem,
+  type GitHubProjectMetadata,
+  type GitHubProjectResult,
+  type GitHubProjectSchema,
+  type GitHubProjectSchemaResolverOptions,
+  type GitHubProjectSelectFieldName,
+  type GitHubProjectSyncOutcome,
+  type GitHubProjectSynchronizerOptions,
+  type GitHubProjectTransport,
+} from "./github/project-sync.js";
+export {
   GitHubActionsGateway,
   GitHubActionsWatcher,
   type GitHubActionsFailedJobReference,

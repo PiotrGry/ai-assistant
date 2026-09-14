@@ -227,3 +227,22 @@ idempotent, older sequences are marked `ignored`, and pending provider or
 missing-link failures can be replayed after restart. GitHub failures never
 roll back the runtime Task or Attempt, and only bounded, sanitized summaries,
 branch names, commits, and correlation IDs reach the Issue comment boundary.
+
+## GitHub Project metadata synchronization
+
+`GitHubProjectSchemaResolver` resolves the configured user or organization
+Project by owner and number, then caches the IDs for the supported fields:
+`Status`, `Priority`, `Worker`, `Area`, `Risk`, `Work Type`, and numeric
+`Queue Order`. Single-select options are mapped by their exact names; missing,
+duplicate, renamed, or incorrectly typed fields/options return `schema_drift`
+and invalidate the cache. `refresh()` performs an explicit bounded reload.
+
+`GitHubProjectSynchronizer` reads the Project item for an Issue, adds it when
+necessary, computes a desired-versus-observed diff, and submits only changed
+fields through the shared serial write queue. Stable idempotency keys make
+replays safe; an identical projection is `no_op`. A failed multi-field update
+is re-read and returned as `partial` with the fields already changed and still
+pending. Rate limits, uncertain mutations, missing items, invalid mappings,
+and provider failures remain explicit outcomes. The synchronizer does not
+store runtime Attempts, leases, checkpoints, or execution history in Project
+fields.
