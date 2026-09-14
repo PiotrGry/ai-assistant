@@ -99,14 +99,15 @@ export function validatePullRequest(value: ReleasePullRequestIdentity): ReleaseP
   const url = releaseText(value.url, "pull request URL", 2_048);
   if (!Number.isSafeInteger(value.number) || value.number <= 0) throw new Error("Pull request number is invalid.");
   const parsed = new URL(url);
-  if (parsed.protocol !== "https:" || parsed.hostname !== "github.com" || parsed.search !== "" || parsed.hash !== "") throw new Error("Pull request URL is invalid.");
+  if (parsed.protocol !== "https:" || parsed.hostname !== "github.com" || parsed.port !== "" || parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "" || !new RegExp(`^/[^/]+/[^/]+/pull/${String(value.number)}$`, "u").test(parsed.pathname)) throw new Error("Pull request URL is invalid.");
   return Object.freeze({ nodeId, number: value.number, url });
 }
 export function validateReleaseInput(input: ReleaseInput): ReleaseInput {
   releaseId(input.id);
   releaseText(input.repository, "repository");
-  releaseText(input.sourceBranch, "source branch");
-  releaseText(input.baseBranch, "base branch");
+  const sourceBranch = releaseText(input.sourceBranch, "source branch");
+  const baseBranch = releaseText(input.baseBranch, "base branch");
+  if (sourceBranch === baseBranch) throw new Error("Release source and base branches must differ.");
   releaseTimestamp(input.createdAt);
   return input;
 }
@@ -120,6 +121,7 @@ export function validateReleaseTaskInput(input: ReleaseTaskInput): ReleaseTaskIn
   return input;
 }
 export function validateTransition(input: ReleaseTransitionInput): ReleaseTransitionInput {
+  if (!RELEASE_STATES.includes(input.to)) throw new Error("Release state is invalid.");
   if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion <= 0) throw new Error("Release version is invalid.");
   releaseTimestamp(input.now);
   if (input.failureReason !== undefined) releaseText(input.failureReason, "failure reason", 1_000);

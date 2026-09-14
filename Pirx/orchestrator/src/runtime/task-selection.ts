@@ -4,6 +4,7 @@ import type { UtcTimestamp } from "./task-domain.js";
 export type DependencyProjectionState = "known" | "unknown";
 export const TASK_SELECTION_REASON_CODES = Object.freeze([
   "NOT_READY",
+  "NOT_QUEUED",
   "BLOCKED_BY_PREREQUISITE",
   "COOLDOWN_ACTIVE",
   "MISSING_CAPABILITY",
