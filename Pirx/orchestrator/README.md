@@ -144,3 +144,31 @@ PIRX_CLAUDE_EXECUTABLE=claude pnpm claude:round-trip
 It does not create or modify repositories, pull requests, workflows, tools,
 worktrees, commits, deployments, or MCP sessions. The temporary working
 directory is removed after every attempt.
+
+## Runtime Task and Attempt domain
+
+`runtime/task-domain.ts` contains the framework-free M2 domain boundary. A
+Task keeps one opaque ID across execution retries; each retry creates the next
+positive contiguous Attempt ordinal and never creates a second Task. Snapshots
+use serialization version `1`, canonical UTC timestamps, frozen arrays/objects,
+and validated opaque IDs.
+
+Task states and allowed transitions are:
+
+```text
+ready       -> in_progress | blocked | cancelled
+in_progress -> blocked | failed | completed | cancelled
+blocked     -> ready | in_progress | cancelled
+failed      -> ready | in_progress | cancelled
+completed   -> terminal
+cancelled   -> terminal
+```
+
+Attempts are `running` or `terminal`. A Task can have at most one running
+Attempt. Terminal results are `CODE_PUSHED`, `BLOCKED`, `FAILED`,
+`QUOTA_EXHAUSTED`, `CANCELLED`, and `UNKNOWN`; non-code-pushed results require
+a bounded blocking reason, while `CODE_PUSHED` requires a final commit. Task
+completion is explicit and requires the Attempt ID, final commit, and an
+evidence reference. `transitionTask`, `transitionAttempt`, `startInitialAttempt`
+and `retryTask` are pure functions: callers provide the expected current state
+and evaluation timestamp; no clock, persistence, provider, or network is read.
