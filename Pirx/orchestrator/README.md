@@ -235,6 +235,26 @@ same terminal update is idempotent; a conflicting replay returns `conflict`.
 or claim CI evidence by itself. The durable lifecycle remains independent of
 workers, Git resources, providers, and network calls.
 
+## Runtime Checkpoint contract
+
+`runtime/checkpoint.ts` defines version `1` of the provider-independent
+Checkpoint boundary. A Checkpoint carries Task/previous-Attempt provenance,
+trigger, canonical UTC creation time, goal/state, remaining work, normalized
+changed files, findings, hypotheses, test summaries, evidence, blockers, the
+last action, and the next resume instruction. Repository, branch, worktree,
+and current commit are an all-or-none workspace group, so a checkpoint without
+an established workspace can omit all four fields.
+
+`createCheckpoint()` and `validateCheckpoint()` return a canonical frozen
+object or field-level typed violations. They reject unsupported versions,
+provider-specific secret-shaped fields, unsafe absolute/traversal paths,
+conflicting duplicate evidence, malformed timestamps/IDs, missing resume
+context, and bounded-size/count violations. File paths and evidence are
+deduplicated while preserving order; the full conversation transcript is not
+part of the schema. Serialization is bounded to 50,000 bytes, and the
+current implementation deliberately rejects forward versions until an
+explicit migration is added.
+
 ## Runtime Task-to-GitHub Issue linkage and lifecycle projection
 
 Tasks may carry one canonical GitHub Issue identity: owner, repository, Issue

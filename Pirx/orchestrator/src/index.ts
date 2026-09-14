@@ -199,6 +199,24 @@ export {
   type UtcTimestamp,
 } from "./runtime/task-domain.js";
 export {
+  CHECKPOINT_LIMITS,
+  CHECKPOINT_SCHEMA_VERSION,
+  CHECKPOINT_TRIGGERS,
+  createCheckpoint,
+  deserializeCheckpoint,
+  serializeCheckpoint,
+  validateCheckpoint,
+  type Checkpoint,
+  type CheckpointEvidence,
+  type CheckpointId,
+  type CheckpointInput,
+  type CheckpointResult,
+  type CheckpointTestResult,
+  type CheckpointTrigger,
+  type CheckpointViolation,
+  type CheckpointViolationCode,
+} from "./runtime/checkpoint.js";
+export {
   DEFAULT_RUNTIME_BUSY_TIMEOUT_MS,
   RUNTIME_STORAGE_SCHEMA_VERSION,
   AttemptRepository,
