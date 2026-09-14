@@ -54,7 +54,7 @@ test("bootstraps versioned WAL storage, repositories, restart durability, and cl
     assert.equal(created.outcome, "success");
     assert.equal(store.tasks.get(taskId).outcome, "success");
     assert.equal(store.tasks.list().outcome, "success");
-    const started = startInitialAttempt(makeTask(), [], { id: attemptId, worker: "pirx", provider: "test" }, t1);
+    const started = startInitialAttempt(makeTask(), [], { id: attemptId, worker: "pirx", provider: "test", branch: "task/storage" }, t1);
     if (!started.ok) throw new Error(started.error.message);
     assert.equal(store.attempts.create(started.value.attempt).outcome, "success");
     assert.equal(store.attempts.get(attemptId).outcome, "success");
@@ -168,7 +168,7 @@ test("persists reasoned terminal Tasks and rejects completion not backed by a st
     assert.equal(store.tasks.get(cancelledId).outcome, "success");
 
     assert.equal(store.tasks.create(makeTask()).outcome, "success");
-    const started = startInitialAttempt(makeTask(), [], { id: attemptId, worker: "pirx", provider: "test" }, t1);
+    const started = startInitialAttempt(makeTask(), [], { id: attemptId, worker: "pirx", provider: "test", branch: "task/storage" }, t1);
     if (!started.ok) throw new Error(started.error.message);
     assert.equal(store.tasks.update(started.value.task, { state: "ready", updatedAt: t0 }).outcome, "success");
     assert.equal(store.attempts.create(started.value.attempt).outcome, "success");

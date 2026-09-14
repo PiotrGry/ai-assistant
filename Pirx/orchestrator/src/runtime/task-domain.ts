@@ -63,6 +63,8 @@ export interface RunningAttemptSnapshot {
   readonly worktree?: string;
   readonly currentCommit?: string;
   readonly checkpointReference?: string;
+  readonly progress?: string;
+  readonly testSummary?: string;
 }
 
 export interface TerminalAttemptSnapshot extends Omit<RunningAttemptSnapshot, "state"> {
@@ -99,6 +101,8 @@ export interface StartAttemptInput {
   readonly worktree?: string;
   readonly currentCommit?: string;
   readonly checkpointReference?: string;
+  readonly progress?: string;
+  readonly testSummary?: string;
 }
 
 export interface RetryTaskInput extends StartAttemptInput {}
@@ -121,11 +125,23 @@ export type AttemptTransition =
   | {
       readonly type: "finish";
       readonly result: AttemptResult;
+      readonly branch?: string;
       readonly finalCommit?: string;
       readonly blockingReason?: string;
       readonly currentCommit?: string;
       readonly checkpointReference?: string;
+      readonly progress?: string;
+      readonly testSummary?: string;
     };
+
+export interface AttemptProgressUpdate {
+  readonly branch?: string;
+  readonly worktree?: string;
+  readonly currentCommit?: string;
+  readonly checkpointReference?: string;
+  readonly progress?: string;
+  readonly testSummary?: string;
+}
 
 export type DomainErrorCode =
   | "invalid_input"
@@ -341,7 +357,7 @@ function validateAttemptSnapshot(value: unknown): DomainResult<AttemptSnapshot> 
   if (typeof provider !== "string") return { ok: false, error: provider };
   if (!Number.isSafeInteger(value.ordinal) || (value.ordinal as number) <= 0) return error("invariant_violation", "ordinal must be a positive integer.", "ordinal");
   if (typeof startedAt !== "string") return { ok: false, error: startedAt };
-  const optionalFields: Array<[string, unknown, number]> = [["branch", value.branch, 512], ["worktree", value.worktree, 1_000], ["currentCommit", value.currentCommit, 256], ["checkpointReference", value.checkpointReference, 1_000]];
+  const optionalFields: Array<[string, unknown, number]> = [["branch", value.branch, 512], ["worktree", value.worktree, 1_000], ["currentCommit", value.currentCommit, 256], ["checkpointReference", value.checkpointReference, 1_000], ["progress", value.progress, 2_000], ["testSummary", value.testSummary, 2_000]];
   const normalized: Record<string, string> = {};
   for (const [field, raw, max] of optionalFields) {
     const parsed = safeOptionalText(raw, field, max);
@@ -358,7 +374,7 @@ function validateAttemptSnapshot(value: unknown): DomainResult<AttemptSnapshot> 
   const blocking = safeOptionalText(value.blockingReason, "blockingReason");
   if (!finalCommit.ok) return finalCommit;
   if (!blocking.ok) return blocking;
-  if (value.result === "CODE_PUSHED" && finalCommit.value === undefined) return error("invariant_violation", "CODE_PUSHED requires finalCommit.", "finalCommit");
+  if (value.result === "CODE_PUSHED" && (value.branch === undefined || finalCommit.value === undefined)) return error("invariant_violation", "CODE_PUSHED requires branch and finalCommit.", "finalCommit");
   if (value.result !== "CODE_PUSHED" && blocking.value === undefined) return error("invariant_violation", `${value.result} requires blockingReason.`, "blockingReason");
   return ok(freezeAttempt({ ...common, state: "terminal", result: value.result, endedAt, ...(finalCommit.value === undefined ? {} : { finalCommit: finalCommit.value }), ...(blocking.value === undefined ? {} : { blockingReason: blocking.value }) }));
 }
@@ -388,7 +404,7 @@ function makeRunningAttempt(taskId: TaskId, ordinal: number, input: StartAttempt
   if (typeof worker !== "string") return { ok: false, error: worker };
   if (typeof provider !== "string") return { ok: false, error: provider };
   const fields: Record<string, string> = {};
-  for (const [field, raw, max] of [["branch", input.branch, 512], ["worktree", input.worktree, 1_000], ["currentCommit", input.currentCommit, 256], ["checkpointReference", input.checkpointReference, 1_000]] as const) {
+  for (const [field, raw, max] of [["branch", input.branch, 512], ["worktree", input.worktree, 1_000], ["currentCommit", input.currentCommit, 256], ["checkpointReference", input.checkpointReference, 1_000], ["progress", input.progress, 2_000], ["testSummary", input.testSummary, 2_000]] as const) {
     const parsed = safeOptionalText(raw, field, max);
     if (!parsed.ok) return parsed;
     if (parsed.value !== undefined) fields[field] = parsed.value;
@@ -469,13 +485,26 @@ export function transitionAttempt(attempt: AttemptSnapshot, expectedState: Attem
   const blocking = safeOptionalText(transition.blockingReason, "blockingReason");
   const currentCommit = safeOptionalText(transition.currentCommit, "currentCommit", 256);
   const checkpoint = safeOptionalText(transition.checkpointReference, "checkpointReference", 1_000);
+  const progress = safeOptionalText(transition.progress, "progress", 2_000);
+  const testSummary = safeOptionalText(transition.testSummary, "testSummary", 2_000);
   if (!finalCommit.ok) return finalCommit;
   if (!blocking.ok) return blocking;
   if (!currentCommit.ok) return currentCommit;
   if (!checkpoint.ok) return checkpoint;
-  if (transition.result === "CODE_PUSHED" && finalCommit.value === undefined) return error("invariant_violation", "CODE_PUSHED requires finalCommit.", "finalCommit");
+  if (!progress.ok) return progress;
+  if (!testSummary.ok) return testSummary;
+  const branch = transition.branch ?? attempt.branch;
+  if (transition.result === "CODE_PUSHED" && (branch === undefined || finalCommit.value === undefined)) return error("invariant_violation", "CODE_PUSHED requires branch and finalCommit.", "finalCommit");
   if (transition.result !== "CODE_PUSHED" && blocking.value === undefined) return error("invariant_violation", `${transition.result} requires blockingReason.`, "blockingReason");
-  return ok(freezeAttempt({ ...attempt, state: "terminal", result: transition.result, endedAt: evaluatedAt, ...(finalCommit.value === undefined ? {} : { finalCommit: finalCommit.value }), ...(blocking.value === undefined ? {} : { blockingReason: blocking.value }), ...(currentCommit.value === undefined ? {} : { currentCommit: currentCommit.value }), ...(checkpoint.value === undefined ? {} : { checkpointReference: checkpoint.value }) }));
+  return ok(freezeAttempt({ ...attempt, state: "terminal", result: transition.result, endedAt: evaluatedAt, ...(branch === undefined ? {} : { branch }), ...(finalCommit.value === undefined ? {} : { finalCommit: finalCommit.value }), ...(blocking.value === undefined ? {} : { blockingReason: blocking.value }), ...(currentCommit.value === undefined ? {} : { currentCommit: currentCommit.value }), ...(checkpoint.value === undefined ? {} : { checkpointReference: checkpoint.value }), ...(progress.value === undefined ? {} : { progress: progress.value }), ...(testSummary.value === undefined ? {} : { testSummary: testSummary.value }) }));
+}
+
+export function recordAttemptProgress(attempt: RunningAttemptSnapshot, expectedState: AttemptState, update: AttemptProgressUpdate, evaluatedAt: UtcTimestamp): DomainResult<RunningAttemptSnapshot> {
+  if (attempt.state !== expectedState || expectedState !== "running") return error("invariant_violation", `Expected a running Attempt, found ${attempt.state}.`, "expectedState");
+  if (!laterThanOrEqual(evaluatedAt, attempt.startedAt)) return error("invalid_timestamp", "Progress evaluation time cannot precede Attempt start time.", "evaluatedAt");
+  const parsed = validateAttemptSnapshot(JSON.parse(JSON.stringify({ ...attempt, ...update })));
+  if (!parsed.ok) return parsed;
+  return parsed.value.state === "running" ? ok(parsed.value) : error("invariant_violation", "Progress can only update a running Attempt.");
 }
 
 export function serializeTask(task: TaskSnapshot): string {

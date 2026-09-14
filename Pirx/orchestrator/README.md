@@ -167,7 +167,7 @@ cancelled   -> terminal
 Attempts are `running` or `terminal`. A Task can have at most one running
 Attempt. Terminal results are `CODE_PUSHED`, `BLOCKED`, `FAILED`,
 `QUOTA_EXHAUSTED`, `CANCELLED`, and `UNKNOWN`; non-code-pushed results require
-a bounded blocking reason, while `CODE_PUSHED` requires a final commit.
+a bounded blocking reason, while `CODE_PUSHED` requires a branch and final commit.
 `blocked`, `failed`, and `cancelled` Tasks require a blocking reason; other
 states reject one. Task completion is explicit: it takes the Attempt ID, final
 commit, and an evidence reference, plus the Task's Attempts, and succeeds only
@@ -204,12 +204,36 @@ Migration inventory:
 3. Canonical Task-to-Issue links and durable lifecycle projections.
 4. Authenticated GitHub webhook deliveries and pending synchronization
    intents, keyed by delivery ID and retained without storing raw payloads.
+5. Attempt progress and test-summary evidence columns, with immutable Attempt
+   identity and compare-and-set updates for terminal transitions.
 
 `RuntimeSqliteStore.transaction()` is the reusable `BEGIN IMMEDIATE` boundary;
 successful work commits and typed failures roll back. `TaskRepository` and
 `AttemptRepository` expose create/get/list/update compare-and-set operations,
 returning `success`, `not_found`, `conflict`, `invalid_record`, or
 `storage_error` without leaking SQLite exceptions into orchestration code.
+
+## Runtime Attempt lifecycle recording
+
+`RuntimeSqliteStore.startAttempt()` atomically reads the Task and its Attempt
+history, chooses the first or next ordinal through the domain transition, moves
+the Task to `in_progress`, and inserts the Attempt in one SQLite transaction.
+The transaction rolls back if either write fails, so a retry cannot create an
+orphan Attempt or advance the Task without its evidence.
+
+`AttemptRepository.recordProgress()` records bounded progress, checkpoint,
+branch/worktree, current commit, and test-summary fields with the Attempt's
+expected `running` state and start timestamp. `currentByTask()` returns the
+single active Attempt, while `listByTask()` returns the complete ordered
+history. Mutable fields use compare-and-set predicates; Attempt identity,
+Task ID, ordinal, worker, provider, and start time are immutable.
+
+Terminal updates are explicit for every result (`CODE_PUSHED`, `BLOCKED`,
+`FAILED`, `QUOTA_EXHAUSTED`, `CANCELLED`, and `UNKNOWN`). Repeating the exact
+same terminal update is idempotent; a conflicting replay returns `conflict`.
+`CODE_PUSHED` requires branch and final commit, but does not complete the Task
+or claim CI evidence by itself. The durable lifecycle remains independent of
+workers, Git resources, providers, and network calls.
 
 ## Runtime Task-to-GitHub Issue linkage and lifecycle projection
 

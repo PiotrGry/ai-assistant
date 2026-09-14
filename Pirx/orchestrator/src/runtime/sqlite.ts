@@ -6,17 +6,25 @@ import { dirname, join, resolve } from "node:path";
 import {
   deserializeAttempt,
   deserializeTask,
+  recordAttemptProgress,
+  retryTask,
   serializeAttempt,
   serializeTask,
+  startInitialAttempt,
   type AttemptSnapshot,
+  type AttemptProgressUpdate,
   type AttemptState,
+  type RetriedTask,
+  type StartedAttempt,
+  type StartAttemptInput,
   type GitHubTaskReference,
   type TaskSnapshot,
   type TaskState,
+  type UtcTimestamp,
   utcTimestamp,
 } from "./task-domain.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 5 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 6 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -300,6 +308,10 @@ const MIGRATIONS: readonly string[] = [
     CREATE INDEX IF NOT EXISTS runtime_sync_intents_pending
       ON runtime_sync_intents (status, created_at, intent_id);
   `,
+  `
+    ALTER TABLE runtime_attempts ADD COLUMN progress TEXT;
+    ALTER TABLE runtime_attempts ADD COLUMN test_summary TEXT;
+  `,
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -363,7 +375,7 @@ function attemptFromRow(row: AttemptRow): StorageResult<AttemptSnapshot> {
       ...(row.result === null ? {} : { result: row.result }), ...(row.ended_at === null ? {} : { endedAt: row.ended_at }),
       ...(row.branch === null ? {} : { branch: row.branch }), ...(row.worktree === null ? {} : { worktree: row.worktree }),
       ...(row.current_commit === null ? {} : { currentCommit: row.current_commit }), ...(row.final_commit === null ? {} : { finalCommit: row.final_commit }),
-      ...(row.checkpoint_reference === null ? {} : { checkpointReference: row.checkpoint_reference }), ...(row.blocking_reason === null ? {} : { blockingReason: row.blocking_reason }),
+      ...(row.checkpoint_reference === null ? {} : { checkpointReference: row.checkpoint_reference }), ...(row.progress === null ? {} : { progress: row.progress }), ...(row.test_summary === null ? {} : { testSummary: row.test_summary }), ...(row.blocking_reason === null ? {} : { blockingReason: row.blocking_reason }),
     }));
     return parsed.ok ? success(parsed.value) : invalidRecord();
   } catch {
@@ -483,10 +495,10 @@ export class AttemptRepository {
       const validated = deserializeAttempt(serializeAttempt(attempt));
       if (!validated.ok) return invalidRecord();
       try {
-        this.#store.database.prepare(`INSERT INTO runtime_attempts (id, schema_version, task_id, ordinal, worker, provider, state, result, started_at, ended_at, branch, worktree, current_commit, final_commit, checkpoint_reference, blocking_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        this.#store.database.prepare(`INSERT INTO runtime_attempts (id, schema_version, task_id, ordinal, worker, provider, state, result, started_at, ended_at, branch, worktree, current_commit, final_commit, checkpoint_reference, progress, test_summary, blocking_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
           attempt.id, 1, attempt.taskId, attempt.ordinal, attempt.worker, attempt.provider, attempt.state, attempt.state === "terminal" ? attempt.result : null,
           attempt.startedAt, attempt.state === "terminal" ? attempt.endedAt : null, attempt.branch ?? null, attempt.worktree ?? null, attempt.currentCommit ?? null,
-          attempt.state === "terminal" ? attempt.finalCommit ?? null : null, attempt.checkpointReference ?? null, attempt.state === "terminal" ? attempt.blockingReason ?? null : null,
+          attempt.state === "terminal" ? attempt.finalCommit ?? null : null, attempt.checkpointReference ?? null, attempt.progress ?? null, attempt.testSummary ?? null, attempt.state === "terminal" ? attempt.blockingReason ?? null : null,
         );
         return success(validated.value);
       } catch (error: unknown) { return classifyStorageError(error); }
@@ -513,16 +525,39 @@ export class AttemptRepository {
     });
   }
 
+  public currentByTask(taskId: string): StorageResult<AttemptSnapshot> {
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_attempts WHERE task_id = ? AND state = 'running' ORDER BY ordinal DESC LIMIT 1").get(taskId) as AttemptRow | undefined;
+        return row === undefined ? notFound("No running Attempt was found for the Task.") : attemptFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public recordProgress(attemptId: string, expected: { readonly state: "running"; readonly startedAt: string }, update: AttemptProgressUpdate, evaluatedAt: UtcTimestamp): StorageResult<AttemptSnapshot> {
+    return this.#store.execute(() => {
+      const current = this.get(attemptId);
+      if (current.outcome !== "success") return current;
+      if (current.value.state !== expected.state || current.value.startedAt !== expected.startedAt) return conflict("Attempt compare-and-set failed.");
+      const next = recordAttemptProgress(current.value, expected.state, update, evaluatedAt);
+      if (!next.ok) return { outcome: "invalid_record", message: next.error.message };
+      return this.update(next.value, expected.state);
+    });
+  }
+
   public update(attempt: AttemptSnapshot, expectedState: AttemptState): StorageResult<AttemptSnapshot> {
     return this.#store.execute(() => {
       const validated = deserializeAttempt(serializeAttempt(attempt));
       if (!validated.ok) return invalidRecord();
+      const current = this.get(attempt.id);
+      if (current.outcome !== "success") return current;
+      if (current.value.taskId !== attempt.taskId || current.value.ordinal !== attempt.ordinal || current.value.worker !== attempt.worker || current.value.provider !== attempt.provider || current.value.startedAt !== attempt.startedAt) return conflict("Attempt identity and ordinal are immutable.");
+      if (current.value.state === "terminal" && attempt.state === "terminal") return serializeAttempt(current.value) === serializeAttempt(validated.value) ? success(current.value) : conflict("Terminal Attempt completion conflicts with the stored result or evidence.");
       try {
-        const result = this.#store.database.prepare(`UPDATE runtime_attempts SET schema_version = ?, task_id = ?, ordinal = ?, worker = ?, provider = ?, state = ?, result = ?, started_at = ?, ended_at = ?, branch = ?, worktree = ?, current_commit = ?, final_commit = ?, checkpoint_reference = ?, blocking_reason = ? WHERE id = ? AND state = ?`).run(
-          1, attempt.taskId, attempt.ordinal, attempt.worker, attempt.provider, attempt.state, attempt.state === "terminal" ? attempt.result : null,
-          attempt.startedAt, attempt.state === "terminal" ? attempt.endedAt : null, attempt.branch ?? null, attempt.worktree ?? null, attempt.currentCommit ?? null,
-          attempt.state === "terminal" ? attempt.finalCommit ?? null : null, attempt.checkpointReference ?? null, attempt.state === "terminal" ? attempt.blockingReason ?? null : null,
-          attempt.id, expectedState,
+        const result = this.#store.database.prepare(`UPDATE runtime_attempts SET state = ?, result = ?, ended_at = ?, branch = ?, worktree = ?, current_commit = ?, final_commit = ?, checkpoint_reference = ?, progress = ?, test_summary = ?, blocking_reason = ? WHERE id = ? AND state = ? AND task_id = ? AND ordinal = ? AND started_at = ?`).run(
+          attempt.state, attempt.state === "terminal" ? attempt.result : null, attempt.state === "terminal" ? attempt.endedAt : null, attempt.branch ?? null, attempt.worktree ?? null, attempt.currentCommit ?? null,
+          attempt.state === "terminal" ? attempt.finalCommit ?? null : null, attempt.checkpointReference ?? null, attempt.progress ?? null, attempt.testSummary ?? null, attempt.state === "terminal" ? attempt.blockingReason ?? null : null,
+          attempt.id, expectedState, attempt.taskId, attempt.ordinal, attempt.startedAt,
         );
         if (result.changes !== 1) return this.#store.exists("runtime_attempts", attempt.id) ? conflict("Attempt compare-and-set failed.") : notFound("Attempt was not found.");
         return success(validated.value);
@@ -743,6 +778,27 @@ export class RuntimeSqliteStore {
   public get database(): DatabaseSync {
     this.assertOpen();
     return this.#database;
+  }
+
+  public startAttempt(taskId: string, input: StartAttemptInput, evaluatedAt: UtcTimestamp): StorageResult<StartedAttempt | RetriedTask> {
+    return this.transaction(({ tasks, attempts }) => {
+      const task = tasks.get(taskId);
+      if (task.outcome !== "success") return task;
+      const history = attempts.listByTask(taskId);
+      if (history.outcome !== "success") return history;
+      const started = task.value.state === "ready"
+        ? startInitialAttempt(task.value, history.value, input, evaluatedAt)
+        : retryTask(task.value, history.value, input, evaluatedAt);
+      if (!started.ok) {
+        const recoverable = started.error.code === "invalid_transition" || started.error.code === "invariant_violation";
+        return { outcome: recoverable ? "conflict" as const : "invalid_record" as const, message: started.error.message };
+      }
+      const taskUpdate = tasks.update(started.value.task, { state: task.value.state, updatedAt: task.value.updatedAt });
+      if (taskUpdate.outcome !== "success") return taskUpdate;
+      const attempt = attempts.create(started.value.attempt);
+      if (attempt.outcome !== "success") return attempt;
+      return success(started.value);
+    });
   }
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
