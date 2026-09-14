@@ -58,8 +58,27 @@ import {
   type TaskSelectionRequest,
   type TaskSelectionResult,
 } from "./task-selection.js";
+import {
+  releaseId,
+  releaseText,
+  releaseTimestamp,
+  validateReleaseInput,
+  validateReleaseTaskInput,
+  validatePullRequest,
+  validateTransition,
+  RELEASE_TRANSITIONS,
+  type ReleaseInput,
+  type ReleaseId,
+  type ReleasePullRequestIdentity,
+  type ReleaseRecord,
+  type ReleaseRecoveryRecord,
+  type ReleaseState,
+  type ReleaseTaskInput,
+  type ReleaseTaskRecord,
+  type ReleaseTransitionInput,
+} from "./release.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 10 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 11 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -156,6 +175,7 @@ export interface RuntimeTransaction {
   readonly checkpoints: CheckpointRepository;
   readonly leases: LeaseRepository;
   readonly selection: TaskSelectionRepository;
+  readonly releases: ReleaseRepository;
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
 }
@@ -414,6 +434,44 @@ const MIGRATIONS: readonly string[] = [
       ON runtime_task_selection (queue_order, task_id);
     CREATE INDEX IF NOT EXISTS runtime_task_blockers_task
       ON runtime_task_blockers (task_id, prerequisite_task_id);
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_releases (
+      id TEXT PRIMARY KEY CHECK (length(trim(id)) > 0),
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      repository TEXT NOT NULL CHECK (length(trim(repository)) > 0),
+      source_branch TEXT NOT NULL CHECK (length(trim(source_branch)) > 0),
+      base_branch TEXT NOT NULL CHECK (length(trim(base_branch)) > 0),
+      state TEXT NOT NULL CHECK (state IN ('collecting', 'validating', 'ready_to_merge', 'merging', 'deploying', 'production_verification', 'deployed', 'failed', 'blocked', 'human_action_required', 'rolled_back')),
+      version INTEGER NOT NULL CHECK (version > 0),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      release_pr_node_id TEXT,
+      release_pr_number INTEGER CHECK (release_pr_number IS NULL OR release_pr_number > 0),
+      release_pr_url TEXT,
+      merge_revision TEXT,
+      deployment_provider_id TEXT,
+      production_version TEXT,
+      failure_reason TEXT,
+      CHECK ((release_pr_node_id IS NULL AND release_pr_number IS NULL AND release_pr_url IS NULL) OR (release_pr_node_id IS NOT NULL AND release_pr_number IS NOT NULL AND release_pr_url IS NOT NULL))
+    );
+    CREATE TABLE IF NOT EXISTS runtime_release_tasks (
+      release_id TEXT NOT NULL REFERENCES runtime_releases(id) ON DELETE CASCADE,
+      task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT,
+      attempt_id TEXT NOT NULL REFERENCES runtime_attempts(id) ON DELETE RESTRICT,
+      selected_revision TEXT NOT NULL CHECK (length(trim(selected_revision)) > 0),
+      feature_pr_node_id TEXT,
+      feature_pr_number INTEGER CHECK (feature_pr_number IS NULL OR feature_pr_number > 0),
+      feature_pr_url TEXT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (release_id, task_id),
+      UNIQUE (release_id, attempt_id),
+      CHECK ((feature_pr_node_id IS NULL AND feature_pr_number IS NULL AND feature_pr_url IS NULL) OR (feature_pr_node_id IS NOT NULL AND feature_pr_number IS NOT NULL AND feature_pr_url IS NOT NULL))
+    );
+    CREATE INDEX IF NOT EXISTS runtime_release_tasks_task_attempt
+      ON runtime_release_tasks (task_id, attempt_id, release_id);
+    CREATE INDEX IF NOT EXISTS runtime_releases_recovery
+      ON runtime_releases (state, updated_at, id);
   `,
 ];
 
@@ -1085,6 +1143,178 @@ export class TaskSelectionRepository {
   }
 }
 
+function releasePullRequestFromRow(row: Record<string, unknown>, prefix: "release_pr" | "feature_pr"): ReleasePullRequestIdentity | undefined {
+  const node = row[`${prefix}_node_id`];
+  const number = row[`${prefix}_number`];
+  const url = row[`${prefix}_url`];
+  if (node === null || node === undefined) return undefined;
+  if (typeof node !== "string" || typeof number !== "number" || typeof url !== "string") throw new Error("Release pull request identity is invalid.");
+  return validatePullRequest({ nodeId: node, number, url });
+}
+
+function releaseFromRow(row: Record<string, unknown>): StorageResult<ReleaseRecord> {
+  try {
+    if (typeof row.id !== "string" || typeof row.schema_version !== "number" || typeof row.repository !== "string" || typeof row.source_branch !== "string" || typeof row.base_branch !== "string" || typeof row.state !== "string" || !RELEASE_TRANSITIONS[row.state as ReleaseState] || typeof row.version !== "number" || typeof row.created_at !== "string" || typeof row.updated_at !== "string") return invalidRecord();
+    if (row.schema_version !== 1 || !Number.isSafeInteger(row.version) || row.version <= 0) return invalidRecord();
+    const state = row.state as ReleaseState;
+    releaseId(row.id);
+    const releasePullRequest = releasePullRequestFromRow(row, "release_pr");
+    return success({
+      schemaVersion: 1,
+      id: row.id as ReleaseId,
+      repository: releaseText(row.repository, "repository"),
+      sourceBranch: releaseText(row.source_branch, "source branch"),
+      baseBranch: releaseText(row.base_branch, "base branch"),
+      state,
+      version: row.version,
+      createdAt: releaseTimestamp(row.created_at),
+      updatedAt: releaseTimestamp(row.updated_at),
+      ...(releasePullRequest === undefined ? {} : { releasePullRequest }),
+      ...(row.merge_revision === null ? {} : { mergeRevision: releaseText(String(row.merge_revision), "merge revision") }),
+      ...(row.deployment_provider_id === null ? {} : { deploymentProviderId: releaseText(String(row.deployment_provider_id), "deployment provider ID") }),
+      ...(row.production_version === null ? {} : { productionVersion: releaseText(String(row.production_version), "production version") }),
+      ...(row.failure_reason === null ? {} : { failureReason: releaseText(String(row.failure_reason), "failure reason", 1_000) }),
+    });
+  } catch {
+    return invalidRecord();
+  }
+}
+
+function releaseTaskFromRow(row: Record<string, unknown>): StorageResult<ReleaseTaskRecord> {
+  try {
+    if (typeof row.release_id !== "string" || typeof row.task_id !== "string" || typeof row.attempt_id !== "string" || typeof row.selected_revision !== "string" || typeof row.created_at !== "string") return invalidRecord();
+    const featurePullRequest = releasePullRequestFromRow(row, "feature_pr");
+    const value: ReleaseTaskRecord = { releaseId: releaseId(row.release_id), taskId: row.task_id as TaskId, attemptId: row.attempt_id as AttemptId, selectedRevision: releaseText(row.selected_revision, "selected revision", 256), ...(featurePullRequest === undefined ? {} : { featurePullRequest }), createdAt: releaseTimestamp(row.created_at) };
+    validateReleaseTaskInput(value);
+    return success(value);
+  } catch {
+    return invalidRecord();
+  }
+}
+
+export class ReleaseRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public create(input: ReleaseInput): StorageResult<ReleaseRecord> {
+    try { validateReleaseInput(input); } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Release input is invalid." }; }
+    return this.#store.execute(() => {
+      try {
+        const existing = this.#store.database.prepare("SELECT * FROM runtime_releases WHERE id = ?").get(input.id) as Record<string, unknown> | undefined;
+        if (existing !== undefined) {
+          const current = releaseFromRow(existing);
+          if (current.outcome !== "success") return current;
+          return current.value.repository === input.repository && current.value.sourceBranch === input.sourceBranch && current.value.baseBranch === input.baseBranch && current.value.createdAt === input.createdAt ? current : conflict("Release ID conflicts with different immutable identity.");
+        }
+        this.#store.database.prepare("INSERT INTO runtime_releases (id, schema_version, repository, source_branch, base_branch, state, version, created_at, updated_at, release_pr_node_id, release_pr_number, release_pr_url, merge_revision, deployment_provider_id, production_version, failure_reason) VALUES (?, 1, ?, ?, ?, 'collecting', 1, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL)").run(input.id, releaseText(input.repository, "repository"), releaseText(input.sourceBranch, "source branch"), releaseText(input.baseBranch, "base branch"), input.createdAt, input.createdAt);
+        return this.get(input.id);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public get(id: string): StorageResult<ReleaseRecord> {
+    try { releaseId(id); } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Release ID is invalid." }; }
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_releases WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound("Release was not found.") : releaseFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public listTasks(releaseIdValue: string): StorageResult<readonly ReleaseTaskRecord[]> {
+    return this.#listMembership("release_id", releaseIdValue, "No ReleaseTask membership was found for the Release.");
+  }
+
+  public listByTaskAttempt(taskId: string, attemptId: string): StorageResult<readonly ReleaseTaskRecord[]> {
+    return this.#listMembership("task_id = ? AND attempt_id", taskId, "No ReleaseTask membership was found for the Task/Attempt pair.", attemptId);
+  }
+
+  public addTask(input: ReleaseTaskInput): StorageResult<ReleaseTaskRecord> {
+    try { validateReleaseTaskInput(input); } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "ReleaseTask input is invalid." }; }
+    return this.#store.execute(() => {
+      try {
+        const release = this.get(input.releaseId);
+        if (release.outcome !== "success") return release;
+        const task = this.#store.tasks.get(input.taskId);
+        if (task.outcome !== "success") return task;
+        const attempt = this.#store.attempts.get(input.attemptId);
+        if (attempt.outcome !== "success") return attempt;
+        if (attempt.value.taskId !== input.taskId) return conflict("ReleaseTask Attempt belongs to another Task.");
+        if (attempt.value.state !== "terminal" || attempt.value.result !== "CODE_PUSHED" || attempt.value.finalCommit !== input.selectedRevision) return conflict("ReleaseTask must select the terminal CODE_PUSHED Attempt revision.");
+        const existing = this.#store.database.prepare("SELECT * FROM runtime_release_tasks WHERE release_id = ? AND task_id = ?").get(input.releaseId, input.taskId) as Record<string, unknown> | undefined;
+        if (existing !== undefined) {
+          const current = releaseTaskFromRow(existing);
+          if (current.outcome !== "success") return current;
+          return JSON.stringify(current.value) === JSON.stringify(input) ? current : conflict("ReleaseTask membership conflicts with an existing selection.");
+        }
+        if (release.value.state !== "collecting") return conflict("ReleaseTask membership is immutable after validation starts.");
+        const feature = input.featurePullRequest;
+        this.#store.database.prepare("INSERT INTO runtime_release_tasks (release_id, task_id, attempt_id, selected_revision, feature_pr_node_id, feature_pr_number, feature_pr_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(input.releaseId, input.taskId, input.attemptId, input.selectedRevision, feature?.nodeId ?? null, feature?.number ?? null, feature?.url ?? null, input.createdAt);
+        return this.getTask(input.releaseId, input.taskId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public getTask(releaseIdValue: string, taskId: string): StorageResult<ReleaseTaskRecord> {
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_release_tasks WHERE release_id = ? AND task_id = ?").get(releaseIdValue, taskId) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound("ReleaseTask membership was not found.") : releaseTaskFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public transition(id: string, input: ReleaseTransitionInput): StorageResult<ReleaseRecord> {
+    try { validateTransition(input); } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Release transition is invalid." }; }
+    return this.#store.execute(() => {
+      const current = this.get(id);
+      if (current.outcome !== "success") return current;
+      if (current.value.version !== input.expectedVersion) return conflict("Release compare-and-set failed.");
+      if (current.value.state === input.to) return current;
+      if (!RELEASE_TRANSITIONS[current.value.state].includes(input.to)) return conflict(`Release cannot transition from ${current.value.state} to ${input.to}.`);
+      const requiresReason = input.to === "failed" || input.to === "blocked" || input.to === "human_action_required" || input.to === "rolled_back";
+      if (requiresReason && input.failureReason === undefined) return { outcome: "invalid_record", message: "Failure, block, human-action, and rollback transitions require a reason." };
+      const pullRequest = input.releasePullRequest ?? current.value.releasePullRequest;
+      const mergeRevision = input.mergeRevision ?? current.value.mergeRevision;
+      const deploymentProviderId = input.deploymentProviderId ?? current.value.deploymentProviderId;
+      const productionVersion = input.productionVersion ?? current.value.productionVersion;
+      const failureReason = input.failureReason ?? (requiresReason ? current.value.failureReason : undefined);
+      try {
+        const updated = this.#store.database.prepare("UPDATE runtime_releases SET state = ?, version = version + 1, updated_at = ?, release_pr_node_id = ?, release_pr_number = ?, release_pr_url = ?, merge_revision = ?, deployment_provider_id = ?, production_version = ?, failure_reason = ? WHERE id = ? AND state = ? AND version = ?").run(input.to, input.now, pullRequest?.nodeId ?? null, pullRequest?.number ?? null, pullRequest?.url ?? null, mergeRevision ?? null, deploymentProviderId ?? null, productionVersion ?? null, failureReason ?? null, id, current.value.state, input.expectedVersion);
+        if (updated.changes !== 1) return conflict("Release compare-and-set failed.");
+        return this.get(id);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public listRecoverable(): StorageResult<readonly ReleaseRecoveryRecord[]> {
+    return this.#store.execute(() => {
+      try {
+        const rows = this.#store.database.prepare("SELECT id, state, version, updated_at FROM runtime_releases WHERE state IN ('validating', 'ready_to_merge', 'merging', 'deploying', 'production_verification') ORDER BY updated_at, id").all() as Array<{ id: string; state: string; version: number; updated_at: string }>;
+        return success(Object.freeze(rows.map((row) => ({ releaseId: releaseId(row.id), state: row.state as ReleaseState, version: row.version, updatedAt: releaseTimestamp(row.updated_at) }))));
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public recover(id: string, expectedVersion: number, now: UtcTimestamp, reason: string): StorageResult<ReleaseRecord> {
+    return this.transition(id, { to: "human_action_required", expectedVersion, now, failureReason: reason });
+  }
+
+  #listMembership(field: "release_id" | "task_id = ? AND attempt_id", value: string, missingMessage: string, secondValue?: string): StorageResult<readonly ReleaseTaskRecord[]> {
+    if (typeof value !== "string" || value.trim().length === 0) return { outcome: "invalid_record", message: "Release lookup value is invalid." };
+    return this.#store.execute(() => {
+      try {
+        const query = field === "release_id" ? "SELECT * FROM runtime_release_tasks WHERE release_id = ? ORDER BY task_id" : "SELECT * FROM runtime_release_tasks WHERE task_id = ? AND attempt_id = ? ORDER BY release_id";
+        const rows = this.#store.database.prepare(query).all(...(secondValue === undefined ? [value] : [value, secondValue])) as Record<string, unknown>[];
+        const values: ReleaseTaskRecord[] = [];
+        for (const row of rows) { const parsed = releaseTaskFromRow(row); if (parsed.outcome !== "success") return parsed; values.push(parsed.value); }
+        return values.length === 0 ? notFound(missingMessage) : success(Object.freeze(values));
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+}
+
 export class ProjectionRepository {
   readonly #store: RuntimeSqliteStore;
   public constructor(store: RuntimeSqliteStore) { this.#store = store; }
@@ -1266,6 +1496,7 @@ export class RuntimeSqliteStore {
   readonly checkpoints: CheckpointRepository;
   readonly leases: LeaseRepository;
   readonly selection: TaskSelectionRepository;
+  readonly releases: ReleaseRepository;
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
 
@@ -1277,6 +1508,7 @@ export class RuntimeSqliteStore {
     this.checkpoints = new CheckpointRepository(this);
     this.leases = new LeaseRepository(this);
     this.selection = new TaskSelectionRepository(this);
+    this.releases = new ReleaseRepository(this);
     this.projections = new ProjectionRepository(this);
     this.webhooks = new WebhookRepository(this);
   }
@@ -1328,14 +1560,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, projections: this.projections, webhooks: this.webhooks }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, projections: this.projections, webhooks: this.webhooks });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;

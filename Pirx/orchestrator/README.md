@@ -337,6 +337,24 @@ ownership preserve an uncertain Lease for recovery rather than starting a
 second worker. Claude/Codex adapters, parallel scheduling, and worktree
 creation remain outside this boundary.
 
+## Durable Release aggregate
+
+SQLite schema version 11 stores a versioned `Release` aggregate and its
+`ReleaseTask` membership rows. A Release records repository and branch
+identity, optional release pull request, merge/deployment/production
+correlations, timestamps, and failure reasons. Each membership selects one
+terminal `CODE_PUSHED` Attempt and its exact revision; memberships are unique
+per Release/Task and Release/Attempt and cannot be replaced after validation
+starts.
+
+`ReleaseRepository` provides idempotent create and membership replay,
+referentially checked lookup, compare-and-set lifecycle transitions, and
+restart recovery for interrupted validating, merge, deployment, and
+production-verification states. Invalid, stale, duplicate, and out-of-order
+operations return explicit storage outcomes. The aggregate is deliberately
+limited to durable state: pull request, Actions, deployment, and production
+side effects remain outside this boundary.
+
 ## Runtime capability policy
 
 `runtime/capabilities.ts` is the closed, provider-independent capability
