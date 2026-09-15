@@ -88,7 +88,7 @@ import {
   type WorkspaceOwnershipRecord,
 } from "./workspace-ownership.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 12 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 13 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -189,6 +189,7 @@ export interface RuntimeTransaction {
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
   readonly workspaces: WorkspaceOwnershipRepository;
+  readonly pullRequests: PullRequestProvenanceRepository;
 }
 
 export class RuntimeStorageError extends Error {
@@ -514,6 +515,7 @@ const MIGRATIONS: readonly string[] = [
     CREATE INDEX IF NOT EXISTS runtime_workspace_recovery
       ON runtime_workspace_ownership (ownership_state, updated_at, attempt_id);
   `,
+  "CREATE TABLE IF NOT EXISTS runtime_pull_request_provenance (task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT, attempt_id TEXT PRIMARY KEY REFERENCES runtime_attempts(id) ON DELETE RESTRICT, repository TEXT NOT NULL CHECK (length(trim(repository)) > 0), issue_number INTEGER NOT NULL CHECK (issue_number > 0), issue_node_id TEXT NOT NULL CHECK (length(trim(issue_node_id)) > 0), issue_url TEXT NOT NULL CHECK (length(trim(issue_url)) > 0), worker_id TEXT NOT NULL CHECK (length(trim(worker_id)) > 0), head_branch TEXT NOT NULL CHECK (length(trim(head_branch)) > 0), base_branch TEXT NOT NULL CHECK (length(trim(base_branch)) > 0), observed_head_sha TEXT NOT NULL CHECK (length(trim(observed_head_sha)) > 0), pull_request_node_id TEXT NOT NULL UNIQUE CHECK (length(trim(pull_request_node_id)) > 0), pull_request_number INTEGER NOT NULL CHECK (pull_request_number > 0), pull_request_url TEXT NOT NULL CHECK (length(trim(pull_request_url)) > 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (task_id, attempt_id), UNIQUE (repository, pull_request_number)); CREATE INDEX IF NOT EXISTS runtime_pull_request_provenance_task_attempt ON runtime_pull_request_provenance (task_id, attempt_id); CREATE INDEX IF NOT EXISTS runtime_pull_request_provenance_pull ON runtime_pull_request_provenance (repository, pull_request_number);",
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -1678,6 +1680,71 @@ export class WorkspaceOwnershipRepository {
   }
 }
 
+export interface PullRequestProvenanceInput {
+  readonly taskId: TaskId;
+  readonly attemptId: AttemptId;
+  readonly repository: string;
+  readonly issueNumber: number;
+  readonly issueNodeId: string;
+  readonly issueUrl: string;
+  readonly workerId: string;
+  readonly headBranch: string;
+  readonly baseBranch: string;
+  readonly observedHeadSha: string;
+  readonly pullRequest: ReleasePullRequestIdentity;
+  readonly createdAt: UtcTimestamp;
+  readonly updatedAt: UtcTimestamp;
+}
+export interface PullRequestProvenanceRecord extends PullRequestProvenanceInput {}
+
+function provenanceFromRow(row: Record<string, unknown>): StorageResult<PullRequestProvenanceRecord> {
+  try {
+    if (typeof row.task_id !== "string" || typeof row.attempt_id !== "string" || typeof row.repository !== "string" || typeof row.issue_number !== "number" || typeof row.issue_node_id !== "string" || typeof row.issue_url !== "string" || typeof row.worker_id !== "string" || typeof row.head_branch !== "string" || typeof row.base_branch !== "string" || typeof row.observed_head_sha !== "string" || typeof row.pull_request_node_id !== "string" || typeof row.pull_request_number !== "number" || typeof row.pull_request_url !== "string" || typeof row.created_at !== "string" || typeof row.updated_at !== "string") return invalidRecord();
+    const pullRequest = validatePullRequest({ nodeId: row.pull_request_node_id, number: row.pull_request_number, url: row.pull_request_url });
+    if (row.issue_number <= 0 || !utcTimestamp(row.created_at).ok || !utcTimestamp(row.updated_at).ok) return invalidRecord();
+    return success({ taskId: row.task_id as TaskId, attemptId: row.attempt_id as AttemptId, repository: row.repository, issueNumber: row.issue_number, issueNodeId: row.issue_node_id, issueUrl: row.issue_url, workerId: row.worker_id, headBranch: row.head_branch, baseBranch: row.base_branch, observedHeadSha: row.observed_head_sha, pullRequest, createdAt: row.created_at as UtcTimestamp, updatedAt: row.updated_at as UtcTimestamp });
+  } catch { return invalidRecord(); }
+}
+
+export class PullRequestProvenanceRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public getByTaskAttempt(taskId: string, attemptId: string): StorageResult<PullRequestProvenanceRecord> { return this.#get("task_id = ? AND attempt_id = ?", taskId, attemptId); }
+  public getByPullRequest(repository: string, number: number): StorageResult<PullRequestProvenanceRecord> { return this.#get("repository = ? AND pull_request_number = ?", repository, number); }
+  public save(input: PullRequestProvenanceInput): StorageResult<PullRequestProvenanceRecord> {
+    try {
+      validatePullRequest(input.pullRequest);
+      if (input.repository.trim().length === 0 || input.workerId.trim().length === 0 || input.headBranch.trim().length === 0 || input.baseBranch.trim().length === 0 || input.observedHeadSha.trim().length === 0 || input.issueNodeId.trim().length === 0 || input.issueUrl.trim().length === 0 || !Number.isSafeInteger(input.issueNumber) || input.issueNumber <= 0 || !utcTimestamp(input.createdAt).ok || !utcTimestamp(input.updatedAt).ok) return invalidRecord();
+    } catch { return invalidRecord(); }
+    return this.#store.execute(() => {
+      const task = this.#store.tasks.get(input.taskId);
+      const attempt = this.#store.attempts.get(input.attemptId);
+      if (task.outcome !== "success") return { outcome: task.outcome, message: task.message };
+      if (attempt.outcome !== "success") return { outcome: attempt.outcome, message: attempt.message };
+      const reference = task.value.githubReference;
+      const taskRepository = reference === undefined ? undefined : reference.owner + "/" + reference.repository;
+      if (attempt.value.taskId !== input.taskId || attempt.value.state !== "terminal" || attempt.value.result !== "CODE_PUSHED" || attempt.value.worker !== input.workerId || attempt.value.branch !== input.headBranch || attempt.value.finalCommit !== input.observedHeadSha || reference === undefined || taskRepository !== input.repository || reference.issueNumber !== input.issueNumber || reference.nodeId !== input.issueNodeId || reference.url !== input.issueUrl) return conflict("Pull request provenance does not match the terminal Attempt and linked GitHub Issue.");
+      const existing = this.getByTaskAttempt(input.taskId, input.attemptId);
+      if (existing.outcome === "success") return JSON.stringify(existing.value) === JSON.stringify(input) ? existing : conflict("Pull request provenance conflicts with the stored relationship.");
+      if (existing.outcome !== "not_found") return existing;
+      try {
+        this.#store.database.prepare("INSERT INTO runtime_pull_request_provenance (task_id, attempt_id, repository, issue_number, issue_node_id, issue_url, worker_id, head_branch, base_branch, observed_head_sha, pull_request_node_id, pull_request_number, pull_request_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(input.taskId, input.attemptId, input.repository, input.issueNumber, input.issueNodeId, input.issueUrl, input.workerId, input.headBranch, input.baseBranch, input.observedHeadSha, input.pullRequest.nodeId, input.pullRequest.number, input.pullRequest.url, input.createdAt, input.updatedAt);
+        return this.getByTaskAttempt(input.taskId, input.attemptId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  #get(where: string, ...parameters: readonly (string | number)[]): StorageResult<PullRequestProvenanceRecord> {
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_pull_request_provenance WHERE " + where).get(...parameters) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound("Pull request provenance was not found.") : provenanceFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+}
+
 export class RuntimeSqliteStore {
   readonly #database: DatabaseSync;
   readonly #filename: string;
@@ -1692,6 +1759,7 @@ export class RuntimeSqliteStore {
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
   readonly workspaces: WorkspaceOwnershipRepository;
+  readonly pullRequests: PullRequestProvenanceRepository;
 
   private constructor(database: DatabaseSync, filename: string) {
     this.#database = database;
@@ -1705,6 +1773,7 @@ export class RuntimeSqliteStore {
     this.projections = new ProjectionRepository(this);
     this.webhooks = new WebhookRepository(this);
     this.workspaces = new WorkspaceOwnershipRepository(this);
+    this.pullRequests = new PullRequestProvenanceRepository(this);
   }
 
   public static open(options: RuntimeSqliteStoreOptions = {}): RuntimeSqliteStore {
@@ -1754,14 +1823,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;

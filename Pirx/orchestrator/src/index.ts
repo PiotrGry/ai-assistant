@@ -357,6 +357,7 @@ export {
   AttemptRepository,
   CheckpointRepository,
   LeaseRepository,
+  PullRequestProvenanceRepository,
   ProjectionRepository,
   ReleaseRepository,
   TaskSelectionRepository,
@@ -382,7 +383,23 @@ export {
   type StorageOutcome,
   type StorageResult,
   type TaskCompareAndSet,
+  type PullRequestProvenanceInput,
+  type PullRequestProvenanceRecord,
 } from "./runtime/sqlite.js";
+export {
+  GitHubPullRequestGateway,
+  type GitHubBranchHead,
+  type GitHubPullRequest,
+  type GitHubPullRequestCreateInput,
+  type GitHubPullRequestGatewayPort,
+  type GitHubPullRequestTransport,
+} from "./github/pull-request.js";
+export {
+  GitHubFeaturePullRequestService,
+  type FeaturePullRequestOutcome,
+  type FeaturePullRequestRequest,
+  type FeaturePullRequestResult,
+} from "./github/feature-pull-request.js";
 export {
   WORKSPACE_OWNERSHIP_LIMITS,
   WORKSPACE_OWNERSHIP_SCHEMA_VERSION,
