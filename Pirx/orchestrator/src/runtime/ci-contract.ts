@@ -55,8 +55,10 @@ export interface CiRunQueryContext {
 export interface CiRunByPullRequestQuery { readonly pullRequestNumber: number; readonly expectedHeadSha: string; readonly requiredWorkflowName?: string; }
 export type CiRunResult = { readonly outcome: CiResolutionOutcome; readonly run?: CiRun; readonly evidence?: CiFailureEvidence; readonly message: string; readonly polls: number };
 export type CiEvidenceResult = { readonly outcome: CiResolutionOutcome; readonly evidence?: CiFailureEvidence; readonly message: string };
+export type CiFailureLogResult = { readonly outcome: "success" | "unavailable" | "rate_limited" | "retryable" | "permanent" | "unknown"; readonly excerpt?: string; readonly message: string };
 export interface ProviderIndependentCiGateway {
   getRun(providerRunId: string, context: CiRunQueryContext): Promise<CiRunResult>;
   resolvePullRequest(query: CiRunByPullRequestQuery, context: CiRunQueryContext): Promise<CiRunResult>;
   getFailureEvidence(run: CiRun, context: CiRunQueryContext): Promise<CiEvidenceResult>;
+  getFailureLogExcerpt?(run: CiRun, context: CiRunQueryContext): Promise<CiFailureLogResult>;
 }

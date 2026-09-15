@@ -145,6 +145,7 @@ export {
   type CiConclusion,
   type CiEvidenceResult,
   type CiFailureEvidence,
+  type CiFailureLogResult,
   type CiJob,
   type CiJobEvidence,
   type CiJobIdentity,
@@ -381,6 +382,7 @@ export {
   AttemptRepository,
   CheckpointRepository,
   CiCorrelationRepository,
+  CiFailureEvidenceRepository,
   LeaseRepository,
   PullRequestProvenanceRepository,
   ProjectionRepository,
@@ -421,6 +423,16 @@ export {
   type CiCorrelationResult,
   type CiCorrelationState,
 } from "./runtime/ci-correlation.js";
+export {
+  CI_FAILURE_EVIDENCE_LIMITS,
+  CI_FAILURE_EVIDENCE_SCHEMA_VERSION,
+  CiFailureEvidenceService,
+  sanitizeCiEvidenceText,
+  type CiEvidenceCollectionOutcome,
+  type CiFailureEvidenceRecord,
+  type CiFailureEvidenceRequest,
+  type CiFailureEvidenceResult,
+} from "./runtime/ci-evidence.js";
 export {
   GitHubPullRequestGateway,
   type GitHubBranchHead,
