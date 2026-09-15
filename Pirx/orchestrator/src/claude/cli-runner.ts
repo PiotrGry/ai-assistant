@@ -37,6 +37,11 @@ export interface ClaudeRoundTripRequest {
   readonly maxStderrBytes?: number;
 }
 
+export interface ClaudeHandoffRequest extends ClaudeRoundTripRequest {
+  readonly handoffId: string;
+  readonly envelope: unknown;
+}
+
 export interface ClaudeRoundTripSuccess {
   readonly outcome: "success";
   readonly requestId: string;
@@ -52,6 +57,7 @@ export interface ClaudeRoundTripFailure {
   readonly message: string;
 }
 export type ClaudeRoundTripResult = ClaudeRoundTripSuccess | ClaudeRoundTripFailure;
+export type ClaudeHandoffResult = ClaudeRoundTripResult;
 
 export interface ClaudeSpawnOptions {
   readonly cwd: string;
@@ -126,6 +132,20 @@ export function buildClaudeArguments(requestId: string): readonly string[] {
     `Acknowledge the literal payload "hello world". Use requestId "${requestId}" exactly. Return only the structured response required by the JSON schema.`,
   ];
 }
+
+export function buildClaudeHandoffArguments(handoffId: string, envelope: unknown): readonly string[] {
+  const serialized = JSON.stringify(envelope);
+  if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > MAX_CLAUDE_OUTPUT_BYTES) {
+    throw new RangeError("Claude handoff envelope is too large or not JSON serializable.");
+  }
+  return [
+    "--restricted", "-p", "--tools", "", "--disallowedTools", "mcp__*",
+    "--permission-prompts", "none", "--disable-slash-commands",
+    "--no-session-persistence", "--max-turns", "1", "--output-format", "json",
+    "--json-schema", JSON.stringify(roundTripSchema(handoffId)),
+    `Acknowledge receipt of this structured failure handoff. Use handoff ID "${handoffId}" exactly. Return only the structured response required by the JSON schema. Payload: ${serialized}`,
+  ];
+}
 function buildEnvironment(source: NodeJS.ProcessEnv, additional: Readonly<Record<string, string | undefined>> | undefined): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   for (const name of CLAUDE_CLI_ENV_ALLOWLIST) {
@@ -186,7 +206,34 @@ export class ClaudeCodeCliRunner {
       return failure("process_error", requestId, startedAt, null);
     }
     try {
-      return await this.execute({ requestId, startedAt, workingDirectory, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes });
+      return await this.execute({ requestId, startedAt, workingDirectory, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: buildClaudeArguments(requestId) });
+    } finally {
+      await rm(workingDirectory, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  public async runHandoff(request: ClaudeHandoffRequest): Promise<ClaudeHandoffResult> {
+    const requestId = request.handoffId;
+    const startedAt = Date.now();
+    const timeoutMs = boundedInteger(request.timeoutMs, DEFAULT_CLAUDE_TIMEOUT_MS, MAX_CLAUDE_TIMEOUT_MS);
+    const maxStdoutBytes = boundedInteger(request.maxStdoutBytes, DEFAULT_CLAUDE_STDOUT_BYTES, MAX_CLAUDE_OUTPUT_BYTES);
+    const maxStderrBytes = boundedInteger(request.maxStderrBytes, DEFAULT_CLAUDE_STDERR_BYTES, MAX_CLAUDE_OUTPUT_BYTES);
+    if (requestId.trim().length === 0 || requestId.length > 256 || timeoutMs === undefined || maxStdoutBytes === undefined || maxStderrBytes === undefined) return failure("process_error", requestId, startedAt, null);
+    if (request.signal?.aborted === true) return failure("cancelled", requestId, startedAt, null);
+    let arguments_: readonly string[];
+    try {
+      arguments_ = buildClaudeHandoffArguments(requestId, request.envelope);
+    } catch {
+      return failure("invalid_output", requestId, startedAt, null);
+    }
+    let workingDirectory: string;
+    try {
+      workingDirectory = await mkdtemp(join(this.tempParentDirectory, "pirx-claude-handoff-"));
+    } catch {
+      return failure("process_error", requestId, startedAt, null);
+    }
+    try {
+      return await this.execute({ requestId, startedAt, workingDirectory, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: arguments_ });
     } finally {
       await rm(workingDirectory, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -196,6 +243,7 @@ export class ClaudeCodeCliRunner {
     readonly requestId: string; readonly startedAt: number; readonly workingDirectory: string;
     readonly signal: AbortSignal | undefined; readonly timeoutMs: number;
     readonly maxStdoutBytes: number; readonly maxStderrBytes: number;
+    readonly arguments: readonly string[];
   }): Promise<ClaudeRoundTripResult> {
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
@@ -213,7 +261,7 @@ export class ClaudeCodeCliRunner {
       terminationTimer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* already exited */ } }, this.terminationGraceMs);
     };
     try {
-      child = this.spawnProcess(this.executable, buildClaudeArguments(input.requestId), {
+      child = this.spawnProcess(this.executable, input.arguments, {
         cwd: input.workingDirectory,
         env: buildEnvironment(this.environment, this.additionalEnvironment),
         shell: false,

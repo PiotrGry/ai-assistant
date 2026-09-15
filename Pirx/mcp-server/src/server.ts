@@ -31,6 +31,13 @@ import { registerGitHubPocTool } from "./tools/github.js";
 import { registerGitHubIssueTools } from "./tools/github-issues.js";
 import { registerGitHubActionsWatchTool } from "./tools/github-actions.js";
 import { registerGitHubShipmentPocTool } from "./tools/github-shipment-poc.js";
+import { registerGitHubFailureHandoffPocTool } from "./tools/github-failure-handoff-poc.js";
+import { ClaudeCodeCliRunner } from "@pirx/orchestrator";
+import {
+  FileGitHubFailureHandoffPocStore,
+  type GitHubFailureHandoffPocGateway,
+  type GitHubFailureHandoffPocStore,
+} from "@pirx/orchestrator";
 
 export type GitHubPocTransport = GitHubIssueReadTransport & GitHubIssueMutationTransport;
 
@@ -44,6 +51,9 @@ export interface McpServerOptions {
   readonly githubShipmentPocConfig?: GitHubConfig;
   readonly githubShipmentPocTransport?: GitHubShipmentPocTransport;
   readonly githubShipmentPocStore?: GitHubShipmentPocStore;
+  readonly githubFailureHandoffPocConfig?: GitHubConfig;
+  readonly githubFailureHandoffPocGateway?: GitHubFailureHandoffPocGateway;
+  readonly githubFailureHandoffPocStore?: GitHubFailureHandoffPocStore;
 }
 
 export function createMcpServer(options: McpServerOptions = {}): McpServer {
@@ -131,6 +141,28 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
       ...(githubConfigurationError === undefined ? {} : { configurationError: githubConfigurationError }),
     });
   }
+  const failureHandoffEnabled = options.githubFailureHandoffPocConfig !== undefined || ["1", "true"].includes(environment.PIRX_GITHUB_FAILURE_HANDOFF_POC?.trim().toLowerCase() ?? "");
+  let failureHandoffConfig = options.githubFailureHandoffPocConfig;
+  if (failureHandoffEnabled && failureHandoffConfig === undefined && githubConfig !== undefined) {
+    failureHandoffConfig = { ...githubConfig, owner: "PiotrGry", repository: "zdrovena-reconciliation" };
+  }
+  const failureHandoffTransport = failureHandoffEnabled
+    ? options.githubFailureHandoffPocGateway ?? (failureHandoffConfig === undefined ? undefined : new GitHubShipmentPocGateway(new GitHubTransport(failureHandoffConfig), failureHandoffConfig))
+    : undefined;
+  const closeFailureHandoffTransport = failureHandoffTransport !== undefined && "close" in failureHandoffTransport && typeof failureHandoffTransport.close === "function"
+    ? failureHandoffTransport.close.bind(failureHandoffTransport)
+    : undefined;
+  if (failureHandoffEnabled) {
+    const stateFile = environment.PIRX_GITHUB_FAILURE_HANDOFF_POC_STATE_FILE?.trim() || join(environment.XDG_STATE_HOME?.trim() || join(homedir(), ".local", "state"), "pirx", "github-failure-handoff-poc.json");
+    registerGitHubFailureHandoffPocTool(server, {
+      config: failureHandoffConfig,
+      gateway: failureHandoffTransport,
+      store: options.githubFailureHandoffPocStore ?? new FileGitHubFailureHandoffPocStore(stateFile),
+      claude: new ClaudeCodeCliRunner(environment.PIRX_CLAUDE_EXECUTABLE === undefined ? {} : { executable: environment.PIRX_CLAUDE_EXECUTABLE }),
+      authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
+      ...(githubConfigurationError === undefined ? {} : { configurationError: githubConfigurationError }),
+    });
+  }
   if ((environment.PIRX_GITHUB_POC_ISSUE?.trim().length ?? 0) > 0) {
     registerGitHubPocTool(server, {
       issue: config.githubPocIssue,
@@ -142,13 +174,14 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
       mutator: githubMutator,
     });
   }
-  if (githubQueue !== undefined || shipmentQueue !== undefined) {
+  if (githubQueue !== undefined || shipmentQueue !== undefined || failureHandoffTransport !== undefined) {
     const close = server.close.bind(server);
     let closed: Promise<void> | undefined;
     server.close = () => {
       closed ??= (async () => {
         await githubQueue?.close({ drain: true });
         await shipmentQueue?.close({ drain: true });
+        await closeFailureHandoffTransport?.();
         await close();
       })();
       return closed;

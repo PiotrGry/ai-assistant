@@ -16,6 +16,7 @@ import {
 } from "../src/google-calendar/types.js";
 import { ObsidianVault } from "../src/obsidian/vaults.js";
 import { createMcpServer } from "../src/server.js";
+import type { GitHubFailureHandoffPocGateway } from "@pirx/orchestrator";
 
 const sampleEvent: CalendarEvent = {
   id: "event-1",
@@ -151,6 +152,37 @@ test("shipment POC is annotated as a mutating operation", async (context) => {
   assert.ok(tool);
   assert.equal(tool.annotations?.readOnlyHint, false);
   assert.equal(tool.annotations?.destructiveHint, true);
+});
+
+test("failed-CI handoff POC is listed as mutating and denies missing host authorization", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-failure-handoff-server-vault-"));
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = createMcpServer({
+    environment: {},
+    obsidianVault: new ObsidianVault(root),
+    calendar: fakeCalendar(),
+    githubFailureHandoffPocConfig: { token: "test", owner: "PiotrGry", repository: "zdrovena-reconciliation", apiUrl: "https://api.github.com", timeoutMs: 100 },
+    githubFailureHandoffPocGateway: {} as GitHubFailureHandoffPocGateway,
+  });
+  const client = new Client({ name: "pirx-test", version: "0.1.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  context.after(async () => {
+    await client.close();
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const listed = await client.listTools();
+  const tool = listed.tools.find((item) => item.name === "github_failed_ci_claude_handoff_poc");
+  assert.ok(tool);
+  assert.equal(tool.annotations?.readOnlyHint, false);
+  assert.equal(tool.annotations?.destructiveHint, true);
+  const denied = await client.callTool({
+    name: "github_failed_ci_claude_handoff_poc",
+    arguments: { eventId: "event", headBranch: "pirx/poc-failure-test", expectedHeadSha: "abcdef1234567890", requiredWorkflowName: "Develop — Fast Gate" },
+  });
+  assert.equal(denied.isError, true);
+  assert.match(JSON.stringify(denied.structuredContent), /authorization_required/u);
 });
 
 test("a failed Calendar tool does not kill MCP and a later call succeeds", async (context) => {

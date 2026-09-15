@@ -13,6 +13,7 @@ import {
   ClaudeCodeCliRunner,
   type ClaudeSpawn,
   buildClaudeArguments,
+  buildClaudeHandoffArguments,
 } from "../src/index.js";
 
 const FAKE_CLAUDE = `#!/usr/bin/env node
@@ -106,6 +107,23 @@ test("builds the restricted no-tools JSON-schema invocation", () => {
   const schema = JSON.parse(args[15] ?? "{}");
   assert.equal(schema.additionalProperties, false);
   assert.equal(schema.properties.requestId.const, "request-id");
+});
+
+test("runs one fresh restricted structured failure handoff with the same handoff ID", async () => {
+  const value = await fixture();
+  const capture = join(value.root, "capture.json");
+  try {
+    const handoffId = "handoff-192";
+    const args = buildClaudeHandoffArguments(handoffId, { schemaVersion: 1, evidence: { conclusion: "failure" } });
+    assert.equal(args.includes("--no-session-persistence"), true);
+    assert.equal(args.includes("--tools"), true);
+    const result = await new ClaudeCodeCliRunner({ executable: value.executable, tempParentDirectory: value.root, environment: { PATH: process.env.PATH, HOME: process.env.HOME }, additionalEnvironment: { PIRX_CAPTURE_FILE: capture }, requestIdFactory: () => "unused" }).runHandoff({ handoffId, envelope: { schemaVersion: 1, evidence: { conclusion: "failure" } } });
+    assert.equal(result.outcome, "success");
+    assert.equal(result.requestId, handoffId);
+    const captured = JSON.parse(await readFile(capture, "utf8")) as { args: string[] };
+    assert.equal(captured.args.includes("--no-session-persistence"), true);
+    assert.match(captured.args.at(-1) ?? "", /handoff-192/u);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
 });
 
 test("runs one structured round-trip in an empty temporary cwd with shell disabled and allowlisted env", async () => {
