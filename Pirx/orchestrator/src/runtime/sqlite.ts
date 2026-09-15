@@ -90,8 +90,9 @@ import {
 import type { CiCorrelationInput, CiCorrelationObservation, CiCorrelationRecord, CiCorrelationState } from "./ci-correlation.js";
 import type { CiFailureEvidenceRecord } from "./ci-evidence.js";
 import type { FeatureMergeRecord } from "./feature-merge.js";
+import type { ShipmentCycleRecord, ShipmentCycleState, ShipmentOutcome } from "./shipment-coordinator.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 16 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 19 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -196,6 +197,7 @@ export interface RuntimeTransaction {
   readonly ciCorrelations: CiCorrelationRepository;
   readonly ciEvidence: CiFailureEvidenceRepository;
   readonly featureMerges: FeatureMergeRepository;
+  readonly shipmentCycles: ShipmentCycleRepository;
 }
 
 export class RuntimeStorageError extends Error {
@@ -547,6 +549,38 @@ const MIGRATIONS: readonly string[] = [
     CREATE INDEX IF NOT EXISTS runtime_feature_merges_task_attempt ON runtime_feature_merges (task_id, attempt_id);
     CREATE INDEX IF NOT EXISTS runtime_feature_merges_repository_head ON runtime_feature_merges (repository, head_branch, expected_head_sha);
   `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_shipment_cycles (
+      task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT,
+      attempt_id TEXT PRIMARY KEY REFERENCES runtime_attempts(id) ON DELETE RESTRICT,
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      event_id TEXT NOT NULL UNIQUE CHECK (length(trim(event_id)) > 0),
+      correlation_id TEXT NOT NULL CHECK (length(trim(correlation_id)) > 0),
+      repository TEXT NOT NULL CHECK (length(trim(repository)) > 0),
+      head_branch TEXT NOT NULL CHECK (length(trim(head_branch)) > 0),
+      base_branch TEXT NOT NULL CHECK (length(trim(base_branch)) > 0),
+      expected_head_sha TEXT NOT NULL CHECK (length(trim(expected_head_sha)) > 0),
+      provider TEXT NOT NULL CHECK (length(trim(provider)) > 0),
+      workflow_name TEXT NOT NULL CHECK (length(trim(workflow_name)) > 0),
+      state TEXT NOT NULL CHECK (state IN ('started', 'pr_correlated', 'ci_failed', 'evidence_collected', 'retry_created', 'ci_succeeded', 'recovery_success', 'blocked', 'reconciliation_required')),
+      outcome TEXT,
+      pull_request_number INTEGER,
+      pull_request_url TEXT,
+      provider_run_id TEXT,
+      evidence_digest TEXT,
+      successor_attempt_id TEXT,
+      merge_sha TEXT,
+      message TEXT NOT NULL CHECK (length(trim(message)) > 0),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      version INTEGER NOT NULL CHECK (version > 0),
+      UNIQUE (task_id, event_id)
+    );
+    CREATE INDEX IF NOT EXISTS runtime_shipment_cycles_task_attempt ON runtime_shipment_cycles (task_id, attempt_id);
+    CREATE INDEX IF NOT EXISTS runtime_shipment_cycles_event ON runtime_shipment_cycles (event_id);
+  `,
+  "CREATE TABLE IF NOT EXISTS runtime_retry_pull_request_provenance (task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT, attempt_id TEXT PRIMARY KEY REFERENCES runtime_attempts(id) ON DELETE RESTRICT, repository TEXT NOT NULL CHECK (length(trim(repository)) > 0), issue_number INTEGER NOT NULL CHECK (issue_number > 0), issue_node_id TEXT NOT NULL CHECK (length(trim(issue_node_id)) > 0), issue_url TEXT NOT NULL CHECK (length(trim(issue_url)) > 0), worker_id TEXT NOT NULL CHECK (length(trim(worker_id)) > 0), head_branch TEXT NOT NULL CHECK (length(trim(head_branch)) > 0), base_branch TEXT NOT NULL CHECK (length(trim(base_branch)) > 0), observed_head_sha TEXT NOT NULL CHECK (length(trim(observed_head_sha)) > 0), pull_request_node_id TEXT NOT NULL CHECK (length(trim(pull_request_node_id)) > 0), pull_request_number INTEGER NOT NULL CHECK (pull_request_number > 0), pull_request_url TEXT NOT NULL CHECK (length(trim(pull_request_url)) > 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS runtime_retry_pull_request_task_attempt ON runtime_retry_pull_request_provenance (task_id, attempt_id); CREATE INDEX IF NOT EXISTS runtime_retry_pull_request_pull ON runtime_retry_pull_request_provenance (repository, pull_request_number);",
+  "CREATE TABLE IF NOT EXISTS runtime_retry_ci_correlations (task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT, attempt_id TEXT PRIMARY KEY REFERENCES runtime_attempts(id) ON DELETE RESTRICT, schema_version INTEGER NOT NULL CHECK (schema_version = 1), repository TEXT NOT NULL CHECK (length(trim(repository)) > 0), issue_number INTEGER NOT NULL CHECK (issue_number > 0), issue_node_id TEXT NOT NULL CHECK (length(trim(issue_node_id)) > 0), issue_url TEXT NOT NULL CHECK (length(trim(issue_url)) > 0), feature_pr_node_id TEXT NOT NULL CHECK (length(trim(feature_pr_node_id)) > 0), feature_pr_number INTEGER NOT NULL CHECK (feature_pr_number > 0), feature_pr_url TEXT NOT NULL CHECK (length(trim(feature_pr_url)) > 0), worker_id TEXT NOT NULL CHECK (length(trim(worker_id)) > 0), head_branch TEXT NOT NULL CHECK (length(trim(head_branch)) > 0), base_branch TEXT NOT NULL CHECK (length(trim(base_branch)) > 0), pushed_commit TEXT NOT NULL CHECK (length(trim(pushed_commit)) > 0), provider TEXT NOT NULL CHECK (length(trim(provider)) > 0), required_workflow_name TEXT NOT NULL CHECK (length(trim(required_workflow_name)) > 0), provider_run_id TEXT, provider_run_url TEXT, workflow_name TEXT, provider_pipeline_id TEXT, tested_revision TEXT, state TEXT NOT NULL CHECK (state IN ('pending', 'success', 'failed', 'cancelled', 'timed_out', 'not_found', 'ambiguous', 'stale', 'rate_limited', 'retryable', 'permanent', 'unknown', 'unavailable')), observed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, version INTEGER NOT NULL CHECK (version > 0)); CREATE INDEX IF NOT EXISTS runtime_retry_ci_task_attempt ON runtime_retry_ci_correlations (task_id, attempt_id); CREATE INDEX IF NOT EXISTS runtime_retry_ci_commit ON runtime_retry_ci_correlations (repository, pushed_commit); CREATE INDEX IF NOT EXISTS runtime_retry_ci_run ON runtime_retry_ci_correlations (provider, provider_run_id);",
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -1759,6 +1793,15 @@ export class PullRequestProvenanceRepository {
       const existing = this.getByTaskAttempt(input.taskId, input.attemptId);
       if (existing.outcome === "success") return JSON.stringify(existing.value) === JSON.stringify(input) ? existing : conflict("Pull request provenance conflicts with the stored relationship.");
       if (existing.outcome !== "not_found") return existing;
+      const prior = this.getByPullRequest(input.repository, input.pullRequest.number);
+      if (prior.outcome === "success") {
+        if (prior.value.taskId !== input.taskId || prior.value.repository !== input.repository || prior.value.headBranch !== input.headBranch || prior.value.baseBranch !== input.baseBranch || JSON.stringify(prior.value.pullRequest) !== JSON.stringify(input.pullRequest)) return conflict("Pull request is already durably linked to incompatible provenance.");
+        try {
+          this.#store.database.prepare("INSERT INTO runtime_retry_pull_request_provenance (task_id, attempt_id, repository, issue_number, issue_node_id, issue_url, worker_id, head_branch, base_branch, observed_head_sha, pull_request_node_id, pull_request_number, pull_request_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(input.taskId, input.attemptId, input.repository, input.issueNumber, input.issueNodeId, input.issueUrl, input.workerId, input.headBranch, input.baseBranch, input.observedHeadSha, input.pullRequest.nodeId, input.pullRequest.number, input.pullRequest.url, input.createdAt, input.updatedAt);
+          return this.getByTaskAttempt(input.taskId, input.attemptId);
+        } catch (error: unknown) { return classifyStorageError(error); }
+      }
+      if (prior.outcome !== "not_found") return prior;
       try {
         this.#store.database.prepare("INSERT INTO runtime_pull_request_provenance (task_id, attempt_id, repository, issue_number, issue_node_id, issue_url, worker_id, head_branch, base_branch, observed_head_sha, pull_request_node_id, pull_request_number, pull_request_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(input.taskId, input.attemptId, input.repository, input.issueNumber, input.issueNodeId, input.issueUrl, input.workerId, input.headBranch, input.baseBranch, input.observedHeadSha, input.pullRequest.nodeId, input.pullRequest.number, input.pullRequest.url, input.createdAt, input.updatedAt);
         return this.getByTaskAttempt(input.taskId, input.attemptId);
@@ -1769,7 +1812,7 @@ export class PullRequestProvenanceRepository {
   #get(where: string, ...parameters: readonly (string | number)[]): StorageResult<PullRequestProvenanceRecord> {
     return this.#store.execute(() => {
       try {
-        const row = this.#store.database.prepare("SELECT * FROM runtime_pull_request_provenance WHERE " + where).get(...parameters) as Record<string, unknown> | undefined;
+        const row = this.#store.database.prepare("SELECT * FROM (SELECT * FROM runtime_pull_request_provenance UNION ALL SELECT * FROM runtime_retry_pull_request_provenance) WHERE " + where + " LIMIT 1").get(...parameters) as Record<string, unknown> | undefined;
         return row === undefined ? notFound("Pull request provenance was not found.") : provenanceFromRow(row);
       } catch (error: unknown) { return classifyStorageError(error); }
     });
@@ -1855,7 +1898,14 @@ export class CiCorrelationRepository {
       try {
         this.#store.database.prepare("INSERT INTO runtime_ci_correlations (task_id, attempt_id, schema_version, repository, issue_number, issue_node_id, issue_url, feature_pr_node_id, feature_pr_number, feature_pr_url, worker_id, head_branch, base_branch, pushed_commit, provider, required_workflow_name, state, created_at, updated_at, version) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 1)").run(input.taskId, input.attemptId, input.repository, input.issueNumber, input.issueNodeId, input.issueUrl, input.featurePullRequest.nodeId, input.featurePullRequest.number, input.featurePullRequest.url, input.workerId, input.headBranch, input.baseBranch, input.pushedCommit, input.provider, input.requiredWorkflowName, input.createdAt, input.updatedAt);
         return this.getByTaskAttempt(input.taskId, input.attemptId);
-      } catch (error: unknown) { return classifyStorageError(error); }
+      } catch (error: unknown) {
+        const prior = this.getByPullRequest(input.repository, input.featurePullRequest.number);
+        if (prior.outcome !== "success" || prior.value.taskId !== input.taskId || prior.value.featurePullRequest.number !== input.featurePullRequest.number) return classifyStorageError(error);
+        try {
+          this.#store.database.prepare("INSERT INTO runtime_retry_ci_correlations (task_id, attempt_id, schema_version, repository, issue_number, issue_node_id, issue_url, feature_pr_node_id, feature_pr_number, feature_pr_url, worker_id, head_branch, base_branch, pushed_commit, provider, required_workflow_name, state, created_at, updated_at, version) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 1)").run(input.taskId, input.attemptId, input.repository, input.issueNumber, input.issueNodeId, input.issueUrl, input.featurePullRequest.nodeId, input.featurePullRequest.number, input.featurePullRequest.url, input.workerId, input.headBranch, input.baseBranch, input.pushedCommit, input.provider, input.requiredWorkflowName, input.createdAt, input.updatedAt);
+          return this.getByTaskAttempt(input.taskId, input.attemptId);
+        } catch (retryError: unknown) { return classifyStorageError(retryError); }
+      }
     });
   }
 
@@ -1868,7 +1918,8 @@ export class CiCorrelationRepository {
       const run = observation.run;
       if (current.state !== "pending") return JSON.stringify({ state: observation.state, run }) === JSON.stringify({ state: current.state, run: current.providerRunId === undefined ? undefined : { providerRunId: current.providerRunId } }) ? existing : conflict("CI correlation is already terminal and cannot be rewritten.");
       try {
-        this.#store.database.prepare("UPDATE runtime_ci_correlations SET provider_run_id = ?, provider_run_url = ?, workflow_name = ?, provider_pipeline_id = ?, tested_revision = ?, state = ?, observed_at = ?, updated_at = ?, version = version + 1 WHERE task_id = ? AND attempt_id = ? AND version = ? AND state = 'pending'").run(run?.providerRunId ?? null, run?.url ?? null, run?.name ?? null, run?.pipeline?.providerPipelineId ?? null, run?.testedRevision ?? null, observation.state, observation.observedAt, observation.observedAt, current.taskId, current.attemptId, current.version);
+        const table = this.#store.database.prepare("SELECT 1 AS found FROM runtime_ci_correlations WHERE task_id = ? AND attempt_id = ?").get(current.taskId, current.attemptId) === undefined ? "runtime_retry_ci_correlations" : "runtime_ci_correlations";
+        this.#store.database.prepare(`UPDATE ${table} SET provider_run_id = ?, provider_run_url = ?, workflow_name = ?, provider_pipeline_id = ?, tested_revision = ?, state = ?, observed_at = ?, updated_at = ?, version = version + 1 WHERE task_id = ? AND attempt_id = ? AND version = ? AND state = 'pending'`).run(run?.providerRunId ?? null, run?.url ?? null, run?.name ?? null, run?.pipeline?.providerPipelineId ?? null, run?.testedRevision ?? null, observation.state, observation.observedAt, observation.observedAt, current.taskId, current.attemptId, current.version);
         return this.getByTaskAttempt(taskId, attemptId);
       } catch (error: unknown) { return classifyStorageError(error); }
     });
@@ -1877,7 +1928,7 @@ export class CiCorrelationRepository {
   #get(where: string, ...parameters: readonly (string | number)[]): StorageResult<CiCorrelationRecord> {
     return this.#store.execute(() => {
       try {
-        const row = this.#store.database.prepare("SELECT * FROM runtime_ci_correlations WHERE " + where).get(...parameters) as Record<string, unknown> | undefined;
+        const row = this.#store.database.prepare("SELECT * FROM (SELECT * FROM runtime_ci_correlations UNION ALL SELECT * FROM runtime_retry_ci_correlations) WHERE " + where + " LIMIT 1").get(...parameters) as Record<string, unknown> | undefined;
         return row === undefined ? notFound("CI correlation was not found.") : ciCorrelationFromRow(row);
       } catch (error: unknown) { return classifyStorageError(error); }
     });
@@ -1976,6 +2027,60 @@ export class FeatureMergeRepository {
   }
 }
 
+function shipmentCycleFromRow(row: Record<string, unknown>): StorageResult<ShipmentCycleRecord> {
+  try {
+    const strings = ["task_id", "attempt_id", "event_id", "correlation_id", "repository", "head_branch", "base_branch", "expected_head_sha", "provider", "workflow_name", "state", "message", "created_at", "updated_at"];
+    const states: ReadonlySet<string> = new Set(["started", "pr_correlated", "ci_failed", "evidence_collected", "retry_created", "ci_succeeded", "recovery_success", "blocked", "reconciliation_required"]);
+    const outcomes: ReadonlySet<string> = new Set(["recovery_success", "retry_created", "retry_ci_failed", "pending_or_timeout", "stale_or_conflicting_evidence", "policy_blocked", "rate_limited", "reconciliation_required", "worker_unavailable", "worker_authentication_required", "worker_quota_exhausted", "repair_failed", "unknown", "invalid_request"]);
+    if (strings.some((key) => typeof row[key] !== "string" || (row[key] as string).trim().length === 0) || row.schema_version !== 1 || !states.has(row.state as string) || (row.outcome !== null && !outcomes.has(row.outcome as string)) || typeof row.version !== "number" || !Number.isSafeInteger(row.version) || row.version <= 0 || !utcTimestamp(row.created_at as string).ok || !utcTimestamp(row.updated_at as string).ok) return invalidRecord();
+    const optionalNumber = (value: unknown): number | undefined => value === null ? undefined : typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+    const optional = (value: unknown): string | undefined => value === null ? undefined : typeof value === "string" && value.trim().length > 0 ? value : undefined;
+    const pullRequestNumber = optionalNumber(row.pull_request_number);
+    if (row.pull_request_number !== null && pullRequestNumber === undefined) return invalidRecord();
+    return success({ schemaVersion: 1, taskId: row.task_id as TaskId, attemptId: row.attempt_id as AttemptId, eventId: row.event_id as string, correlationId: row.correlation_id as string, repository: row.repository as string, headBranch: row.head_branch as string, baseBranch: row.base_branch as string, expectedHeadSha: row.expected_head_sha as string, provider: row.provider as string, workflowName: row.workflow_name as string, state: row.state as ShipmentCycleState, ...(row.outcome === null ? {} : { outcome: row.outcome as ShipmentOutcome }), ...(pullRequestNumber === undefined ? {} : { pullRequestNumber }), ...(optional(row.pull_request_url) === undefined ? {} : { pullRequestUrl: optional(row.pull_request_url)! }), ...(optional(row.provider_run_id) === undefined ? {} : { providerRunId: optional(row.provider_run_id)! }), ...(optional(row.evidence_digest) === undefined ? {} : { evidenceDigest: optional(row.evidence_digest)! }), ...(optional(row.successor_attempt_id) === undefined ? {} : { successorAttemptId: optional(row.successor_attempt_id) as AttemptId }), ...(optional(row.merge_sha) === undefined ? {} : { mergeSha: optional(row.merge_sha)! }), message: row.message as string, createdAt: row.created_at as UtcTimestamp, updatedAt: row.updated_at as UtcTimestamp, version: row.version as number });
+  } catch { return invalidRecord(); }
+}
+
+export type ShipmentCyclePatch = Partial<Pick<ShipmentCycleRecord, "state" | "outcome" | "pullRequestNumber" | "pullRequestUrl" | "providerRunId" | "evidenceDigest" | "successorAttemptId" | "mergeSha" | "message">>;
+
+export class ShipmentCycleRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+  public getByEvent(eventId: string): StorageResult<ShipmentCycleRecord> { return this.#get("event_id = ?", eventId); }
+  public getByTaskAttempt(taskId: string, attemptId: string): StorageResult<ShipmentCycleRecord> { return this.#get("task_id = ? AND attempt_id = ?", taskId, attemptId); }
+  public start(record: ShipmentCycleRecord): StorageResult<ShipmentCycleRecord> {
+    if (record.schemaVersion !== 1 || record.state !== "started" || record.outcome !== undefined || record.taskId.trim().length === 0 || record.attemptId.trim().length === 0 || record.eventId.trim().length === 0 || record.correlationId.trim().length === 0 || record.repository.trim().length === 0 || record.headBranch.trim().length === 0 || record.baseBranch.trim().length === 0 || record.expectedHeadSha.trim().length === 0 || record.provider.trim().length === 0 || record.workflowName.trim().length === 0 || record.message.trim().length === 0 || record.version !== 1 || !utcTimestamp(record.createdAt).ok || !utcTimestamp(record.updatedAt).ok) return invalidRecord();
+    return this.#store.execute(() => {
+      const task = this.#store.tasks.get(record.taskId); const attempt = this.#store.attempts.get(record.attemptId);
+      if (task.outcome !== "success") return task;
+      if (attempt.outcome !== "success") return attempt;
+      if (attempt.value.taskId !== record.taskId) return conflict("Shipment cycle Attempt does not belong to the Task.");
+      const existingEvent = this.getByEvent(record.eventId);
+      if (existingEvent.outcome === "success") return JSON.stringify(existingEvent.value) === JSON.stringify(record) ? existingEvent : conflict("Shipment event already has a different durable identity.");
+      if (existingEvent.outcome !== "not_found") return existingEvent;
+      const existingAttempt = this.getByTaskAttempt(record.taskId, record.attemptId);
+      if (existingAttempt.outcome === "success") return conflict("Attempt already belongs to another shipment event.");
+      if (existingAttempt.outcome !== "not_found") return existingAttempt;
+      try {
+        this.#store.database.prepare("INSERT INTO runtime_shipment_cycles (task_id, attempt_id, schema_version, event_id, correlation_id, repository, head_branch, base_branch, expected_head_sha, provider, workflow_name, state, outcome, pull_request_number, pull_request_url, provider_run_id, evidence_digest, successor_attempt_id, merge_sha, message, created_at, updated_at, version) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'started', NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, 1)").run(record.taskId, record.attemptId, record.eventId, record.correlationId, record.repository, record.headBranch, record.baseBranch, record.expectedHeadSha, record.provider, record.workflowName, record.message, record.createdAt, record.updatedAt);
+        return this.getByTaskAttempt(record.taskId, record.attemptId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+  public advance(taskId: string, attemptId: string, patch: ShipmentCyclePatch, updatedAt: UtcTimestamp): StorageResult<ShipmentCycleRecord> {
+    if (!utcTimestamp(updatedAt).ok || patch.state === undefined || patch.message === undefined || patch.message.trim().length === 0) return invalidRecord();
+    return this.#store.execute(() => {
+      const current = this.getByTaskAttempt(taskId, attemptId); if (current.outcome !== "success") return current;
+      const values: Array<string | number | null> = []; const assignments: string[] = [];
+      const fields: Array<[keyof ShipmentCyclePatch, string]> = [["state", "state"], ["outcome", "outcome"], ["pullRequestNumber", "pull_request_number"], ["pullRequestUrl", "pull_request_url"], ["providerRunId", "provider_run_id"], ["evidenceDigest", "evidence_digest"], ["successorAttemptId", "successor_attempt_id"], ["mergeSha", "merge_sha"], ["message", "message"]];
+      for (const [key, column] of fields) { const value = patch[key]; if (value !== undefined) { assignments.push(`${column} = ?`); values.push(value as string | number); } }
+      assignments.push("updated_at = ?", "version = version + 1"); values.push(updatedAt, taskId, attemptId, current.value.version);
+      try { this.#store.database.prepare(`UPDATE runtime_shipment_cycles SET ${assignments.join(", ")} WHERE task_id = ? AND attempt_id = ? AND version = ?`).run(...values); return this.getByTaskAttempt(taskId, attemptId); } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+  #get(where: string, ...parameters: readonly (string | number)[]): StorageResult<ShipmentCycleRecord> { return this.#store.execute(() => { try { const row = this.#store.database.prepare("SELECT * FROM runtime_shipment_cycles WHERE " + where).get(...parameters) as Record<string, unknown> | undefined; return row === undefined ? notFound("Shipment cycle was not found.") : shipmentCycleFromRow(row); } catch (error: unknown) { return classifyStorageError(error); } }); }
+}
+
 export class RuntimeSqliteStore {
   readonly #database: DatabaseSync;
   readonly #filename: string;
@@ -1994,6 +2099,7 @@ export class RuntimeSqliteStore {
   readonly ciCorrelations: CiCorrelationRepository;
   readonly ciEvidence: CiFailureEvidenceRepository;
   readonly featureMerges: FeatureMergeRepository;
+  readonly shipmentCycles: ShipmentCycleRepository;
 
   private constructor(database: DatabaseSync, filename: string) {
     this.#database = database;
@@ -2011,6 +2117,7 @@ export class RuntimeSqliteStore {
     this.ciCorrelations = new CiCorrelationRepository(this);
     this.ciEvidence = new CiFailureEvidenceRepository(this);
     this.featureMerges = new FeatureMergeRepository(this);
+    this.shipmentCycles = new ShipmentCycleRepository(this);
   }
 
   public static open(options: RuntimeSqliteStoreOptions = {}): RuntimeSqliteStore {
@@ -2060,14 +2167,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;

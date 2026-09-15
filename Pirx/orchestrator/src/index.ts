@@ -401,6 +401,7 @@ export {
   CiCorrelationRepository,
   CiFailureEvidenceRepository,
   FeatureMergeRepository,
+  ShipmentCycleRepository,
   LeaseRepository,
   PullRequestProvenanceRepository,
   ProjectionRepository,
@@ -430,6 +431,7 @@ export {
   type TaskCompareAndSet,
   type PullRequestProvenanceInput,
   type PullRequestProvenanceRecord,
+  type ShipmentCyclePatch,
 } from "./runtime/sqlite.js";
 export {
   FEATURE_MERGE_LIMITS,
@@ -443,6 +445,15 @@ export {
   type FeatureMergeResult,
   type FeatureMergeState,
 } from "./runtime/feature-merge.js";
+export {
+  SHIPMENT_CYCLE_SCHEMA_VERSION,
+  ShipmentCycleCoordinator,
+  type ShipmentCycleRecord,
+  type ShipmentCycleRequest,
+  type ShipmentCycleResult,
+  type ShipmentCycleState,
+  type ShipmentOutcome,
+} from "./runtime/shipment-coordinator.js";
 export {
   CI_CORRELATION_SCHEMA_VERSION,
   CiCorrelationService,

@@ -100,7 +100,10 @@ export class GitHubFeaturePullRequestService {
   }
 
   async #reuseCandidate(request: FeaturePullRequestRequest, task: TaskSnapshot, attempt: AttemptSnapshot, candidate: GitHubPullRequest): Promise<FeaturePullRequestResult> {
-    if (candidate.body?.includes(marker(request.taskId, request.attemptId)) !== true) return generic("conflict", request, "An existing feature pull request has incompatible Pirx provenance.", { pullRequest: candidate });
+    const currentMarker = candidate.body?.includes(marker(request.taskId, request.attemptId)) === true;
+    const prior = this.#store.pullRequests.getByPullRequest(request.repository.owner + "/" + request.repository.repository, candidate.number);
+    const sameTaskRetry = prior.outcome === "success" && prior.value.taskId === request.taskId && prior.value.headBranch === attempt.branch && prior.value.baseBranch === request.baseBranch;
+    if (!currentMarker && !sameTaskRetry) return generic("conflict", request, "An existing feature pull request has incompatible Pirx provenance.", { pullRequest: candidate });
     if (!exactPull(candidate, attempt.branch!, request.baseBranch, request.expectedHeadSha)) return generic("stale_head", request, "Existing feature pull request does not point at the exact pushed revision.", { pullRequest: candidate });
     return this.#persistRemote(request, task, attempt, candidate, "reused");
   }
