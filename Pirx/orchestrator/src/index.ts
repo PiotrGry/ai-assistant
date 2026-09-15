@@ -136,6 +136,30 @@ export {
   type GitHubActionsWorkflowRun,
 } from "./github/ci-watch.js";
 export {
+  GitHubCiGatewayAdapter,
+} from "./github/ci-adapter.js";
+export {
+  CI_RUN_SCHEMA_VERSION,
+  type CiCheck,
+  type CiCheckIdentity,
+  type CiConclusion,
+  type CiEvidenceResult,
+  type CiFailureEvidence,
+  type CiJob,
+  type CiJobEvidence,
+  type CiJobIdentity,
+  type CiPipelineIdentity,
+  type CiResolutionOutcome,
+  type CiRun,
+  type CiRunByPullRequestQuery,
+  type CiRunIdentity,
+  type CiRunQueryContext,
+  type CiRunResult,
+  type CiRunStatus,
+  type CiStepReference,
+  type ProviderIndependentCiGateway,
+} from "./runtime/ci-contract.js";
+export {
   FileGitHubShipmentPocStore,
   GitHubShipmentPoc,
   GitHubShipmentPocGateway,

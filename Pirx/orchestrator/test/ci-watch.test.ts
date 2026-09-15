@@ -154,7 +154,7 @@ test("watcher distinguishes stale and ambiguous PR head matches", async () => {
   const clock = new FakeClock();
   const stale = new FakeGateway([], [run({ headSha: "sha-old" })]);
   const staleResult = await new GitHubActionsWatcher(stale, config, { clock }).watch({ pullRequestNumber: 189, expectedHeadSha: "sha-current", timeoutMs: 10 });
-  assert.equal(staleResult.outcome, "not_found");
+  assert.equal(staleResult.outcome, "stale");
 
   const ambiguous = new FakeGateway([], [run(), run({ id: 902 })]);
   const ambiguousResult = await new GitHubActionsWatcher(ambiguous, config, { clock }).watch({ pullRequestNumber: 189, expectedHeadSha: "sha-current", timeoutMs: 10 });

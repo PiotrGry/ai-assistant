@@ -33,6 +33,8 @@ export interface GitHubActionsWorkflowRun {
   readonly headBranch?: string;
   readonly pullRequestNumbers: readonly number[];
   readonly url: string;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
 }
 
 export interface GitHubActionsStepReference {
@@ -88,6 +90,8 @@ interface RestWorkflowRun {
   readonly head_branch?: unknown;
   readonly html_url?: unknown;
   readonly pull_requests?: unknown;
+  readonly created_at?: unknown;
+  readonly updated_at?: unknown;
 }
 
 interface RestWorkflowRunsPayload {
@@ -139,6 +143,12 @@ function url(value: unknown): string | undefined {
   return candidate !== undefined && /^https:\/\//u.test(candidate) ? candidate : undefined;
 }
 
+function timestamp(value: unknown): string | undefined {
+  const candidate = text(value, 64);
+  if (candidate === undefined || Number.isNaN(Date.parse(candidate))) return undefined;
+  return candidate;
+}
+
 const RUN_STATUSES: ReadonlySet<string> = new Set(["requested", "queued", "waiting", "pending", "in_progress", "completed"]);
 
 function runStatus(value: unknown): GitHubActionsRunStatus {
@@ -172,6 +182,8 @@ function mapRun(value: unknown): GitHubActionsWorkflowRun | undefined {
   const runNumber = positiveInteger(value.run_number);
   const conclusion = runConclusion(value.conclusion);
   const headBranch = text(value.head_branch);
+  const createdAt = timestamp(value.created_at);
+  const updatedAt = timestamp(value.updated_at);
   return {
     id,
     ...(name === undefined ? {} : { name }),
@@ -183,6 +195,8 @@ function mapRun(value: unknown): GitHubActionsWorkflowRun | undefined {
     ...(headBranch === undefined ? {} : { headBranch }),
     pullRequestNumbers: pullRequestNumbers(value.pull_requests),
     url: runUrl,
+    ...(createdAt === undefined ? {} : { createdAt }),
+    ...(updatedAt === undefined ? {} : { updatedAt }),
   };
 }
 
@@ -298,6 +312,7 @@ export type GitHubActionsWatchErrorOutcome =
   | "invalid_request"
   | "rate_limited"
   | "not_found"
+  | "stale"
   | "ambiguous"
   | "provider_error"
   | "unknown"
@@ -419,6 +434,9 @@ function mapProviderFailure(
   }
   if (result.error.code === "not_found") {
     return { outcome: "not_found", repository: `${config.owner}/${config.repository}`, ...requestIdentity(request), errorCode: "not_found", message: "The requested GitHub Actions run was not found.", polls, providerAttempts };
+  }
+  if (result.error.code === "validation_failed") {
+    return { outcome: "stale", repository: `${config.owner}/${config.repository}`, ...requestIdentity(request), errorCode: "stale", message: "The pull request has Actions runs, but none tests the requested head revision.", polls, providerAttempts };
   }
   if (result.error.code === "conflict") {
     return { outcome: "ambiguous", repository: `${config.owner}/${config.repository}`, ...requestIdentity(request), errorCode: "ambiguous", message: "Multiple GitHub Actions runs match the requested pull request head.", polls, providerAttempts };
@@ -576,8 +594,9 @@ export class GitHubActionsWatcher {
     if (result.outcome !== "success") return { result, attempts: 1 };
     const matches = result.value.filter((run) => run.headSha === request.expectedHeadSha && (request.requiredWorkflowName === undefined || run.name === request.requiredWorkflowName));
     if (matches.length === 0) {
+      const candidates = result.value.filter((run) => request.requiredWorkflowName === undefined || run.name === request.requiredWorkflowName);
       return {
-        result: failure("permanent_error", "not_found", request.requiredWorkflowName === undefined ? "No GitHub Actions run matches the requested pull request head." : "No GitHub Actions run matches the requested pull request head and required workflow.", result.correlationId, "not_accepted", result.response),
+        result: failure("permanent_error", candidates.length === 0 ? "not_found" : "validation_failed", candidates.length === 0 ? (request.requiredWorkflowName === undefined ? "No GitHub Actions run matches the requested pull request head." : "No GitHub Actions run matches the requested pull request head and required workflow.") : "An Actions run exists for the pull request, but it tests a different head revision.", result.correlationId, "not_accepted", result.response),
         attempts: 1,
       };
     }
