@@ -247,6 +247,7 @@ export {
   buildClaudeArguments,
   buildClaudeHandoffArguments,
   buildClaudeStructuredArguments,
+  buildClaudeWorkerArguments,
   ClaudeCodeCliRunner,
   type ClaudeCodeCliRunnerOptions,
   type ClaudeHandoffRequest,
@@ -262,6 +263,22 @@ export {
   type ClaudeSpawn,
   type ClaudeSpawnOptions,
 } from "./claude/cli-runner.js";
+export {
+  CLAUDE_CODE_WORKER_PROFILE_LIMITS,
+  CLAUDE_CODE_WORKER_PROFILE_SCHEMA_VERSION,
+  CODE_WORKER_CAPABILITIES,
+  buildClaudeCodeWorkerProfile,
+  buildWorkerResultSchema,
+  type ClaudeCodeRepositoryPolicy,
+  type ClaudeCodeWorkerProfile,
+  type ClaudeCodeWorkerProfileResult,
+  type CodeWorkerCapability,
+} from "./claude/worker-profile.js";
+export {
+  GitWorkerStateVerifier,
+  type WorkerGitStateVerification,
+  type WorkerGitStateVerifier,
+} from "./claude/git-state.js";
 export {
   ClaudeCodeProcessAdapter,
   createClaudeCodeProcessAdapter,

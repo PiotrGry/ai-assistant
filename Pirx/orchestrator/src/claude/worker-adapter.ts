@@ -15,9 +15,16 @@ import {
   type WorkerRequest,
   type WorkerResult,
 } from "../runtime/worker-contract.js";
+import { realpath } from "node:fs/promises";
+import {
+  buildClaudeCodeWorkerProfile,
+  buildWorkerResultSchema,
+  type ClaudeCodeRepositoryPolicy,
+} from "./worker-profile.js";
+import { GitWorkerStateVerifier, type WorkerGitStateVerifier } from "./git-state.js";
 
 export interface ClaudeStructuredRunner {
-  runStructured(request: { readonly requestId: string; readonly cwd: string; readonly prompt: string; readonly responseSchema: unknown; readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly maxStdoutBytes?: number; readonly maxStderrBytes?: number }): Promise<ClaudeStructuredResult>;
+  runStructured(request: { readonly requestId: string; readonly cwd: string; readonly prompt: string; readonly responseSchema: unknown; readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly maxStdoutBytes?: number; readonly maxStderrBytes?: number; readonly workerProfile?: import("./worker-profile.js").ClaudeCodeWorkerProfile }): Promise<ClaudeStructuredResult>;
 }
 
 export interface ClaudeCodeInputSource {
@@ -33,6 +40,8 @@ export interface ClaudeCodeAdapterOptions {
   readonly inputSource: ClaudeCodeInputSource;
   readonly promptRenderer: ClaudeCodePromptRenderer;
   readonly responseSchema?: unknown;
+  readonly repositoryPolicy?: ClaudeCodeRepositoryPolicy;
+  readonly gitStateVerifier?: WorkerGitStateVerifier;
 }
 
 export type ClaudeCodeProcessResult =
@@ -51,12 +60,16 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
   readonly #inputSource: ClaudeCodeInputSource;
   readonly #promptRenderer: ClaudeCodePromptRenderer;
   readonly #responseSchema: unknown;
+  readonly #repositoryPolicy: ClaudeCodeRepositoryPolicy | undefined;
+  readonly #gitStateVerifier: WorkerGitStateVerifier | undefined;
 
   public constructor(options: ClaudeCodeAdapterOptions) {
     this.#runner = options.runner ?? new ClaudeCodeCliRunner();
     this.#inputSource = options.inputSource;
     this.#promptRenderer = options.promptRenderer;
     this.#responseSchema = options.responseSchema ?? DEFAULT_RESPONSE_SCHEMA;
+    this.#repositoryPolicy = options.repositoryPolicy;
+    this.#gitStateVerifier = options.repositoryPolicy === undefined ? undefined : options.gitStateVerifier ?? new GitWorkerStateVerifier();
   }
 
   public async run(request: unknown, signal: AbortSignal): Promise<ClaudeCodeProcessResult> {
@@ -64,13 +77,22 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     const parsedRequest = validateWorkerRequest(request);
     if (!parsedRequest.ok) return failure("invalid_request", "unknown", "Worker request is invalid before Claude process invocation.");
     const value = parsedRequest.value;
+    let workerProfile;
+    if (this.#repositoryPolicy !== undefined) {
+      let canonicalWorktree: string;
+      try { canonicalWorktree = await realpath(value.workspace.worktree); } catch { return failure("invalid_input", value.correlationId, "Assigned worker worktree is not accessible."); }
+      if (canonicalWorktree !== this.#repositoryPolicy.assignedWorktree) return failure("invalid_input", value.correlationId, "Assigned worker worktree is not the configured canonical worktree.");
+      const profile = buildClaudeCodeWorkerProfile(value, this.#repositoryPolicy);
+      if (!profile.ok) return failure("invalid_input", value.correlationId, "Worker capability or repository policy is invalid.");
+      workerProfile = profile.value;
+    }
     const input = this.#inputSource.create(value);
     if (!input.ok) return failure("invalid_input", value.correlationId, "Claude input could not be built from durable state.");
     if (input.value.taskId !== value.taskId || input.value.attemptId !== value.attemptId || input.value.correlationId !== value.correlationId || input.value.workspace.worktree !== value.workspace.worktree || input.value.workspace.branch !== value.workspace.branch) return failure("invalid_input", value.correlationId, "Claude input is not bound to the assigned worker request.");
     let prompt: string;
     try { prompt = this.#promptRenderer.render(input.value); } catch { return failure("invalid_input", value.correlationId, "Claude prompt rendering failed before process invocation."); }
     if (prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > 64 * 1024 || SECRET_PATTERN.test(prompt)) return failure("invalid_input", value.correlationId, "Claude prompt is invalid or contains forbidden sensitive material.");
-    const result = await this.#runner.runStructured({ requestId: value.correlationId, cwd: value.workspace.worktree, prompt, responseSchema: this.#responseSchema, signal, timeoutMs: value.limits.timeoutMs, maxStdoutBytes: value.limits.maxOutputBytes, maxStderrBytes: value.limits.maxErrorBytes });
+    const result = await this.#runner.runStructured({ requestId: value.correlationId, cwd: value.workspace.worktree, prompt, responseSchema: this.#repositoryPolicy === undefined ? this.#responseSchema : buildWorkerResultSchema(value), ...(workerProfile === undefined ? {} : { workerProfile }), signal, timeoutMs: value.limits.timeoutMs, maxStdoutBytes: value.limits.maxOutputBytes, maxStderrBytes: value.limits.maxErrorBytes });
     if (result.outcome !== "success") return result;
     return { outcome: "success", requestId: result.requestId, structuredOutput: result.structuredOutput, durationMs: Math.max(0, Date.now() - startedAt), exitCode: 0 };
   }
@@ -79,7 +101,12 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     const processResult = await this.run(request, signal);
     if (processResult.outcome !== "success") throw new Error("Claude process did not produce a worker result.");
     const result = validateWorkerResult(processResult.structuredOutput, request);
-    if (result.ok && !SECRET_PATTERN.test(JSON.stringify(result.value))) return result.value;
+    if (result.ok && SECRET_PATTERN.test(JSON.stringify(result.value))) throw new Error("Claude worker result contains forbidden sensitive material.");
+    if (result.ok && result.value.outcome === "CODE_PUSHED" && this.#repositoryPolicy !== undefined && this.#gitStateVerifier !== undefined) {
+      const verified = await this.#gitStateVerifier.verify(request, result.value, this.#repositoryPolicy);
+      if (!verified.ok) throw new Error("Worker Git state did not match the assigned result.");
+    }
+    if (result.ok) return result.value;
     throw new Error("Claude process returned an invalid worker result.");
   }
 }

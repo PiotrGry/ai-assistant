@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
+import type { ClaudeCodeWorkerProfile } from "./worker-profile.js";
+
 export const CLAUDE_ROUND_TRIP_OUTCOMES = [
   "success",
   "claude_not_installed",
@@ -46,6 +48,7 @@ export interface ClaudeStructuredRequest extends ClaudeRoundTripRequest {
   readonly cwd: string;
   readonly prompt: string;
   readonly responseSchema: unknown;
+  readonly workerProfile?: ClaudeCodeWorkerProfile;
 }
 
 export interface ClaudeRoundTripSuccess {
@@ -164,6 +167,15 @@ export function buildClaudeStructuredArguments(requestId: string, prompt: string
     "--json-schema", schema, prompt,
   ];
 }
+export function buildClaudeWorkerArguments(requestId: string, prompt: string, responseSchema: unknown, profile: ClaudeCodeWorkerProfile): readonly string[] {
+  const schema = JSON.stringify(responseSchema);
+  if (schema === undefined || Buffer.byteLength(schema, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || profile.permissionMode !== "dontAsk" || !Number.isSafeInteger(profile.maxTurns) || profile.maxTurns <= 1 || profile.maxTurns > 32 || profile.allowedTools.some((value) => /[\u0000-\u001f\u007f;&|<>`$\\]/u.test(value)) || profile.disallowedTools.some((value) => /[\u0000-\u001f\u007f]/u.test(value)) || JSON.stringify(profile).includes("bypassPermissions")) throw new RangeError("Claude code-worker profile is unsafe or invalid.");
+  const arguments_: string[] = ["--restricted", "-p", "--tools", profile.tools.join(",")];
+  for (const tool of profile.allowedTools) arguments_.push("--allowedTools", tool);
+  for (const tool of profile.disallowedTools) arguments_.push("--disallowedTools", tool);
+  arguments_.push("--permission-mode", profile.permissionMode, "--permission-prompts", "none", "--disable-slash-commands", "--no-session-persistence", "--max-turns", String(profile.maxTurns), "--output-format", "json", "--json-schema", schema, prompt);
+  return Object.freeze(arguments_);
+}
 function buildEnvironment(source: NodeJS.ProcessEnv, additional: Readonly<Record<string, string | undefined>> | undefined): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   for (const name of CLAUDE_CLI_ENV_ALLOWLIST) {
@@ -269,7 +281,10 @@ export class ClaudeCodeCliRunner {
     catch { return failure("process_error", request.requestId, startedAt, null); }
     if (request.signal?.aborted === true) return failure("cancelled", request.requestId, startedAt, null);
     try {
-      return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: buildClaudeStructuredArguments(request.requestId, request.prompt, request.responseSchema), structuredOutput: true }) as ClaudeStructuredResult;
+      const arguments_ = request.workerProfile === undefined
+        ? buildClaudeStructuredArguments(request.requestId, request.prompt, request.responseSchema)
+        : buildClaudeWorkerArguments(request.requestId, request.prompt, request.responseSchema, request.workerProfile);
+      return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: arguments_, structuredOutput: true }) as ClaudeStructuredResult;
     } catch { return failure("process_error", request.requestId, startedAt, null); }
   }
 
