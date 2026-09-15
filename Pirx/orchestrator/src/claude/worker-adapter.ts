@@ -70,7 +70,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     let prompt: string;
     try { prompt = this.#promptRenderer.render(input.value); } catch { return failure("invalid_input", value.correlationId, "Claude prompt rendering failed before process invocation."); }
     if (prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > 64 * 1024 || SECRET_PATTERN.test(prompt)) return failure("invalid_input", value.correlationId, "Claude prompt is invalid or contains forbidden sensitive material.");
-    const result = await this.#runner.runStructured({ requestId: value.correlationId, cwd: value.workspace.worktree, prompt, responseSchema: this.#responseSchema, signal });
+    const result = await this.#runner.runStructured({ requestId: value.correlationId, cwd: value.workspace.worktree, prompt, responseSchema: this.#responseSchema, signal, timeoutMs: value.limits.timeoutMs, maxStdoutBytes: value.limits.maxOutputBytes, maxStderrBytes: value.limits.maxErrorBytes });
     if (result.outcome !== "success") return result;
     return { outcome: "success", requestId: result.requestId, structuredOutput: result.structuredOutput, durationMs: Math.max(0, Date.now() - startedAt), exitCode: 0 };
   }

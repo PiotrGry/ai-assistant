@@ -263,10 +263,11 @@ export class ClaudeCodeCliRunner {
     const maxStdoutBytes = boundedInteger(request.maxStdoutBytes, DEFAULT_CLAUDE_STDOUT_BYTES, MAX_CLAUDE_OUTPUT_BYTES);
     const maxStderrBytes = boundedInteger(request.maxStderrBytes, DEFAULT_CLAUDE_STDERR_BYTES, MAX_CLAUDE_OUTPUT_BYTES);
     if (request.requestId.trim().length === 0 || request.requestId.length > 256 || !isAbsolute(request.cwd) || timeoutMs === undefined || maxStdoutBytes === undefined || maxStderrBytes === undefined) return failure("process_error", request.requestId, startedAt, null);
-    if (request.signal?.aborted === true) return failure("cancelled", request.requestId, startedAt, null);
+    if (request.signal?.aborted) return failure("cancelled", request.requestId, startedAt, null);
     let cwd: string;
     try { cwd = await realpath(request.cwd); const info = await stat(cwd); if (!info.isDirectory()) return failure("process_error", request.requestId, startedAt, null); }
     catch { return failure("process_error", request.requestId, startedAt, null); }
+    if (request.signal?.aborted === true) return failure("cancelled", request.requestId, startedAt, null);
     try {
       return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: buildClaudeStructuredArguments(request.requestId, request.prompt, request.responseSchema), structuredOutput: true }) as ClaudeStructuredResult;
     } catch { return failure("process_error", request.requestId, startedAt, null); }
