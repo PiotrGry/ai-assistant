@@ -490,6 +490,20 @@ export {
   type WorkerExecutionOptions,
 } from "./runtime/worker-execution.js";
 export {
+  CLAUDE_INPUT_LIMITS,
+  CLAUDE_INPUT_SCHEMA_VERSION,
+  CLAUDE_RESPONSE_SCHEMA_VERSION,
+  createClaudeCodeInput,
+  serializeClaudeCodeInput,
+  validateClaudeCodeInput,
+  type ClaudeCodeInput,
+  type ClaudeInputRequest,
+  type ClaudeInputResult,
+  type ClaudeInputResumeSection,
+  type ClaudeInputViolation,
+  type ClaudeInputViolationCode,
+} from "./runtime/claude-input.js";
+export {
   WORKSPACE_PROVISION_LIMITS,
   WORKSPACE_PROVISION_SCHEMA_VERSION,
   GitWorkspaceCommandRunner,
