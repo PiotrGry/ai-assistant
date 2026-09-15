@@ -173,12 +173,12 @@ test("failed-CI handoff POC is listed as mutating and denies missing host author
   });
 
   const listed = await client.listTools();
-  const tool = listed.tools.find((item) => item.name === "github_failed_ci_claude_handoff_poc");
+  const tool = listed.tools.find((item) => item.name === "github_failed_ci_codex_handoff_poc");
   assert.ok(tool);
   assert.equal(tool.annotations?.readOnlyHint, false);
   assert.equal(tool.annotations?.destructiveHint, true);
   const denied = await client.callTool({
-    name: "github_failed_ci_claude_handoff_poc",
+    name: "github_failed_ci_codex_handoff_poc",
     arguments: { eventId: "event", headBranch: "pirx/poc-failure-test", expectedHeadSha: "abcdef1234567890", requiredWorkflowName: "Develop — Fast Gate" },
   });
   assert.equal(denied.isError, true);

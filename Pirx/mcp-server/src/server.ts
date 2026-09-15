@@ -32,7 +32,7 @@ import { registerGitHubIssueTools } from "./tools/github-issues.js";
 import { registerGitHubActionsWatchTool } from "./tools/github-actions.js";
 import { registerGitHubShipmentPocTool } from "./tools/github-shipment-poc.js";
 import { registerGitHubFailureHandoffPocTool } from "./tools/github-failure-handoff-poc.js";
-import { ClaudeCodeCliRunner } from "@pirx/orchestrator";
+import { CodexCliRunner } from "@pirx/orchestrator";
 import {
   FileGitHubFailureHandoffPocStore,
   type GitHubFailureHandoffPocGateway,
@@ -158,7 +158,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
       config: failureHandoffConfig,
       gateway: failureHandoffTransport,
       store: options.githubFailureHandoffPocStore ?? new FileGitHubFailureHandoffPocStore(stateFile),
-      claude: new ClaudeCodeCliRunner(environment.PIRX_CLAUDE_EXECUTABLE === undefined ? {} : { executable: environment.PIRX_CLAUDE_EXECUTABLE }),
+      codex: new CodexCliRunner(environment.PIRX_CODEX_EXECUTABLE === undefined ? {} : { executable: environment.PIRX_CODEX_EXECUTABLE }),
       authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
       ...(githubConfigurationError === undefined ? {} : { configurationError: githubConfigurationError }),
     });

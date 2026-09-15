@@ -10,7 +10,7 @@ import {
   GitHubFailureHandoffPoc,
   GitHubActionsWatcher,
   type GitHubConfig,
-  type GitHubFailureHandoffClaudeRunner,
+  type GitHubFailureHandoffCodexRunner,
   type GitHubFailureHandoffPocGateway,
   type GitHubFailureHandoffPocStore,
 } from "@pirx/orchestrator";
@@ -28,7 +28,7 @@ const inputSchema = z.object({
   maxFailedJobs: z.number().int().positive().max(10).optional(),
   maxFailedSteps: z.number().int().positive().max(20).optional(),
   maxLogBytes: z.number().int().positive().max(8_192).optional(),
-  claudeTimeoutMs: z.number().int().positive().max(120_000).optional(),
+  codexTimeoutMs: z.number().int().positive().max(120_000).optional(),
   correlationId: safeText.optional(),
 }).strict();
 
@@ -59,7 +59,7 @@ const outputSchema = z.object({
   pullRequest: z.object({ number: z.number().int().positive(), url: z.string().url(), headSha: z.string(), state: z.string(), merged: z.boolean() }).optional(),
   run: z.object({ id: z.number().int().positive(), name: z.string(), url: z.string().url(), headSha: z.string(), conclusion: z.string() }).optional(),
   evidence: evidence.optional(),
-  claudeReceipt: z.object({ handoffId: z.string(), outcome: z.string(), acknowledgement: z.string().optional() }).optional(),
+  codexReceipt: z.object({ handoffId: z.string(), outcome: z.string(), acknowledgement: z.string().optional() }).optional(),
   replayed: z.boolean(),
   updatedAt: z.string(),
 });
@@ -78,16 +78,16 @@ export function registerGitHubFailureHandoffPocTool(
     readonly config: GitHubConfig | undefined;
     readonly gateway: GitHubFailureHandoffPocGateway | undefined;
     readonly store: GitHubFailureHandoffPocStore;
-    readonly claude: GitHubFailureHandoffClaudeRunner;
+    readonly codex: GitHubFailureHandoffCodexRunner;
     readonly authorizationSecret: string | undefined;
     readonly configurationError?: string;
   },
 ): void {
   server.registerTool(
-    "github_failed_ci_claude_handoff_poc",
+    "github_failed_ci_codex_handoff_poc",
     {
-      title: "Run the controlled failed-CI Claude handoff POC",
-      description: "Create or reuse one controlled failure PR into develop, observe the exact named failed workflow, forward bounded sanitized evidence to one fresh restricted Claude Code session, and stop. This operation never merges, creates a release PR, dispatches workflows, or deploys.",
+      title: "Run the controlled failed-CI Codex handoff POC",
+      description: "Create or reuse one controlled failure PR into develop, observe the exact named failed workflow, forward bounded sanitized evidence to one fresh restricted Codex CLI session, and stop. This operation never merges, creates a release PR, dispatches workflows, or deploys.",
       inputSchema,
       outputSchema,
       annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: true },
@@ -95,11 +95,11 @@ export function registerGitHubFailureHandoffPocTool(
     async (input, context) => {
       const correlationId = input.correlationId ?? randomUUID();
       const handoffId = randomUUID();
-      const authorization = verifyHostAuthorization(options.authorizationSecret, context.mcpReq._meta, "github_failed_ci_claude_handoff_poc", input);
+      const authorization = verifyHostAuthorization(options.authorizationSecret, context.mcpReq._meta, "github_failed_ci_codex_handoff_poc", input);
       if (authorization === undefined) return structured(fallback(input, correlationId, handoffId, "authorization_required", "This failure handoff mutation must be authorized by the Pirx host for the exact event, branch, revision, workflow, and bounds.", "authorization_required"), true);
       if (options.config === undefined || options.gateway === undefined) return structured(fallback(input, correlationId, handoffId, "provider_error", options.configurationError ?? "GitHub failure handoff POC is unavailable because GitHub is not configured.", "configuration"), true);
       try {
-        const result = await new GitHubFailureHandoffPoc(options.gateway, new GitHubActionsWatcher(options.gateway, options.config), options.claude, options.store, options.config).execute({
+        const result = await new GitHubFailureHandoffPoc(options.gateway, new GitHubActionsWatcher(options.gateway, options.config), options.codex, options.store, options.config).execute({
           eventId: input.eventId,
           headBranch: input.headBranch,
           expectedHeadSha: input.expectedHeadSha,
@@ -109,7 +109,7 @@ export function registerGitHubFailureHandoffPocTool(
           ...(input.maxFailedJobs === undefined ? {} : { maxFailedJobs: input.maxFailedJobs }),
           ...(input.maxFailedSteps === undefined ? {} : { maxFailedSteps: input.maxFailedSteps }),
           ...(input.maxLogBytes === undefined ? {} : { maxLogBytes: input.maxLogBytes }),
-          ...(input.claudeTimeoutMs === undefined ? {} : { claudeTimeoutMs: input.claudeTimeoutMs }),
+          ...(input.codexTimeoutMs === undefined ? {} : { codexTimeoutMs: input.codexTimeoutMs }),
           ...(input.correlationId === undefined ? { correlationId } : { correlationId: input.correlationId }),
         });
         return structured(result, result.outcome !== "failure_handoff_completed" || result.replayed);

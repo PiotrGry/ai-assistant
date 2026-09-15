@@ -14,7 +14,7 @@ import {
   sanitizeFailureText,
   failure,
   success,
-  type ClaudeHandoffRequest,
+  type CodexHandoffRequest,
   type GitHubActionsRunJobs,
   type GitHubActionsWatchRequest,
   type GitHubActionsWatchTerminalResult,
@@ -65,34 +65,34 @@ class FakeWatcher {
   async watch(request: GitHubActionsWatchRequest): Promise<GitHubActionsWatchResult> { this.calls += 1; this.request = request; return this.result; }
 }
 
-class FakeClaude {
+class FakeCodex {
   calls = 0;
-  requests: ClaudeHandoffRequest[] = [];
+  requests: CodexHandoffRequest[] = [];
   result: { readonly outcome: "success"; readonly requestId: string; readonly acknowledgement: string; readonly durationMs: number; readonly exitCode: 0 } = { outcome: "success", requestId: "unused", acknowledgement: "received", durationMs: 1, exitCode: 0 };
-  async runHandoff(request: ClaudeHandoffRequest) { this.calls += 1; this.requests.push(request); return { ...this.result, requestId: request.handoffId }; }
+  async runHandoff(request: CodexHandoffRequest) { this.calls += 1; this.requests.push(request); return { ...this.result, requestId: request.handoffId }; }
 }
 
-function operation(gateway: FakeGateway, watcher: FakeWatcher, claude: FakeClaude, store: GitHubFailureHandoffPocStore = new InMemoryGitHubFailureHandoffPocStore()): GitHubFailureHandoffPoc {
-  return new GitHubFailureHandoffPoc(gateway, watcher, claude, store, config);
+function operation(gateway: FakeGateway, watcher: FakeWatcher, codex: FakeCodex, store: GitHubFailureHandoffPocStore = new InMemoryGitHubFailureHandoffPocStore()): GitHubFailureHandoffPoc {
+  return new GitHubFailureHandoffPoc(gateway, watcher, codex, store, config);
 }
 
 function request(eventId = "failure-event") {
-  return { eventId, headBranch: branch, expectedHeadSha: sha, requiredWorkflowName: FAILURE_HANDOFF_POC_WORKFLOW, timeoutMs: 1000, pollIntervalMs: 10, claudeTimeoutMs: 1000 } as const;
+  return { eventId, headBranch: branch, expectedHeadSha: sha, requiredWorkflowName: FAILURE_HANDOFF_POC_WORKFLOW, timeoutMs: 1000, pollIntervalMs: 10, codexTimeoutMs: 1000 } as const;
 }
 
 test("creates the exact feature PR, observes exact failed workflow, and hands off a schema-bound envelope", async () => {
   const gateway = new FakeGateway();
   const watcher = new FakeWatcher();
-  const claude = new FakeClaude();
-  const result = await operation(gateway, watcher, claude).execute(request());
+  const codex = new FakeCodex();
+  const result = await operation(gateway, watcher, codex).execute(request());
   assert.equal(result.outcome, "failure_handoff_completed");
   assert.deepEqual({ head: gateway.pullRequest.headBranch, base: gateway.pullRequest.baseBranch, sha: gateway.pullRequest.headSha }, { head: branch, base: "develop", sha });
   assert.equal(watcher.request?.pullRequestNumber, 193);
   assert.equal(watcher.request?.expectedHeadSha, sha);
   assert.equal(watcher.request?.requiredWorkflowName, FAILURE_HANDOFF_POC_WORKFLOW);
-  assert.equal(claude.calls, 1);
-  assert.equal(claude.requests[0]?.handoffId, result.handoffId);
-  assert.equal((claude.requests[0]?.envelope as { evidence: { workflow: { runId: number } } }).evidence.workflow.runId, 777);
+  assert.equal(codex.calls, 1);
+  assert.equal(codex.requests[0]?.handoffId, result.handoffId);
+  assert.equal((codex.requests[0]?.envelope as { evidence: { workflow: { runId: number } } }).evidence.workflow.runId, 777);
   assert.equal(result.evidence?.failedJobs[0]?.failedSteps[0]?.name, "Run tests");
 });
 
@@ -100,9 +100,9 @@ test("redacts logs, bounds evidence, and never persists the fixture secret", asy
   const gateway = new FakeGateway();
   gateway.log = `Authorization: Bearer LIVE_SECRET_TOKEN\npassword=super-secret\n${"x".repeat(50_000)}`;
   const watcher = new FakeWatcher();
-  const claude = new FakeClaude();
+  const codex = new FakeCodex();
   const store = new InMemoryGitHubFailureHandoffPocStore();
-  const result = await operation(gateway, watcher, claude, store).execute(request("redaction-event"));
+  const result = await operation(gateway, watcher, codex, store).execute(request("redaction-event"));
   assert.equal(result.outcome, "failure_handoff_completed");
   const encoded = JSON.stringify(result);
   assert.equal(encoded.includes("LIVE_SECRET_TOKEN"), false);
@@ -114,37 +114,37 @@ test("redacts logs, bounds evidence, and never persists the fixture secret", asy
   assert.equal(sanitizeFailureText("Cookie: sid=secret; token=abc").value.includes("secret"), false);
 });
 
-test("replays the same PR, run, evidence and handoff without Claude or GitHub calls", async () => {
-  const gateway = new FakeGateway(); const watcher = new FakeWatcher(); const claude = new FakeClaude(); const store = new InMemoryGitHubFailureHandoffPocStore();
-  const first = await operation(gateway, watcher, claude, store).execute(request("replay-event"));
+test("replays the same PR, run, evidence and handoff without Codex or GitHub calls", async () => {
+  const gateway = new FakeGateway(); const watcher = new FakeWatcher(); const codex = new FakeCodex(); const store = new InMemoryGitHubFailureHandoffPocStore();
+  const first = await operation(gateway, watcher, codex, store).execute(request("replay-event"));
   const counts = JSON.stringify(gateway.calls);
-  const replay = await operation(gateway, watcher, claude, store).execute(request("replay-event"));
+  const replay = await operation(gateway, watcher, codex, store).execute(request("replay-event"));
   assert.equal(replay.replayed, true);
   assert.equal(replay.handoffId, first.handoffId);
   assert.equal(replay.evidence?.evidenceDigest, first.evidence?.evidenceDigest);
-  assert.equal(claude.calls, 1);
+  assert.equal(codex.calls, 1);
   assert.equal(JSON.stringify(gateway.calls), counts);
 });
 
-test("restart replays a 0600 ledger without a second Claude invocation", async () => {
+test("restart replays a 0600 ledger without a second Codex invocation", async () => {
   const root = await mkdtemp(join(tmpdir(), "pirx-failure-ledger-"));
   const filename = join(root, "ledger.json");
   try {
-    const firstGateway = new FakeGateway(); const firstWatcher = new FakeWatcher(); const firstClaude = new FakeClaude();
-    const first = await operation(firstGateway, firstWatcher, firstClaude, new FileGitHubFailureHandoffPocStore(filename)).execute(request("restart-event"));
+    const firstGateway = new FakeGateway(); const firstWatcher = new FakeWatcher(); const firstCodex = new FakeCodex();
+    const first = await operation(firstGateway, firstWatcher, firstCodex, new FileGitHubFailureHandoffPocStore(filename)).execute(request("restart-event"));
     const permissions = (await stat(filename)).mode & 0o777;
-    const secondGateway = new FakeGateway(); const secondWatcher = new FakeWatcher(); const secondClaude = new FakeClaude();
-    const replay = await operation(secondGateway, secondWatcher, secondClaude, new FileGitHubFailureHandoffPocStore(filename)).execute(request("restart-event"));
+    const secondGateway = new FakeGateway(); const secondWatcher = new FakeWatcher(); const secondCodex = new FakeCodex();
+    const replay = await operation(secondGateway, secondWatcher, secondCodex, new FileGitHubFailureHandoffPocStore(filename)).execute(request("restart-event"));
     assert.equal(permissions, 0o600);
     assert.equal(replay.replayed, true);
     assert.equal(replay.handoffId, first.handoffId);
-    assert.equal(secondClaude.calls, 0);
+    assert.equal(secondCodex.calls, 0);
     assert.equal(secondGateway.calls.branch, 0);
     assert.equal((await readFile(filename, "utf8")).includes("LIVE_SECRET_TOKEN"), false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("fail-closed states never invoke Claude and never expose merge/release/deploy operations", async (t) => {
+test("fail-closed states never invoke Codex and never expose merge/release/deploy operations", async (t) => {
   const cases: Array<[string, GitHubActionsWatchResult]> = [
     ["success", { ...failedWatch(), outcome: "success", conclusion: "success" } as GitHubActionsWatchResult],
     ["cancelled", { ...failedWatch(), outcome: "cancelled", conclusion: "cancelled" }],
@@ -155,45 +155,45 @@ test("fail-closed states never invoke Claude and never expose merge/release/depl
   ];
   for (const [name, result] of cases) {
     await t.test(name, async () => {
-      const gateway = new FakeGateway(); const watcher = new FakeWatcher(); watcher.result = result; const claude = new FakeClaude();
-      const output = await operation(gateway, watcher, claude).execute(request(`closed-${name}`));
+      const gateway = new FakeGateway(); const watcher = new FakeWatcher(); watcher.result = result; const codex = new FakeCodex();
+      const output = await operation(gateway, watcher, codex).execute(request(`closed-${name}`));
       assert.notEqual(output.outcome, "failure_handoff_completed");
-      assert.equal(claude.calls, 0);
+      assert.equal(codex.calls, 0);
       assert.equal(gateway.calls.create >= 0, true);
     });
   }
 });
 
-test("stale branch, wrong workflow, and invalid Claude receipt fail closed", async () => {
+test("stale branch, wrong workflow, and invalid Codex receipt fail closed", async () => {
   const staleGateway = new FakeGateway(); staleGateway.branchSha = "different-sha";
-  const staleClaude = new FakeClaude();
-  const stale = await operation(staleGateway, new FakeWatcher(), staleClaude).execute(request("stale-event"));
-  assert.equal(stale.outcome, "stale_head"); assert.equal(staleGateway.calls.create, 0); assert.equal(staleClaude.calls, 0);
-  const wrongWorkflow = await operation(new FakeGateway(), new FakeWatcher(), new FakeClaude()).execute({ ...request("workflow-event"), requiredWorkflowName: "Other workflow" });
+  const staleCodex = new FakeCodex();
+  const stale = await operation(staleGateway, new FakeWatcher(), staleCodex).execute(request("stale-event"));
+  assert.equal(stale.outcome, "stale_head"); assert.equal(staleGateway.calls.create, 0); assert.equal(staleCodex.calls, 0);
+  const wrongWorkflow = await operation(new FakeGateway(), new FakeWatcher(), new FakeCodex()).execute({ ...request("workflow-event"), requiredWorkflowName: "Other workflow" });
   assert.equal(wrongWorkflow.outcome, "policy_blocked");
-  const invalidClaude = new FakeClaude(); invalidClaude.result = { outcome: "invalid_output", requestId: "wrong", durationMs: 1, exitCode: 0, message: "invalid" } as never;
-  const invalid = await operation(new FakeGateway(), new FakeWatcher(), invalidClaude).execute(request("claude-invalid"));
+  const invalidCodex = new FakeCodex(); invalidCodex.result = { outcome: "invalid_output", requestId: "wrong", durationMs: 1, exitCode: 0, message: "invalid" } as never;
+  const invalid = await operation(new FakeGateway(), new FakeWatcher(), invalidCodex).execute(request("codex-invalid"));
   assert.equal(invalid.outcome, "worker_handoff_failed");
-  assert.equal(invalid.claudeReceipt?.handoffId, invalid.handoffId);
+  assert.equal(invalid.codexReceipt?.handoffId, invalid.handoffId);
 });
 
 test("uncertain PR creation reconciles exactly once and never merges", async () => {
   const gateway = new FakeGateway();
   gateway.createResult = failure("unknown", "timeout", "creation uncertain", "fake", "unknown");
   gateway.createAddsPull = true;
-  const watcher = new FakeWatcher(); const claude = new FakeClaude();
-  const result = await operation(gateway, watcher, claude).execute(request("uncertain-create"));
+  const watcher = new FakeWatcher(); const codex = new FakeCodex();
+  const result = await operation(gateway, watcher, codex).execute(request("uncertain-create"));
   assert.equal(result.outcome, "failure_handoff_completed");
   assert.equal(gateway.calls.create, 1);
   assert.equal(gateway.calls.list, 2);
-  assert.equal(claude.calls, 1);
+  assert.equal(codex.calls, 1);
 });
 
-test("Claude handoff receives no repository tools and uses the same handoff ID", async () => {
-  const gateway = new FakeGateway(); const watcher = new FakeWatcher(); const claude = new FakeClaude();
-  const result = await operation(gateway, watcher, claude).execute(request("boundary-event"));
-  const args = JSON.stringify(claude.requests[0]?.envelope);
-  assert.equal(result.handoffId, claude.requests[0]?.handoffId);
+test("Codex handoff receives no repository tools and uses the same handoff ID", async () => {
+  const gateway = new FakeGateway(); const watcher = new FakeWatcher(); const codex = new FakeCodex();
+  const result = await operation(gateway, watcher, codex).execute(request("boundary-event"));
+  const args = JSON.stringify(codex.requests[0]?.envelope);
+  assert.equal(result.handoffId, codex.requests[0]?.handoffId);
   assert.equal(args.includes("diagnosis"), false);
   assert.equal(args.includes("git blame"), false);
   assert.equal(gateway.calls.run, 0);

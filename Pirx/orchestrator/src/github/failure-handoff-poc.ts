@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import type { ClaudeHandoffRequest, ClaudeHandoffResult } from "../claude/cli-runner.js";
+import type { CodexHandoffRequest, CodexHandoffResult } from "../codex/cli-runner.js";
 import type {
   GitHubActionsFailedJobReference,
   GitHubActionsReadGateway,
@@ -52,8 +52,8 @@ export interface GitHubFailureHandoffPocGateway extends GitHubActionsReadGateway
   getWorkflowRunLog?(runId: number, context: GitHubRequestContext): Promise<GitHubOperationResult<string>>;
 }
 
-export interface GitHubFailureHandoffClaudeRunner {
-  runHandoff(request: ClaudeHandoffRequest): Promise<ClaudeHandoffResult>;
+export interface GitHubFailureHandoffCodexRunner {
+  runHandoff(request: CodexHandoffRequest): Promise<CodexHandoffResult>;
 }
 
 export interface GitHubFailureHandoffEvidence {
@@ -70,7 +70,7 @@ export interface GitHubFailureHandoffEvidence {
 
 export interface GitHubFailureHandoffReceipt {
   readonly handoffId: string;
-  readonly outcome: ClaudeHandoffResult["outcome"];
+  readonly outcome: CodexHandoffResult["outcome"];
   readonly acknowledgement?: string;
 }
 
@@ -93,7 +93,7 @@ export interface GitHubFailureHandoffPocRecord {
   readonly featureRunId?: number;
   readonly featureConclusion?: string;
   readonly evidence?: GitHubFailureHandoffEvidence;
-  readonly claudeReceipt?: GitHubFailureHandoffReceipt;
+  readonly codexReceipt?: GitHubFailureHandoffReceipt;
   readonly outcome?: GitHubFailureHandoffPocOutcome;
 }
 
@@ -161,7 +161,7 @@ export interface GitHubFailureHandoffPocRequest {
   readonly maxFailedJobs?: number;
   readonly maxFailedSteps?: number;
   readonly maxLogBytes?: number;
-  readonly claudeTimeoutMs?: number;
+  readonly codexTimeoutMs?: number;
   readonly correlationId?: string;
   readonly signal?: AbortSignal;
 }
@@ -181,7 +181,7 @@ export interface GitHubFailureHandoffPocResult {
   readonly pullRequest?: { readonly number: number; readonly url: string; readonly headSha: string; readonly state: string; readonly merged: boolean };
   readonly run?: { readonly id: number; readonly name: string; readonly url: string; readonly headSha: string; readonly conclusion: string };
   readonly evidence?: GitHubFailureHandoffEvidence;
-  readonly claudeReceipt?: GitHubFailureHandoffReceipt;
+  readonly codexReceipt?: GitHubFailureHandoffReceipt;
   readonly replayed: boolean;
   readonly updatedAt: string;
 }
@@ -237,7 +237,7 @@ function validRequest(request: GitHubFailureHandoffPocRequest): string | undefin
   if (!text(request.eventId, 256)) return "eventId is invalid.";
   if (request.requiredWorkflowName !== undefined && request.requiredWorkflowName !== FAILURE_HANDOFF_POC_WORKFLOW) return "The required workflow is fixed to the inspected Develop — Fast Gate.";
   const bounded = (value: number | undefined, fallback: number, max: number): boolean => Number.isSafeInteger(value ?? fallback) && (value ?? fallback) > 0 && (value ?? fallback) <= max;
-  if (!bounded(request.timeoutMs, 60_000, 300_000) || !bounded(request.pollIntervalMs, 2_000, 60_000) || !bounded(request.claudeTimeoutMs, 30_000, 120_000)) return "Timeout settings exceed the bounded limits.";
+  if (!bounded(request.timeoutMs, 60_000, 300_000) || !bounded(request.pollIntervalMs, 2_000, 60_000) || !bounded(request.codexTimeoutMs, 30_000, 120_000)) return "Timeout settings exceed the bounded limits.";
   if (request.maxFailedJobs !== undefined && (!Number.isSafeInteger(request.maxFailedJobs) || request.maxFailedJobs <= 0 || request.maxFailedJobs > 10)) return "maxFailedJobs is outside the bounded limit.";
   if (request.maxFailedSteps !== undefined && (!Number.isSafeInteger(request.maxFailedSteps) || request.maxFailedSteps <= 0 || request.maxFailedSteps > 20)) return "maxFailedSteps is outside the bounded limit.";
   if (request.maxLogBytes !== undefined && (!Number.isSafeInteger(request.maxLogBytes) || request.maxLogBytes <= 0 || request.maxLogBytes > FAILURE_HANDOFF_POC_MAX_LOG_BYTES)) return "maxLogBytes is outside the bounded limit.";
@@ -274,11 +274,11 @@ export class GitHubFailureHandoffPoc {
   readonly #gateway: GitHubFailureHandoffPocGateway;
   readonly #watcher: { watch(request: GitHubActionsWatchRequest): Promise<GitHubActionsWatchResult> };
   readonly #store: GitHubFailureHandoffPocStore;
-  readonly #claude: GitHubFailureHandoffClaudeRunner;
+  readonly #codex: GitHubFailureHandoffCodexRunner;
   readonly #config: GitHubConfig;
 
-  constructor(gateway: GitHubFailureHandoffPocGateway, watcher: { watch(request: GitHubActionsWatchRequest): Promise<GitHubActionsWatchResult> }, claude: GitHubFailureHandoffClaudeRunner, store: GitHubFailureHandoffPocStore = new InMemoryGitHubFailureHandoffPocStore(), config: GitHubConfig = { token: "", owner: "PiotrGry", repository: "zdrovena-reconciliation", apiUrl: "https://api.github.com", timeoutMs: 10_000 }) {
-    this.#gateway = gateway; this.#watcher = watcher; this.#claude = claude; this.#store = store; this.#config = config;
+  constructor(gateway: GitHubFailureHandoffPocGateway, watcher: { watch(request: GitHubActionsWatchRequest): Promise<GitHubActionsWatchResult> }, codex: GitHubFailureHandoffCodexRunner, store: GitHubFailureHandoffPocStore = new InMemoryGitHubFailureHandoffPocStore(), config: GitHubConfig = { token: "", owner: "PiotrGry", repository: "zdrovena-reconciliation", apiUrl: "https://api.github.com", timeoutMs: 10_000 }) {
+    this.#gateway = gateway; this.#watcher = watcher; this.#codex = codex; this.#store = store; this.#config = config;
   }
 
   async execute(request: GitHubFailureHandoffPocRequest): Promise<GitHubFailureHandoffPocResult> {
@@ -320,11 +320,11 @@ export class GitHubFailureHandoffPoc {
     const evidence = await this.#buildEvidence(request, pull.value, failedWatch, run, context);
     if (evidence === undefined) return this.#finish(request, correlationId, currentHandoffId, this.#failureResult(request, correlationId, currentHandoffId, "failure_evidence_unavailable", "The failed run evidence exceeded the bounded evidence contract.", "evidence_bounds", replayed, pullEvidence, run), save, { ...(run === undefined ? {} : { featureRunId: run.id, featureConclusion: run.conclusion }) });
     const envelope = { schemaVersion: 1, eventId: request.eventId, correlationId, handoffId: currentHandoffId, evidence };
-    const claude = await this.#claude.runHandoff({ handoffId: currentHandoffId, envelope, ...(request.claudeTimeoutMs === undefined ? {} : { timeoutMs: request.claudeTimeoutMs }), ...(request.signal === undefined ? {} : { signal: request.signal }) });
-    const receipt: GitHubFailureHandoffReceipt = { handoffId: currentHandoffId, outcome: claude.outcome, ...(claude.outcome === "success" ? { acknowledgement: claude.acknowledgement } : {}) };
-    const finalOutcome: GitHubFailureHandoffPocOutcome = claude.outcome === "success" ? "failure_handoff_completed" : claude.outcome === "authentication_required" ? "worker_authentication_required" : claude.outcome === "quota_exhausted" ? "worker_quota_exhausted" : "worker_handoff_failed";
-    const result = this.#failureResult(request, correlationId, currentHandoffId, finalOutcome, claude.outcome === "success" ? "Bounded failure evidence was acknowledged by a fresh Claude Code session." : "Claude Code did not acknowledge the bounded failure handoff.", claude.outcome === "success" ? undefined : claude.outcome, replayed, pullEvidence, run, evidence, receipt);
-    await save({ ...(run === undefined ? {} : { featureRunId: run.id, featureConclusion: run.conclusion }), evidence, claudeReceipt: receipt, outcome: finalOutcome });
+    const codex = await this.#codex.runHandoff({ handoffId: currentHandoffId, envelope, ...(request.codexTimeoutMs === undefined ? {} : { timeoutMs: request.codexTimeoutMs }), ...(request.signal === undefined ? {} : { signal: request.signal }) });
+    const receipt: GitHubFailureHandoffReceipt = { handoffId: currentHandoffId, outcome: codex.outcome, ...(codex.outcome === "success" ? { acknowledgement: codex.acknowledgement } : {}) };
+    const finalOutcome: GitHubFailureHandoffPocOutcome = codex.outcome === "success" ? "failure_handoff_completed" : codex.outcome === "authentication_required" ? "worker_authentication_required" : codex.outcome === "quota_exhausted" ? "worker_quota_exhausted" : "worker_handoff_failed";
+    const result = this.#failureResult(request, correlationId, currentHandoffId, finalOutcome, codex.outcome === "success" ? "Bounded failure evidence was acknowledged by a fresh Codex CLI session." : "Codex did not acknowledge the bounded failure handoff.", codex.outcome === "success" ? undefined : codex.outcome, replayed, pullEvidence, run, evidence, receipt);
+    await save({ ...(run === undefined ? {} : { featureRunId: run.id, featureConclusion: run.conclusion }), evidence, codexReceipt: receipt, outcome: finalOutcome });
     return result;
   }
 
@@ -375,11 +375,11 @@ export class GitHubFailureHandoffPoc {
   }
 
   #fromRecord(record: GitHubFailureHandoffPocRecord, replayed: boolean): GitHubFailureHandoffPocResult {
-    return { outcome: record.outcome!, repository: FAILURE_HANDOFF_POC_REPOSITORY, featureBase: FAILURE_HANDOFF_POC_FEATURE_BASE, requiredWorkflowName: FAILURE_HANDOFF_POC_WORKFLOW, eventId: record.eventId, headBranch: record.headBranch, expectedHeadSha: record.expectedHeadSha, correlationId: record.correlationId, handoffId: record.handoffId, message: "Replayed the stored bounded failure handoff without another PR or Claude invocation.", ...(record.featurePullRequestNumber === undefined || record.featurePullRequestUrl === undefined ? {} : { pullRequest: { number: record.featurePullRequestNumber, url: record.featurePullRequestUrl, headSha: record.evidence?.pullRequest.headSha ?? record.expectedHeadSha, state: "open", merged: false } }), ...(record.evidence?.workflow === undefined ? {} : { run: { id: record.evidence.workflow.runId, name: record.evidence.workflow.name, url: record.evidence.workflow.url, headSha: record.evidence.workflow.headSha, conclusion: record.evidence.workflow.conclusion } }), ...(record.evidence === undefined ? {} : { evidence: record.evidence }), ...(record.claudeReceipt === undefined ? {} : { claudeReceipt: record.claudeReceipt }), replayed, updatedAt: record.updatedAt };
+    return { outcome: record.outcome!, repository: FAILURE_HANDOFF_POC_REPOSITORY, featureBase: FAILURE_HANDOFF_POC_FEATURE_BASE, requiredWorkflowName: FAILURE_HANDOFF_POC_WORKFLOW, eventId: record.eventId, headBranch: record.headBranch, expectedHeadSha: record.expectedHeadSha, correlationId: record.correlationId, handoffId: record.handoffId, message: "Replayed the stored bounded failure handoff without another PR or Codex invocation.", ...(record.featurePullRequestNumber === undefined || record.featurePullRequestUrl === undefined ? {} : { pullRequest: { number: record.featurePullRequestNumber, url: record.featurePullRequestUrl, headSha: record.evidence?.pullRequest.headSha ?? record.expectedHeadSha, state: "open", merged: false } }), ...(record.evidence?.workflow === undefined ? {} : { run: { id: record.evidence.workflow.runId, name: record.evidence.workflow.name, url: record.evidence.workflow.url, headSha: record.evidence.workflow.headSha, conclusion: record.evidence.workflow.conclusion } }), ...(record.evidence === undefined ? {} : { evidence: record.evidence }), ...(record.codexReceipt === undefined ? {} : { codexReceipt: record.codexReceipt }), replayed, updatedAt: record.updatedAt };
   }
 
-  #failureResult(request: GitHubFailureHandoffPocRequest, correlationId: string, handoffId: string, outcome: GitHubFailureHandoffPocOutcome, message: string, errorCode: string | undefined, replayed: boolean, pullRequest?: GitHubFailureHandoffPocResult["pullRequest"], run?: GitHubFailureHandoffPocResult["run"], evidence?: GitHubFailureHandoffEvidence, claudeReceipt?: GitHubFailureHandoffReceipt): GitHubFailureHandoffPocResult {
-    return { outcome, repository: FAILURE_HANDOFF_POC_REPOSITORY, featureBase: FAILURE_HANDOFF_POC_FEATURE_BASE, requiredWorkflowName: FAILURE_HANDOFF_POC_WORKFLOW, eventId: request.eventId, headBranch: request.headBranch, expectedHeadSha: request.expectedHeadSha, correlationId, handoffId, message, ...(errorCode === undefined ? {} : { errorCode }), ...(pullRequest === undefined ? {} : { pullRequest }), ...(run === undefined ? {} : { run }), ...(evidence === undefined ? {} : { evidence }), ...(claudeReceipt === undefined ? {} : { claudeReceipt }), replayed, updatedAt: new Date().toISOString() };
+  #failureResult(request: GitHubFailureHandoffPocRequest, correlationId: string, handoffId: string, outcome: GitHubFailureHandoffPocOutcome, message: string, errorCode: string | undefined, replayed: boolean, pullRequest?: GitHubFailureHandoffPocResult["pullRequest"], run?: GitHubFailureHandoffPocResult["run"], evidence?: GitHubFailureHandoffEvidence, codexReceipt?: GitHubFailureHandoffReceipt): GitHubFailureHandoffPocResult {
+    return { outcome, repository: FAILURE_HANDOFF_POC_REPOSITORY, featureBase: FAILURE_HANDOFF_POC_FEATURE_BASE, requiredWorkflowName: FAILURE_HANDOFF_POC_WORKFLOW, eventId: request.eventId, headBranch: request.headBranch, expectedHeadSha: request.expectedHeadSha, correlationId, handoffId, message, ...(errorCode === undefined ? {} : { errorCode }), ...(pullRequest === undefined ? {} : { pullRequest }), ...(run === undefined ? {} : { run }), ...(evidence === undefined ? {} : { evidence }), ...(codexReceipt === undefined ? {} : { codexReceipt }), replayed, updatedAt: new Date().toISOString() };
   }
 
   #result(request: GitHubFailureHandoffPocRequest, correlationId: string, handoffId: string, outcome: GitHubFailureHandoffPocOutcome, message: string, errorCode: string, replayed: boolean): GitHubFailureHandoffPocResult { return this.#failureResult(request, correlationId, handoffId, outcome, message, errorCode, replayed); }

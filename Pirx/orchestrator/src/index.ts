@@ -170,7 +170,7 @@ export {
   GitHubFailureHandoffPoc,
   InMemoryGitHubFailureHandoffPocStore,
   sanitizeFailureText,
-  type GitHubFailureHandoffClaudeRunner,
+  type GitHubFailureHandoffCodexRunner,
   type GitHubFailureHandoffEvidence,
   type GitHubFailureHandoffPocGateway,
   type GitHubFailureHandoffPocOutcome,
@@ -180,6 +180,19 @@ export {
   type GitHubFailureHandoffPocStore,
   type GitHubFailureHandoffReceipt,
 } from "./github/failure-handoff-poc.js";
+export {
+  CODEX_HANDOFF_OUTCOMES,
+  buildCodexHandoffArguments,
+  CodexCliRunner,
+  type CodexCliRunnerOptions,
+  type CodexHandoffFailure,
+  type CodexHandoffOutcome,
+  type CodexHandoffRequest,
+  type CodexHandoffResult,
+  type CodexHandoffSuccess,
+  type CodexSpawn,
+  type CodexSpawnOptions,
+} from "./codex/cli-runner.js";
 export {
   CLAUDE_CLI_ENV_ALLOWLIST,
   CLAUDE_ROUND_TRIP_OUTCOMES,

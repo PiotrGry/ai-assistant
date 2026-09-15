@@ -62,7 +62,7 @@ const CHILD_ENVIRONMENT_KEYS = [
   "PIRX_GITHUB_SHIPMENT_POC_STATE_FILE",
   "PIRX_GITHUB_FAILURE_HANDOFF_POC",
   "PIRX_GITHUB_FAILURE_HANDOFF_POC_STATE_FILE",
-  "PIRX_CLAUDE_EXECUTABLE",
+  "PIRX_CODEX_EXECUTABLE",
 ] as const;
 
 function childEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
