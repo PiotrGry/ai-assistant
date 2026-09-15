@@ -161,6 +161,22 @@ test("watcher distinguishes stale and ambiguous PR head matches", async () => {
   assert.equal(ambiguousResult.outcome, "ambiguous");
 });
 
+test("watcher selects only the explicitly required workflow and fails closed on missing or duplicate gates", async () => {
+  const clock = new FakeClock();
+  const named = new FakeGateway([], [run({ name: "Develop — Fast Gate", status: "completed", conclusion: "success" }), run({ id: 902, name: "Other workflow", status: "completed", conclusion: "success" })]);
+  const selected = await new GitHubActionsWatcher(named, config, { clock }).watch({ pullRequestNumber: 189, expectedHeadSha: "sha-current", requiredWorkflowName: "Develop — Fast Gate", timeoutMs: 10 });
+  assert.equal(selected.outcome, "success");
+  assert.equal(selected.workflowName, "Develop — Fast Gate");
+
+  const missing = new FakeGateway([], [run({ name: "Other workflow", status: "completed", conclusion: "success" })]);
+  const missingResult = await new GitHubActionsWatcher(missing, config, { clock }).watch({ pullRequestNumber: 189, expectedHeadSha: "sha-current", requiredWorkflowName: "Develop — Fast Gate", timeoutMs: 10 });
+  assert.equal(missingResult.outcome, "not_found");
+
+  const duplicate = new FakeGateway([], [run({ name: "Develop — Fast Gate" }), run({ id: 902, name: "Develop — Fast Gate" })]);
+  const duplicateResult = await new GitHubActionsWatcher(duplicate, config, { clock }).watch({ pullRequestNumber: 189, expectedHeadSha: "sha-current", requiredWorkflowName: "Develop — Fast Gate", timeoutMs: 10 });
+  assert.equal(duplicateResult.outcome, "ambiguous");
+});
+
 test("watcher exposes cancellation and timeout without another model/tool call", async () => {
   const clock = new FakeClock();
   const controller = new AbortController();

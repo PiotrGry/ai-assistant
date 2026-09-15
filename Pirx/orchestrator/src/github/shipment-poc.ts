@@ -18,6 +18,8 @@ import { GitHubWriteQueue } from "./write-queue.js";
 export const SHIPMENT_POC_FEATURE_BASE = "develop" as const;
 export const SHIPMENT_POC_RELEASE_BASE = "main" as const;
 export const SHIPMENT_POC_REPOSITORY = "PiotrGry/zdrovena-reconciliation" as const;
+export const SHIPMENT_POC_FEATURE_WORKFLOW = "Develop — Fast Gate" as const;
+export const SHIPMENT_POC_RELEASE_WORKFLOW = "PR Validate — develop → main" as const;
 
 export type GitHubShipmentPocOutcome =
   | "production_approval_required"
@@ -389,10 +391,12 @@ function watchRequest(
   expectedHeadSha: string,
   request: GitHubShipmentPocRequest,
   correlationId: string,
+  requiredWorkflowName: string,
 ): GitHubActionsWatchRequest {
   return {
     pullRequestNumber,
     expectedHeadSha,
+    requiredWorkflowName,
     ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
     ...(request.pollIntervalMs === undefined ? {} : { pollIntervalMs: request.pollIntervalMs }),
     ...(request.maxFailedJobs === undefined ? {} : { maxFailedJobs: request.maxFailedJobs }),
@@ -426,14 +430,6 @@ export class GitHubShipmentPoc {
     const replayed = existing !== undefined;
     if (existing !== undefined && (existing.headBranch !== request.headBranch || existing.expectedHeadSha !== request.expectedHeadSha)) return this.#result(request, correlationId, "policy_blocked", "eventId is already bound to a different branch or revision.", "event_conflict", {}, true);
     if (existing !== undefined && (existing.owner !== this.#config.owner || existing.repository !== this.#config.repository || existing.featureBase !== SHIPMENT_POC_FEATURE_BASE || existing.releaseBase !== SHIPMENT_POC_RELEASE_BASE)) return this.#result(request, correlationId, "policy_blocked", "Persisted shipment record does not match the fixed target policy.", "target_not_allowed", {}, true);
-    if (existing?.outcome === "production_approval_required" && existing.featurePullRequestNumber !== undefined && existing.featurePullRequestUrl !== undefined && existing.featureHeadSha !== undefined && existing.releasePullRequestNumber !== undefined && existing.releasePullRequestUrl !== undefined && existing.releaseHeadSha !== undefined && existing.developHeadSha !== undefined) {
-      return this.#result(request, correlationId, "production_approval_required", "Release CI was previously verified green. Production approval is required; main was not merged and production was not deployed.", undefined, {
-        featurePullRequest: { number: existing.featurePullRequestNumber, url: existing.featurePullRequestUrl, headSha: existing.featureHeadSha, ...(existing.featureRunId === undefined ? {} : { runId: existing.featureRunId }), ...(existing.featureConclusion === undefined ? {} : { conclusion: existing.featureConclusion }) },
-        releasePullRequest: { number: existing.releasePullRequestNumber, url: existing.releasePullRequestUrl, headSha: existing.releaseHeadSha, ...(existing.releaseRunId === undefined ? {} : { runId: existing.releaseRunId }), ...(existing.releaseConclusion === undefined ? {} : { conclusion: existing.releaseConclusion }) },
-        developHeadSha: existing.developHeadSha,
-        ...(existing.featureMergeSha === undefined ? {} : { mergeSha: existing.featureMergeSha }),
-      }, true);
-    }
     let evidence: GitHubShipmentPocEvidence = {};
     let persisted = existing;
     const save = async (patch: Partial<GitHubShipmentPocRecord>): Promise<void> => {
@@ -448,14 +444,23 @@ export class GitHubShipmentPoc {
     if (branch.outcome !== "success") return this.#finish(request, correlationId, resultFromFailure(request, correlationId, branch, evidence, replayed), save);
     if (branch.value.sha !== request.expectedHeadSha) return this.#finish(request, correlationId, this.#result(request, correlationId, "stale_head", "Dedicated branch head does not match the CODE_PUSHED revision.", "stale_head", evidence, replayed), save);
 
-    const feature = await this.#findOrCreatePull(request, SHIPMENT_POC_FEATURE_BASE, existing?.featurePullRequestNumber, correlationId);
+    const feature = await this.#findOrCreatePull({
+      eventId: request.eventId,
+      headBranch: request.headBranch,
+      baseBranch: SHIPMENT_POC_FEATURE_BASE,
+      expectedHeadSha: request.expectedHeadSha,
+      ...(existing?.featurePullRequestNumber === undefined ? {} : { knownNumber: existing.featurePullRequestNumber }),
+      correlationId,
+      ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+    });
     if (feature.outcome !== "success") return this.#finish(request, correlationId, resultFromFailure(request, correlationId, feature, evidence, replayed), save);
     evidence = { ...evidence, featurePullRequest: pullEvidence(feature.value) };
     await save({ featurePullRequestNumber: feature.value.number, featurePullRequestUrl: feature.value.url, featureHeadSha: feature.value.headSha });
     if (feature.value.headSha !== request.expectedHeadSha) return this.#finish(request, correlationId, this.#result(request, correlationId, "stale_head", "Feature PR head changed before CI observation.", "stale_head", evidence, replayed), save);
 
     if (!feature.value.merged) {
-      const watch = await this.#watcher.watch(watchRequest(feature.value.number, request.expectedHeadSha, request, correlationId));
+      const watch = await this.#watcher.watch(watchRequest(feature.value.number, request.expectedHeadSha, request, correlationId, SHIPMENT_POC_FEATURE_WORKFLOW));
       const failed = resultFromWatch(request, watch, "feature", evidence, replayed);
       if (failed !== undefined) {
         const runId = watch.workflowRunId;
@@ -490,15 +495,25 @@ export class GitHubShipmentPoc {
     const currentDevelop = await this.#gateway.getBranchHead(SHIPMENT_POC_FEATURE_BASE, context());
     if (currentDevelop.outcome !== "success") return this.#finish(request, correlationId, resultFromFailure(request, correlationId, currentDevelop, evidence, replayed), save);
     if (currentDevelop.value.sha !== develop.value.sha) return this.#finish(request, correlationId, this.#result(request, correlationId, "stale_head", "develop changed before release CI observation.", "stale_head", evidence, replayed), save);
-    const release = await this.#findOrCreatePull({ ...request, expectedHeadSha: develop.value.sha }, SHIPMENT_POC_RELEASE_BASE, existing?.releasePullRequestNumber, correlationId);
+    const release = await this.#findOrCreatePull({
+      eventId: request.eventId,
+      headBranch: SHIPMENT_POC_FEATURE_BASE,
+      baseBranch: SHIPMENT_POC_RELEASE_BASE,
+      expectedHeadSha: develop.value.sha,
+      ...(existing?.releasePullRequestNumber === undefined ? {} : { knownNumber: existing.releasePullRequestNumber }),
+      correlationId,
+      ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+    });
     if (release.outcome !== "success") return this.#finish(request, correlationId, resultFromFailure(request, correlationId, release, evidence, replayed), save);
     evidence = { ...evidence, releasePullRequest: pullEvidence(release.value) };
     await save({ releasePullRequestNumber: release.value.number, releasePullRequestUrl: release.value.url, releaseHeadSha: release.value.headSha });
-    if (release.value.headSha !== develop.value.sha) return this.#finish(request, correlationId, this.#result(request, correlationId, "stale_head", "Release PR does not point at the current develop head.", "stale_head", evidence, replayed), save);
+    if (release.value.state !== "open" || release.value.merged) return this.#finish(request, correlationId, this.#result(request, correlationId, "policy_blocked", "Release PR must remain open; merging the release PR is forbidden in this POC.", "release_merge_forbidden", evidence, replayed), save);
+    if (release.value.headBranch !== SHIPMENT_POC_FEATURE_BASE || release.value.baseBranch !== SHIPMENT_POC_RELEASE_BASE || release.value.headSha !== develop.value.sha) return this.#finish(request, correlationId, this.#result(request, correlationId, "stale_head", "Release PR does not point from develop at the current develop head to main.", "stale_head", evidence, replayed), save);
     const releaseDevelop = await this.#gateway.getBranchHead(SHIPMENT_POC_FEATURE_BASE, context());
     if (releaseDevelop.outcome !== "success") return this.#finish(request, correlationId, resultFromFailure(request, correlationId, releaseDevelop, evidence, replayed), save);
     if (releaseDevelop.value.sha !== develop.value.sha) return this.#finish(request, correlationId, this.#result(request, correlationId, "stale_head", "develop changed before release CI completed its identity checks.", "stale_head", evidence, replayed), save);
-    const releaseWatch = await this.#watcher.watch(watchRequest(release.value.number, develop.value.sha, request, correlationId));
+    const releaseWatch = await this.#watcher.watch(watchRequest(release.value.number, develop.value.sha, request, correlationId, SHIPMENT_POC_RELEASE_WORKFLOW));
     const releaseFailed = resultFromWatch(request, releaseWatch, "release", evidence, replayed);
     if (releaseFailed !== undefined) {
       const runId = releaseWatch.workflowRunId;
@@ -514,32 +529,35 @@ export class GitHubShipmentPoc {
     return final;
   }
 
-  async #findOrCreatePull(request: GitHubShipmentPocRequest, baseBranch: string, knownNumber: number | undefined, correlationId: string): Promise<GitHubOperationResult<GitHubShipmentPullRequest>> {
-    const context: GitHubRequestContext = { correlationId, ...(request.signal === undefined ? {} : { signal: request.signal }), timeoutMs: this.#config.timeoutMs };
-    if (knownNumber !== undefined) {
-      const known = await this.#gateway.getPullRequest(knownNumber, context);
-      if (known.outcome === "success" && known.value.headBranch === request.headBranch && known.value.baseBranch === baseBranch && (known.value.state === "open" || known.value.merged)) return known;
-      if (known.outcome === "success" && known.value.headBranch === request.headBranch && known.value.baseBranch === baseBranch) return failure("permanent_error", "conflict", "The recorded shipment PR is closed without a verified merge.", correlationId, "not_accepted");
-      if (known.outcome !== "success" && known.error.code !== "not_found") return known;
+  async #findOrCreatePull(input: { readonly eventId: string; readonly headBranch: string; readonly baseBranch: string; readonly expectedHeadSha: string; readonly knownNumber?: number; readonly correlationId: string; readonly timeoutMs?: number; readonly signal?: AbortSignal }): Promise<GitHubOperationResult<GitHubShipmentPullRequest>> {
+    const context: GitHubRequestContext = { correlationId: input.correlationId, ...(input.signal === undefined ? {} : { signal: input.signal }), timeoutMs: this.#config.timeoutMs };
+    if (input.knownNumber !== undefined) {
+      const known = await this.#gateway.getPullRequest(input.knownNumber, context);
+      if (known.outcome === "success") {
+        if (known.value.headBranch !== input.headBranch || known.value.baseBranch !== input.baseBranch) return failure("permanent_error", "conflict", "The recorded shipment PR does not match the required head and base branches.", input.correlationId, "not_accepted");
+        if (known.value.state === "open" || known.value.merged) return known;
+        return failure("permanent_error", "conflict", "The recorded shipment PR is closed without a verified merge.", input.correlationId, "not_accepted");
+      }
+      if (known.error.code !== "not_found") return known;
     }
-    const listed = await this.#gateway.listPullRequests(request.headBranch, baseBranch, context);
+    const listed = await this.#gateway.listPullRequests(input.headBranch, input.baseBranch, context);
     if (listed.outcome !== "success") return listed;
-    const expectedMarker = marker(request.eventId);
+    const expectedMarker = marker(input.eventId);
     const marked = listed.value.filter((pull) => pull.body?.includes(expectedMarker) === true);
     const candidates = marked.length > 0 ? marked : listed.value;
-    if (candidates.length > 1) return failure("permanent_error", "conflict", "Multiple open PRs match the controlled shipment target.", correlationId, "not_accepted");
+    if (candidates.length > 1) return failure("permanent_error", "conflict", "Multiple open PRs match the controlled shipment target.", input.correlationId, "not_accepted");
     if (candidates.length === 1) {
       const pull = candidates[0]!;
-      if (marked.length === 0 && knownNumber === undefined) return failure("permanent_error", "conflict", "An unmarked PR already exists for the dedicated shipment branch.", correlationId, "not_accepted");
-      return success(pull, correlationId);
+      if (marked.length === 0 && input.knownNumber === undefined) return failure("permanent_error", "conflict", "An unmarked PR already exists for the dedicated shipment branch.", input.correlationId, "not_accepted");
+      return success(pull, input.correlationId);
     }
-    const created = await this.#gateway.createPullRequest({ headBranch: request.headBranch, baseBranch, title: baseBranch === SHIPMENT_POC_FEATURE_BASE ? "Pirx controlled shipment POC" : "Pirx controlled release-readiness POC", body: `${baseBranch === SHIPMENT_POC_FEATURE_BASE ? "Controlled feature shipment" : "Controlled release readiness"}.\n\n${expectedMarker}`, idempotencyKey: `shipment:${request.eventId}:${baseBranch}-pr`, correlationId, ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }) });
+    const created = await this.#gateway.createPullRequest({ headBranch: input.headBranch, baseBranch: input.baseBranch, title: input.baseBranch === SHIPMENT_POC_FEATURE_BASE ? "Pirx controlled shipment POC" : "Pirx controlled release-readiness POC", body: `${input.baseBranch === SHIPMENT_POC_FEATURE_BASE ? "Controlled feature shipment" : "Controlled release readiness"}.\n\n${expectedMarker}`, idempotencyKey: `shipment:${input.eventId}:${input.baseBranch}-pr`, correlationId: input.correlationId, ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }) });
     if (created.outcome !== "unknown") return created;
-    const reconciled = await this.#gateway.listPullRequests(request.headBranch, baseBranch, context);
+    const reconciled = await this.#gateway.listPullRequests(input.headBranch, input.baseBranch, context);
     if (reconciled.outcome === "success") {
       const exact = reconciled.value.filter((pull) => pull.body?.includes(expectedMarker) === true);
-      if (exact.length === 1) return success(exact[0]!, correlationId);
-      if (exact.length > 1) return failure("permanent_error", "conflict", "Unknown PR creation reconciled to multiple matching PRs.", correlationId, "not_accepted");
+      if (exact.length === 1) return success(exact[0]!, input.correlationId);
+      if (exact.length > 1) return failure("permanent_error", "conflict", "Unknown PR creation reconciled to multiple matching PRs.", input.correlationId, "not_accepted");
     }
     return created;
   }

@@ -308,6 +308,8 @@ export interface GitHubActionsWatchRequest {
   readonly workflowRunId?: number;
   readonly pullRequestNumber?: number;
   readonly expectedHeadSha?: string;
+  /** Exact top-level workflow name required for a PR gate. */
+  readonly requiredWorkflowName?: string;
   readonly timeoutMs?: number;
   readonly pollIntervalMs?: number;
   readonly maxFailedJobs?: number;
@@ -536,6 +538,7 @@ export class GitHubActionsWatcher {
     if (hasRun === hasPullRequest) return "Provide exactly one of workflowRunId or pullRequestNumber.";
     if (hasRun && (!Number.isSafeInteger(request.workflowRunId) || request.workflowRunId! <= 0 || request.expectedHeadSha !== undefined)) return "workflowRunId must be positive and cannot be combined with expectedHeadSha.";
     if (hasPullRequest && (!Number.isSafeInteger(request.pullRequestNumber) || request.pullRequestNumber! <= 0 || request.expectedHeadSha === undefined || !safeHead(request.expectedHeadSha))) return "pullRequestNumber requires a bounded expectedHeadSha.";
+    if (request.requiredWorkflowName !== undefined && (request.workflowRunId !== undefined || request.requiredWorkflowName.trim().length === 0 || request.requiredWorkflowName.length > 256 || /[\u0000-\u001f\u007f]/u.test(request.requiredWorkflowName))) return "requiredWorkflowName is only valid for a pull-request watch and must be bounded.";
     const timeoutMs = request.timeoutMs ?? 60_000;
     const pollIntervalMs = request.pollIntervalMs ?? 2_000;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > this.#maxTimeoutMs) return `timeoutMs must be a positive integer no greater than ${this.#maxTimeoutMs}.`;
@@ -552,16 +555,16 @@ export class GitHubActionsWatcher {
     }
     const result = await this.#gateway.listWorkflowRunsForPullRequest(request.pullRequestNumber!, context);
     if (result.outcome !== "success") return { result, attempts: 1 };
-    const matches = result.value.filter((run) => run.headSha === request.expectedHeadSha);
+    const matches = result.value.filter((run) => run.headSha === request.expectedHeadSha && (request.requiredWorkflowName === undefined || run.name === request.requiredWorkflowName));
     if (matches.length === 0) {
       return {
-        result: failure("permanent_error", "not_found", "No GitHub Actions run matches the requested pull request head.", result.correlationId, "not_accepted", result.response),
+        result: failure("permanent_error", "not_found", request.requiredWorkflowName === undefined ? "No GitHub Actions run matches the requested pull request head." : "No GitHub Actions run matches the requested pull request head and required workflow.", result.correlationId, "not_accepted", result.response),
         attempts: 1,
       };
     }
     if (matches.length > 1) {
       return {
-        result: failure("permanent_error", "conflict", "Multiple GitHub Actions runs match the requested pull request head.", result.correlationId, "not_accepted", result.response),
+        result: failure("permanent_error", "conflict", request.requiredWorkflowName === undefined ? "Multiple GitHub Actions runs match the requested pull request head." : "Multiple GitHub Actions runs match the requested pull request head and required workflow.", result.correlationId, "not_accepted", result.response),
         attempts: 1,
       };
     }

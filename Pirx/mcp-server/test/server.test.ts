@@ -128,6 +128,31 @@ test("server exposes complete tools with safe annotations", async (context) => {
   assert.match(byName.get("obsidian_read")?.description ?? "", /current external state/u);
 });
 
+test("shipment POC is annotated as a mutating operation", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-shipment-server-vault-"));
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = createMcpServer({
+    environment: {},
+    obsidianVault: new ObsidianVault(root),
+    calendar: fakeCalendar(),
+    githubShipmentPocConfig: { token: "test", owner: "PiotrGry", repository: "zdrovena-reconciliation", apiUrl: "https://api.github.com", timeoutMs: 100 },
+    githubShipmentPocTransport: { async restRead() { throw new Error("not called while listing tools"); }, async restWrite() { throw new Error("not called while listing tools"); } },
+  });
+  const client = new Client({ name: "pirx-test", version: "0.1.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  context.after(async () => {
+    await client.close();
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const listed = await client.listTools();
+  const tool = listed.tools.find((item) => item.name === "github_shipment_round_trip_poc");
+  assert.ok(tool);
+  assert.equal(tool.annotations?.readOnlyHint, false);
+  assert.equal(tool.annotations?.destructiveHint, true);
+});
+
 test("a failed Calendar tool does not kill MCP and a later call succeeds", async (context) => {
   const fixture = await connectedServer();
   context.after(async () => {

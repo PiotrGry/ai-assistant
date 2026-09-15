@@ -78,7 +78,7 @@ export function registerGitHubShipmentPocTool(
       description: "Verify one CODE_PUSHED branch, create or reuse its PR into develop, watch exact-head CI, merge only exact green CI into develop, then create or reuse and watch the develop-to-main release PR. This operation stops before main and never deploys production.",
       inputSchema,
       outputSchema,
-      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: true },
     },
     async (input, context) => {
       const correlationId = input.correlationId ?? randomUUID();

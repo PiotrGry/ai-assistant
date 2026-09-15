@@ -12,6 +12,8 @@ import {
   type GitHubShipmentPullRequest,
   type GitHubOperationResult,
   type GitHubRequestContext,
+  type GitHubActionsWatchRequest,
+  failure,
   success,
 } from "../src/index.js";
 import type { GitHubActionsWatchResult, GitHubShipmentPocWatcher } from "../src/index.js";
@@ -26,7 +28,9 @@ function pull(number: number, baseBranch: "develop" | "main", headSha: string, o
 class FakeGateway implements GitHubShipmentPocGatewayPort {
   readonly pulls = new Map<number, GitHubShipmentPullRequest>();
   readonly merges: Array<{ number: number; sha: string }> = [];
-  readonly creates: Array<{ base: string; idempotencyKey: string }> = [];
+  readonly creates: Array<{ head: string; base: string; idempotencyKey: string }> = [];
+  readonly listRequests: Array<{ head: string; base: string }> = [];
+  readonly watchRequests: GitHubActionsWatchRequest[] = [];
   developSha = "develop-sha";
   featureRuns: GitHubActionsWatchResult[] = [{ outcome: "success", pullRequestNumber: 1, expectedHeadSha: request.expectedHeadSha, workflowRunId: 11, repository: "PiotrGry/zdrovena-reconciliation", testedRevision: request.expectedHeadSha, status: "completed", conclusion: "success", runUrl: "https://github.com/runs/11", polls: 1, providerAttempts: 1 }];
   releaseRuns: GitHubActionsWatchResult[] = [{ outcome: "success", pullRequestNumber: 2, expectedHeadSha: "develop-sha", workflowRunId: 22, repository: "PiotrGry/zdrovena-reconciliation", testedRevision: "develop-sha", status: "completed", conclusion: "success", runUrl: "https://github.com/runs/22", polls: 1, providerAttempts: 1 }];
@@ -34,18 +38,19 @@ class FakeGateway implements GitHubShipmentPocGatewayPort {
   async getBranchHead(branch: string): Promise<GitHubOperationResult<{ branch: string; sha: string }>> {
     return success({ branch, sha: branch === "develop" ? this.developSha : request.expectedHeadSha }, "test");
   }
-  async listPullRequests(_head: string, base: string): Promise<GitHubOperationResult<readonly GitHubShipmentPullRequest[]>> {
-    return success([...this.pulls.values()].filter((pull) => pull.baseBranch === base && pull.state === "open"), "test");
+  async listPullRequests(head: string, base: string): Promise<GitHubOperationResult<readonly GitHubShipmentPullRequest[]>> {
+    this.listRequests.push({ head, base });
+    return success([...this.pulls.values()].filter((pull) => pull.headBranch === head && pull.baseBranch === base && pull.state === "open"), "test");
   }
   async getPullRequest(number: number): Promise<GitHubOperationResult<GitHubShipmentPullRequest>> {
     const value = this.pulls.get(number);
     return value === undefined ? { outcome: "permanent_error", error: { code: "not_found", message: "missing" }, correlationId: "test", remoteOutcome: "not_accepted" } : success(value, "test");
   }
-  async createPullRequest(input: { baseBranch: string; idempotencyKey: string }): Promise<GitHubOperationResult<GitHubShipmentPullRequest>> {
+  async createPullRequest(input: { headBranch: string; baseBranch: string; idempotencyKey: string }): Promise<GitHubOperationResult<GitHubShipmentPullRequest>> {
     const number = input.baseBranch === "develop" ? 1 : 2;
-    const value = input.baseBranch === "develop" ? pull(number, "develop", request.expectedHeadSha) : pull(number, "main", this.developSha);
+    const value = input.baseBranch === "develop" ? pull(number, "develop", request.expectedHeadSha, { headBranch: input.headBranch }) : pull(number, "main", this.developSha, { headBranch: input.headBranch });
     this.pulls.set(number, value);
-    this.creates.push({ base: input.baseBranch, idempotencyKey: input.idempotencyKey });
+    this.creates.push({ head: input.headBranch, base: input.baseBranch, idempotencyKey: input.idempotencyKey });
     return success(value, "test");
   }
   async mergePullRequest(number: number, sha: string): Promise<GitHubOperationResult<{ merged: true; sha: string }>> {
@@ -62,7 +67,11 @@ class FakeGateway implements GitHubShipmentPocGatewayPort {
 function fakeWatcher(gateway: FakeGateway): GitHubShipmentPocWatcher {
   let featureIndex = 0;
   let releaseIndex = 0;
-  return { watch: async (input: { pullRequestNumber?: number }) => input.pullRequestNumber === 1 ? gateway.featureRuns[featureIndex++]! : gateway.releaseRuns[releaseIndex++]! };
+  return { watch: async (input: GitHubActionsWatchRequest) => {
+    gateway.watchRequests.push(input);
+    if (input.pullRequestNumber === 1) return gateway.featureRuns[Math.min(featureIndex++, gateway.featureRuns.length - 1)]!;
+    return gateway.releaseRuns[Math.min(releaseIndex++, gateway.releaseRuns.length - 1)]!;
+  } };
 }
 
 test("shipment POC performs feature merge and stops at green release approval", async () => {
@@ -70,7 +79,12 @@ test("shipment POC performs feature merge and stops at green release approval", 
   const result = await new GitHubShipmentPoc(gateway, fakeWatcher(gateway), new InMemoryGitHubShipmentPocStore(), config).execute(request);
   assert.equal(result.outcome, "production_approval_required");
   assert.deepEqual(gateway.merges, [{ number: 1, sha: "feature-sha" }]);
-  assert.deepEqual(gateway.creates.map((item) => item.base), ["develop", "main"]);
+  assert.deepEqual(gateway.creates.map((item) => ({ head: item.head, base: item.base })), [{ head: "pirx/poc-docs", base: "develop" }, { head: "develop", base: "main" }]);
+  assert.deepEqual(gateway.listRequests, [{ head: "pirx/poc-docs", base: "develop" }, { head: "develop", base: "main" }]);
+  assert.deepEqual(gateway.watchRequests.map((item) => ({ pr: item.pullRequestNumber, sha: item.expectedHeadSha, workflow: item.requiredWorkflowName })), [
+    { pr: 1, sha: "feature-sha", workflow: "Develop — Fast Gate" },
+    { pr: 2, sha: "develop-sha", workflow: "PR Validate — develop → main" },
+  ]);
   assert.equal(result.evidence.featurePullRequest?.runId, 11);
   assert.equal(result.evidence.releasePullRequest?.runId, 22);
 });
@@ -90,6 +104,24 @@ test("shipment POC never merges when feature CI is not exact green", async () =>
   const result = await new GitHubShipmentPoc(gateway, fakeWatcher(gateway), new InMemoryGitHubShipmentPocStore(), config).execute(request);
   assert.equal(result.outcome, "feature_ci_failed");
   assert.equal(gateway.merges.length, 0);
+});
+
+test("shipment POC reports release CI failure and never merges the release PR", async () => {
+  const gateway = new FakeGateway();
+  gateway.releaseRuns = [{ outcome: "failed", pullRequestNumber: 2, expectedHeadSha: "develop-sha", workflowRunId: 22, repository: "PiotrGry/zdrovena-reconciliation", testedRevision: "develop-sha", status: "completed", conclusion: "failure", runUrl: "https://github.com/runs/22", failedJobs: [], polls: 1, providerAttempts: 1 }];
+  const result = await new GitHubShipmentPoc(gateway, fakeWatcher(gateway), new InMemoryGitHubShipmentPocStore(), config).execute(request);
+  assert.equal(result.outcome, "release_ci_failed");
+  assert.deepEqual(gateway.merges, [{ number: 1, sha: "feature-sha" }]);
+});
+
+test("shipment POC blocks missing and ambiguous gate evidence before feature merge", async () => {
+  for (const outcome of ["not_found", "ambiguous"] as const) {
+    const gateway = new FakeGateway();
+    gateway.featureRuns = [{ outcome, pullRequestNumber: 1, expectedHeadSha: "feature-sha", repository: "PiotrGry/zdrovena-reconciliation", ...(outcome === "not_found" ? { errorCode: "not_found", message: "missing" } : { errorCode: "ambiguous", message: "duplicate" }), polls: 1, providerAttempts: 1 }];
+    const result = await new GitHubShipmentPoc(gateway, fakeWatcher(gateway), new InMemoryGitHubShipmentPocStore(), config).execute(request);
+    assert.equal(result.outcome, outcome);
+    assert.equal(gateway.merges.length, 0);
+  }
 });
 
 test("shipment POC rechecks the feature head immediately before merge", async () => {
@@ -115,6 +147,50 @@ test("shipment POC replay reuses persisted PRs and merge state", async () => {
   assert.equal(second.replayed, true);
   assert.equal(gateway.creates.length, creates);
   assert.equal(gateway.merges.length, merges);
+});
+
+test("shipment POC reconciles replay against remote PR identity instead of trusting the ledger", async () => {
+  const gateway = new FakeGateway();
+  const store = new InMemoryGitHubShipmentPocStore();
+  const first = await new GitHubShipmentPoc(gateway, fakeWatcher(gateway), store, config).execute(request);
+  assert.equal(first.outcome, "production_approval_required");
+  gateway.pulls.set(2, { ...gateway.pulls.get(2)!, headSha: "remote-changed" });
+  const replay = await new GitHubShipmentPoc(gateway, fakeWatcher(gateway), store, config).execute(request);
+  assert.equal(replay.outcome, "stale_head");
+  assert.notEqual(replay.outcome, "production_approval_required");
+  assert.equal(gateway.merges.length, 1);
+});
+
+test("shipment POC blocks a release PR that was merged outside the POC", async () => {
+  const gateway = new FakeGateway();
+  const store = new InMemoryGitHubShipmentPocStore();
+  const first = await new GitHubShipmentPoc(gateway, fakeWatcher(gateway), store, config).execute(request);
+  assert.equal(first.outcome, "production_approval_required");
+  gateway.pulls.set(2, { ...gateway.pulls.get(2)!, state: "closed", merged: true, mergeCommitSha: "unsafe-main-merge" });
+  const replay = await new GitHubShipmentPoc(gateway, fakeWatcher(gateway), store, config).execute(request);
+  assert.equal(replay.outcome, "policy_blocked");
+  assert.equal(replay.errorCode, "release_merge_forbidden");
+  assert.equal(gateway.merges.length, 1);
+});
+
+test("shipment POC fails closed for cancelled, rate-limited and uncertain feature operations", async () => {
+  const cancelled = new FakeGateway();
+  cancelled.featureRuns = [{ outcome: "cancelled", pullRequestNumber: 1, expectedHeadSha: "feature-sha", workflowRunId: 11, repository: "PiotrGry/zdrovena-reconciliation", testedRevision: "feature-sha", status: "completed", conclusion: "cancelled", runUrl: "https://github.com/runs/11", polls: 1, providerAttempts: 1 }];
+  const cancelledResult = await new GitHubShipmentPoc(cancelled, fakeWatcher(cancelled), new InMemoryGitHubShipmentPocStore(), config).execute(request);
+  assert.equal(cancelledResult.outcome, "pending_or_timeout");
+  assert.equal(cancelled.merges.length, 0);
+
+  const rateLimited = new FakeGateway();
+  rateLimited.featureRuns = [{ outcome: "rate_limited", pullRequestNumber: 1, expectedHeadSha: "feature-sha", repository: "PiotrGry/zdrovena-reconciliation", errorCode: "rate_limited", message: "limited", polls: 1, providerAttempts: 1 }];
+  const rateResult = await new GitHubShipmentPoc(rateLimited, fakeWatcher(rateLimited), new InMemoryGitHubShipmentPocStore(), config).execute(request);
+  assert.equal(rateResult.outcome, "rate_limited");
+  assert.equal(rateLimited.merges.length, 0);
+
+  const uncertain = new FakeGateway();
+  uncertain.mergePullRequest = async () => failure("unknown", "unknown", "write result uncertain", "test", "unknown");
+  const uncertainResult = await new GitHubShipmentPoc(uncertain, fakeWatcher(uncertain), new InMemoryGitHubShipmentPocStore(), config).execute(request);
+  assert.equal(uncertainResult.outcome, "unknown");
+  assert.equal(uncertainResult.errorCode, "unknown");
 });
 
 test("shipment POC rejects an event replay with a different revision", async () => {
