@@ -371,6 +371,21 @@ export {
   type TaskCompareAndSet,
 } from "./runtime/sqlite.js";
 export {
+  WORKSPACE_OWNERSHIP_LIMITS,
+  WORKSPACE_OWNERSHIP_SCHEMA_VERSION,
+  normalizeWorkspaceOwnershipInput,
+  validateWorkspaceOwnershipRecord,
+  workspaceOwnershipId,
+  workspaceOwnershipMatches,
+  workspaceOwnershipRevision,
+  workspaceOwnershipTimestamp,
+  type WorkspaceOwnershipInput,
+  type WorkspaceOwnershipMutationResult,
+  type WorkspaceOwnershipRecord,
+  type WorkspaceOwnershipState,
+} from "./runtime/workspace-ownership.js";
+export { WorkspaceOwnershipRepository } from "./runtime/sqlite.js";
+export {
   LEASE_LIMITS,
   leaseDuration,
   leaseExpiresAt,

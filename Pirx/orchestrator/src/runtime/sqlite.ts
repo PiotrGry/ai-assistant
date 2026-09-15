@@ -77,8 +77,18 @@ import {
   type ReleaseTaskRecord,
   type ReleaseTransitionInput,
 } from "./release.js";
+import {
+  normalizeWorkspaceOwnershipInput,
+  validateWorkspaceOwnershipRecord,
+  workspaceOwnershipId,
+  workspaceOwnershipMatches,
+  workspaceOwnershipRevision,
+  workspaceOwnershipTimestamp,
+  type WorkspaceOwnershipInput,
+  type WorkspaceOwnershipRecord,
+} from "./workspace-ownership.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 11 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 12 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -178,6 +188,7 @@ export interface RuntimeTransaction {
   readonly releases: ReleaseRepository;
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
+  readonly workspaces: WorkspaceOwnershipRepository;
 }
 
 export class RuntimeStorageError extends Error {
@@ -472,6 +483,36 @@ const MIGRATIONS: readonly string[] = [
       ON runtime_release_tasks (task_id, attempt_id, release_id);
     CREATE INDEX IF NOT EXISTS runtime_releases_recovery
       ON runtime_releases (state, updated_at, id);
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_workspace_ownership (
+      task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT,
+      attempt_id TEXT PRIMARY KEY REFERENCES runtime_attempts(id) ON DELETE RESTRICT,
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      repository_identity TEXT NOT NULL CHECK (length(trim(repository_identity)) > 0),
+      repository_root TEXT NOT NULL CHECK (length(trim(repository_root)) > 0),
+      assigned_branch TEXT NOT NULL CHECK (length(trim(assigned_branch)) > 0),
+      worktree_path TEXT NOT NULL CHECK (length(trim(worktree_path)) > 0),
+      expected_base_revision TEXT NOT NULL CHECK (length(trim(expected_base_revision)) BETWEEN 4 AND 64),
+      current_revision TEXT NOT NULL CHECK (length(trim(current_revision)) BETWEEN 4 AND 64),
+      ownership_state TEXT NOT NULL CHECK (ownership_state IN ('active', 'released')),
+      acquired_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      released_at TEXT,
+      ownership_token TEXT NOT NULL UNIQUE CHECK (length(trim(ownership_token)) > 0),
+      version INTEGER NOT NULL CHECK (version > 0),
+      CHECK ((ownership_state = 'active' AND released_at IS NULL) OR (ownership_state = 'released' AND released_at IS NOT NULL))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS runtime_workspace_active_worktree
+      ON runtime_workspace_ownership (worktree_path) WHERE ownership_state = 'active';
+    CREATE UNIQUE INDEX IF NOT EXISTS runtime_workspace_active_branch
+      ON runtime_workspace_ownership (repository_identity, assigned_branch) WHERE ownership_state = 'active';
+    CREATE UNIQUE INDEX IF NOT EXISTS runtime_workspace_active_task
+      ON runtime_workspace_ownership (task_id) WHERE ownership_state = 'active';
+    CREATE INDEX IF NOT EXISTS runtime_workspace_repository_lookup
+      ON runtime_workspace_ownership (repository_identity, assigned_branch, worktree_path, ownership_state);
+    CREATE INDEX IF NOT EXISTS runtime_workspace_recovery
+      ON runtime_workspace_ownership (ownership_state, updated_at, attempt_id);
   `,
 ];
 
@@ -1499,6 +1540,144 @@ export class WebhookRepository {
   }
 }
 
+function workspaceOwnershipFromRow(row: Record<string, unknown>): StorageResult<WorkspaceOwnershipRecord> {
+  try {
+    if (typeof row.task_id !== "string" || typeof row.attempt_id !== "string" || typeof row.schema_version !== "number" || typeof row.repository_identity !== "string" || typeof row.repository_root !== "string" || typeof row.assigned_branch !== "string" || typeof row.worktree_path !== "string" || typeof row.expected_base_revision !== "string" || typeof row.current_revision !== "string" || typeof row.ownership_state !== "string" || typeof row.acquired_at !== "string" || typeof row.updated_at !== "string" || typeof row.ownership_token !== "string" || typeof row.version !== "number") return invalidRecord();
+    const record: WorkspaceOwnershipRecord = {
+      schemaVersion: row.schema_version as 1,
+      taskId: row.task_id as TaskId,
+      attemptId: row.attempt_id as AttemptId,
+      repository: row.repository_identity,
+      repositoryRoot: row.repository_root,
+      assignedBranch: row.assigned_branch,
+      worktreePath: row.worktree_path,
+      expectedBaseRevision: row.expected_base_revision,
+      currentRevision: row.current_revision,
+      state: row.ownership_state as WorkspaceOwnershipRecord["state"],
+      acquiredAt: row.acquired_at as UtcTimestamp,
+      updatedAt: row.updated_at as UtcTimestamp,
+      ownershipToken: row.ownership_token,
+      version: row.version,
+      ...(row.released_at === null ? {} : { releasedAt: row.released_at as UtcTimestamp }),
+    };
+    return validateWorkspaceOwnershipRecord(record) ? success(Object.freeze(record)) : invalidRecord();
+  } catch {
+    return invalidRecord();
+  }
+}
+
+function workspaceInputError(input: WorkspaceOwnershipInput): WorkspaceOwnershipInput | StorageResult<WorkspaceOwnershipRecord> {
+  try { return normalizeWorkspaceOwnershipInput(input); }
+  catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Workspace ownership input is invalid." }; }
+}
+
+export class WorkspaceOwnershipRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public claim(input: WorkspaceOwnershipInput): StorageResult<WorkspaceOwnershipRecord> {
+    const normalized = workspaceInputError(input);
+    if (!("taskId" in normalized)) return normalized;
+    return this.#store.execute(() => {
+      try {
+        const attempt = this.#store.database.prepare("SELECT task_id, state FROM runtime_attempts WHERE id = ?").get(normalized.attemptId) as { task_id: string; state: string } | undefined;
+        if (attempt === undefined) return notFound("Attempt was not found.");
+        if (attempt.task_id !== normalized.taskId) return conflict("Attempt belongs to another Task.");
+        if (attempt.state !== "running") return conflict("Only a running Attempt can own an active workspace.");
+        const existing = this.#store.database.prepare("SELECT * FROM runtime_workspace_ownership WHERE attempt_id = ?").get(normalized.attemptId) as Record<string, unknown> | undefined;
+        if (existing !== undefined) {
+          const parsed = workspaceOwnershipFromRow(existing);
+          if (parsed.outcome !== "success") return parsed;
+          if (parsed.value.state === "active" && workspaceOwnershipMatches(parsed.value, normalized)) return success(parsed.value);
+          return conflict("The Attempt already has an incompatible or released workspace ownership record.");
+        }
+        const token = randomUUID();
+        this.#store.database.prepare("INSERT INTO runtime_workspace_ownership (task_id, attempt_id, schema_version, repository_identity, repository_root, assigned_branch, worktree_path, expected_base_revision, current_revision, ownership_state, acquired_at, updated_at, released_at, ownership_token, version) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, ?, 1)").run(
+          normalized.taskId, normalized.attemptId, normalized.repository, normalized.repositoryRoot, normalized.assignedBranch, normalized.worktreePath, normalized.expectedBaseRevision, normalized.expectedBaseRevision, normalized.acquiredAt, normalized.acquiredAt, token,
+        );
+        const created = this.#store.database.prepare("SELECT * FROM runtime_workspace_ownership WHERE attempt_id = ?").get(normalized.attemptId) as Record<string, unknown> | undefined;
+        return created === undefined ? storageFailure() : workspaceOwnershipFromRow(created);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public getByTask(taskId: string): StorageResult<WorkspaceOwnershipRecord> { return this.#get("task_id = ? AND ownership_state = 'active'", taskId, "No active workspace was found for the Task."); }
+  public getByAttempt(attemptId: string): StorageResult<WorkspaceOwnershipRecord> { return this.#get("attempt_id = ?", attemptId, "No workspace ownership was found for the Attempt."); }
+  public getByTaskAttempt(taskId: string, attemptId: string): StorageResult<WorkspaceOwnershipRecord> {
+    try { workspaceOwnershipId(taskId, "Task ID"); workspaceOwnershipId(attemptId, "Attempt ID"); } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Workspace lookup identity is invalid." }; }
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_workspace_ownership WHERE task_id = ? AND attempt_id = ?").get(taskId, attemptId) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound("No workspace ownership was found for the Task and Attempt.") : workspaceOwnershipFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public getByRepository(repository: string, assignedBranch: string, worktreePath: string): StorageResult<WorkspaceOwnershipRecord> {
+    let normalizedPath: string;
+    try { normalizedPath = normalizeWorkspaceOwnershipInput({ taskId: "lookup-task" as TaskId, attemptId: "lookup-attempt" as AttemptId, repository, repositoryRoot: "/lookup/repository", assignedBranch, worktreePath, expectedBaseRevision: "0000", acquiredAt: "2026-01-01T00:00:00.000Z" as UtcTimestamp }).worktreePath; } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Workspace lookup is invalid." }; }
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_workspace_ownership WHERE repository_identity = ? AND assigned_branch = ? AND worktree_path = ? ORDER BY version DESC LIMIT 1").get(repository, assignedBranch, normalizedPath) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound("No workspace ownership was found for the repository, branch, and worktree.") : workspaceOwnershipFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public updateCurrentRevision(attemptId: string, token: string, expectedVersion: number, revision: string, updatedAt: UtcTimestamp): StorageResult<WorkspaceOwnershipRecord> {
+    try { workspaceOwnershipId(attemptId, "Attempt ID"); workspaceOwnershipRevision(revision, "Current revision"); workspaceOwnershipTimestamp(updatedAt, "Updated timestamp"); if (typeof token !== "string" || token.length === 0 || !Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) throw new Error("Workspace ownership token or version is invalid."); } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Workspace update is invalid." }; }
+    return this.#store.execute(() => {
+      try {
+        const updated = this.#store.database.prepare("UPDATE runtime_workspace_ownership SET current_revision = ?, updated_at = ?, version = version + 1 WHERE attempt_id = ? AND ownership_state = 'active' AND ownership_token = ? AND version = ?").run(revision.toLowerCase(), updatedAt, attemptId, token, expectedVersion);
+        if (updated.changes !== 1) return this.#casFailure(attemptId);
+        return this.#readAttempt(attemptId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public release(attemptId: string, token: string, expectedVersion: number, releasedAt: UtcTimestamp): StorageResult<WorkspaceOwnershipRecord> {
+    try { workspaceOwnershipId(attemptId, "Attempt ID"); workspaceOwnershipTimestamp(releasedAt, "Released timestamp"); if (typeof token !== "string" || token.length === 0 || !Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) throw new Error("Workspace ownership token or version is invalid."); } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Workspace release is invalid." }; }
+    return this.#store.execute(() => {
+      try {
+        const updated = this.#store.database.prepare("UPDATE runtime_workspace_ownership SET ownership_state = 'released', released_at = ?, updated_at = ?, version = version + 1 WHERE attempt_id = ? AND ownership_state = 'active' AND ownership_token = ? AND version = ?").run(releasedAt, releasedAt, attemptId, token, expectedVersion);
+        if (updated.changes !== 1) return this.#casFailure(attemptId);
+        return this.#readAttempt(attemptId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public listRecoverable(): StorageResult<readonly WorkspaceOwnershipRecord[]> {
+    return this.#store.execute(() => {
+      try {
+        const rows = this.#store.database.prepare("SELECT * FROM runtime_workspace_ownership WHERE ownership_state = 'active' ORDER BY updated_at, attempt_id").all() as Record<string, unknown>[];
+        const values: WorkspaceOwnershipRecord[] = [];
+        for (const row of rows) { const parsed = workspaceOwnershipFromRow(row); if (parsed.outcome !== "success") return parsed; values.push(parsed.value); }
+        return success(Object.freeze(values));
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  #readAttempt(attemptId: string): StorageResult<WorkspaceOwnershipRecord> {
+    const row = this.#store.database.prepare("SELECT * FROM runtime_workspace_ownership WHERE attempt_id = ?").get(attemptId) as Record<string, unknown> | undefined;
+    return row === undefined ? notFound("Workspace ownership was not found.") : workspaceOwnershipFromRow(row);
+  }
+
+  #casFailure(attemptId: string): StorageResult<WorkspaceOwnershipRecord> {
+    const current = this.#readAttempt(attemptId);
+    return current.outcome === "not_found" ? current : conflict("Workspace ownership compare-and-set failed.");
+  }
+
+  #get(predicate: string, value: string, missing: string): StorageResult<WorkspaceOwnershipRecord> {
+    try { workspaceOwnershipId(value); } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Workspace lookup identity is invalid." }; }
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare(`SELECT * FROM runtime_workspace_ownership WHERE ${predicate} ORDER BY updated_at DESC, attempt_id LIMIT 1`).get(value) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound(missing) : workspaceOwnershipFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+}
+
 export class RuntimeSqliteStore {
   readonly #database: DatabaseSync;
   readonly #filename: string;
@@ -1512,6 +1691,7 @@ export class RuntimeSqliteStore {
   readonly releases: ReleaseRepository;
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
+  readonly workspaces: WorkspaceOwnershipRepository;
 
   private constructor(database: DatabaseSync, filename: string) {
     this.#database = database;
@@ -1524,6 +1704,7 @@ export class RuntimeSqliteStore {
     this.releases = new ReleaseRepository(this);
     this.projections = new ProjectionRepository(this);
     this.webhooks = new WebhookRepository(this);
+    this.workspaces = new WorkspaceOwnershipRepository(this);
   }
 
   public static open(options: RuntimeSqliteStoreOptions = {}): RuntimeSqliteStore {
@@ -1573,14 +1754,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;
