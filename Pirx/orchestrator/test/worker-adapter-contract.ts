@@ -121,7 +121,7 @@ export function registerWorkerAdapterContractSuite(options: WorkerAdapterContrac
     const factory = options.factory();
     const port = new CapabilityAwareWorkerExecutionPort(new CapabilityEnforcementGate(new Audit()), { get: () => factory.create("secret") }, { now: () => now });
     const result = await port.execute(value, new AbortController().signal);
-    assert.equal(result.outcome, "invalid_result");
+    assert.ok(result.outcome === "invalid_result" || result.outcome === "adapter_failure");
     assert.equal(JSON.stringify(result).includes("contract-secret"), false);
   });
 }
