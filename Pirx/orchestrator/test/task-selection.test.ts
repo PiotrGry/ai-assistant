@@ -43,7 +43,7 @@ function sync(store: RuntimeSqliteStore, taskId: string, queueOrder: number | un
   return store.selection.synchronize({ taskId: taskId as TaskId, dependencyState: "known", blockers: [], synchronizedAt: t1, ...(queueOrder === undefined ? {} : { queueOrder }), ...overrides });
 }
 
-test("selects at most one candidate by Priority, Queue Order, and Task ID", async () => {
+test("selects at most one candidate by Queue Order and Task ID without reprioritizing the curated queue", async () => {
   const setup = await fixture();
   const store = RuntimeSqliteStore.open({ filename: setup.filename });
   try {
@@ -56,7 +56,7 @@ test("selects at most one candidate by Priority, Queue Order, and Task ID", asyn
     const first = store.selection.select(request);
     assert.equal(first.outcome, "selected");
     if (first.outcome !== "selected") return;
-    assert.equal(first.candidate.task.id, "task-b");
+    assert.equal(first.candidate.task.id, "task-c");
     assert.equal(first.candidate.explanation.reasonCode, "ELIGIBLE");
     assert.equal(first.explanations.filter((explanation) => explanation.eligible).length, 4);
     assert.deepEqual(store.selection.select(request), first);
@@ -103,14 +103,14 @@ test("returns no_runnable_task for an empty eligible set and excludes non-ready 
   }
 });
 
-test("requires reconciliation for missing, duplicate, or unknown scheduling projections", async () => {
+test("keeps refined but unqueued Tasks out of execution and reconciles duplicate or unknown queued projections", async () => {
   const setup = await fixture();
   const store = RuntimeSqliteStore.open({ filename: setup.filename });
   try {
     assert.equal(store.tasks.create(task("task-missing")).outcome, "success");
     const missing = store.selection.select({ evaluatedAt: t2, worker: { workerId: "pirx", capabilities: ["tests.run"] } });
-    assert.equal(missing.outcome, "reconciliation_required");
-    if (missing.outcome === "reconciliation_required") assert.ok(missing.reasons.includes("missing_queue_order:task-missing"));
+    assert.equal(missing.outcome, "no_runnable_task");
+    if (missing.outcome === "no_runnable_task") assert.equal(missing.explanations[0]?.reasonCode, "NOT_QUEUED");
 
     assert.equal(sync(store, "task-missing", 10).outcome, "success");
     assert.equal(store.tasks.create(task("task-duplicate")).outcome, "success");

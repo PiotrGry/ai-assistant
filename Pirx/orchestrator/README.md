@@ -308,17 +308,20 @@ rolls back ownership changes together with related runtime records.
 Schema version 10 stores Queue Order, cooldown, dependency projection state,
 and normalized blocker relationships in `runtime_task_selection` and
 `runtime_task_blockers`. `TaskSelectionRepository.select()` evaluates only
-the durable runtime projection at the supplied time: ready Tasks need known
-dependencies and a unique positive Queue Order, unfinished blockers and
-active cooldowns exclude them, and every required Task capability must be
-present in the supplied worker capability set.
+the durable runtime projection at the supplied time. A ready Task enters the
+execution sprint only when it has a positive Queue Order. Ready Tasks without
+one remain in the refined pool and are reported as `NOT_QUEUED`; they do not
+block the mill. Queued Tasks need known dependencies and a unique Queue Order,
+unfinished blockers and active cooldowns exclude them, and every required Task
+capability must be present in the supplied worker capability set.
 
-Eligible candidates are ordered by numeric Priority, ascending Queue Order,
-then stable Task ID. The selector returns one candidate, an explicit
-`no_runnable_task`, or `reconciliation_required` for missing/duplicate Queue
-Order, unknown dependency state, unknown blockers, invalid worker metadata,
-or an unavailable projection. It never acquires a Lease, creates an Attempt,
-or asks an LLM to infer scheduling intent.
+Eligible candidates are ordered by ascending Queue Order, then stable Task ID.
+Priority remains planning metadata but cannot reorder a curated execution
+sprint. The selector returns one candidate, an explicit `no_runnable_task`, or
+`reconciliation_required` for duplicate Queue Order, unknown dependency state
+on a queued Task, unknown blockers, missing durable selection metadata, invalid
+worker metadata, or an unavailable projection. It never acquires a Lease,
+creates an Attempt, or asks an LLM to infer scheduling intent.
 
 ## Single-worker scheduler cycle
 
@@ -348,12 +351,14 @@ per Release/Task and Release/Attempt and cannot be replaced after validation
 starts.
 
 `ReleaseRepository` provides idempotent create and membership replay,
-referentially checked lookup, compare-and-set lifecycle transitions, and
-restart recovery for interrupted validating, merge, deployment, and
-production-verification states. Invalid, stale, duplicate, and out-of-order
-operations return explicit storage outcomes. The aggregate is deliberately
-limited to durable state: pull request, Actions, deployment, and production
-side effects remain outside this boundary.
+referentially checked lookup, idempotent compare-and-set lifecycle transitions,
+and restart recovery for interrupted validating, merge, deployment, and
+production-verification states. Transition timestamps cannot move backwards;
+merge, deployment, verification, and deployed states require their preceding
+PR/revision/deployment/version evidence. Invalid, stale, duplicate, conflicting
+replay, and out-of-order operations return explicit storage outcomes. The
+aggregate is deliberately limited to durable state: pull request, Actions,
+deployment, and production side effects remain outside this boundary.
 
 ## Runtime capability policy
 

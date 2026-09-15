@@ -95,7 +95,8 @@ test("enforces legal ordered transitions, reasons, CAS, replay, and rollback", a
     assert.equal(store.releases.transition("release-transition", { to: "rolled_back", expectedVersion: deployed.value.version, now: t5 }).outcome, "invalid_record");
     const rollback = store.releases.transition("release-transition", { to: "rolled_back", expectedVersion: deployed.value.version, now: t5, failureReason: "verification regression" });
     assert.equal(rollback.outcome, "success");
-    assert.equal(store.releases.transition("release-transition", { to: "rolled_back", expectedVersion: deployed.value.version, now: t5, failureReason: "verification regression" }).outcome, "conflict");
+    assert.equal(store.releases.transition("release-transition", { to: "rolled_back", expectedVersion: deployed.value.version, now: t5, failureReason: "verification regression" }).outcome, "success");
+    assert.equal(store.releases.transition("release-transition", { to: "rolled_back", expectedVersion: deployed.value.version, now: t5, failureReason: "different reason" }).outcome, "conflict");
 
     const replay = store.releases.create({ id: releaseId("release-transition"), repository: "PiotrGry/ai-assistant", sourceBranch: "feature/release", baseBranch: "main", createdAt: t0 });
     assert.equal(replay.outcome, "success");
@@ -112,6 +113,25 @@ test("enforces legal ordered transitions, reasons, CAS, replay, and rollback", a
   }
 });
 
+test("rejects invalid release identity, out-of-order time, and lifecycle states without required evidence", async () => {
+  const setup = await fixture();
+  const store = RuntimeSqliteStore.open({ filename: setup.filename });
+  try {
+    assert.equal(store.releases.create({ id: releaseId("same-branch"), repository: "PiotrGry/ai-assistant", sourceBranch: "main", baseBranch: "main", createdAt: t0 }).outcome, "invalid_record");
+    assert.equal(store.releases.create({ id: releaseId("release-evidence"), repository: "PiotrGry/ai-assistant", sourceBranch: "develop", baseBranch: "main", createdAt: t1 }).outcome, "success");
+    assert.equal(store.releases.transition("release-evidence", { to: "validating", expectedVersion: 1, now: t0 }).outcome, "invalid_record");
+    assert.equal(store.releases.transition("release-evidence", { to: "validating", expectedVersion: 1, now: t2 }).outcome, "success");
+    assert.equal(store.releases.transition("release-evidence", { to: "ready_to_merge", expectedVersion: 2, now: t3 }).outcome, "success");
+    assert.equal(store.releases.transition("release-evidence", { to: "merging", expectedVersion: 3, now: t4 }).outcome, "invalid_record");
+    assert.equal(store.releases.transition("release-evidence", { to: "merging", expectedVersion: 3, now: t4, releasePullRequest: { nodeId: "PR_BAD", number: 7, url: "https://github.com/PiotrGry/ai-assistant/issues/7" } }).outcome, "invalid_record");
+    assert.equal(store.releases.transition("release-evidence", { to: "merging", expectedVersion: 3, now: t4, releasePullRequest: { nodeId: "PR_7", number: 7, url: "https://github.com/PiotrGry/ai-assistant/pull/7" } }).outcome, "success");
+    assert.equal(store.releases.transition("release-evidence", { to: "deploying", expectedVersion: 4, now: t5 }).outcome, "invalid_record");
+  } finally {
+    store.close();
+    await rm(setup.directory, { recursive: true, force: true });
+  }
+});
+
 test("lists interrupted lifecycle states and recovers them to human action", async () => {
   const setup = await fixture();
   const store = RuntimeSqliteStore.open({ filename: setup.filename });
@@ -119,7 +139,7 @@ test("lists interrupted lifecycle states and recovers them to human action", asy
     assert.equal(store.releases.create({ id: releaseId("release-recovery"), repository: "PiotrGry/ai-assistant", sourceBranch: "feature/release", baseBranch: "main", createdAt: t0 }).outcome, "success");
     assert.equal(store.releases.transition("release-recovery", { to: "validating", expectedVersion: 1, now: t1 }).outcome, "success");
     assert.equal(store.releases.transition("release-recovery", { to: "ready_to_merge", expectedVersion: 2, now: t2 }).outcome, "success");
-    assert.equal(store.releases.transition("release-recovery", { to: "merging", expectedVersion: 3, now: t3 }).outcome, "success");
+    assert.equal(store.releases.transition("release-recovery", { to: "merging", expectedVersion: 3, now: t3, releasePullRequest: { nodeId: "PR_RECOVERY", number: 9, url: "https://github.com/PiotrGry/ai-assistant/pull/9" } }).outcome, "success");
     const recoverable = store.releases.listRecoverable();
     assert.equal(recoverable.outcome, "success");
     if (recoverable.outcome === "success") assert.equal(recoverable.value[0]?.state, "merging");

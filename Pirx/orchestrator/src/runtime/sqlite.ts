@@ -1102,8 +1102,7 @@ export class TaskSelectionRepository {
         continue;
       }
       metadataByTask.set(task.id, metadata.value);
-      if (metadata.value.queueOrder === undefined) reconciliationReasons.push(`missing_queue_order:${task.id}`);
-      if (metadata.value.dependencyState !== "known") reconciliationReasons.push(`unknown_dependency_state:${task.id}`);
+      if (metadata.value.queueOrder !== undefined && metadata.value.dependencyState !== "known") reconciliationReasons.push(`unknown_dependency_state:${task.id}`);
     }
     const queueOrders = new Map<number, string[]>();
     for (const metadata of metadataByTask.values()) {
@@ -1123,7 +1122,11 @@ export class TaskSelectionRepository {
     const eligible: RunnableTaskCandidate[] = [];
     for (const task of ready) {
       const metadata = metadataByTask.get(task.id);
-      if (metadata === undefined || metadata.queueOrder === undefined) continue;
+      if (metadata === undefined) continue;
+      if (metadata.queueOrder === undefined) {
+        explanations.push({ taskId: task.id, eligible: false, reasonCode: "NOT_QUEUED", priority: task.priority, missingCapabilities: [], blockers: metadata.blockers });
+        continue;
+      }
       const missingBlocker = metadata.blockers.find((blocker) => !tasks.value.some((candidate) => candidate.id === blocker));
       if (missingBlocker !== undefined) {
         reconciliationReasons.push(`unknown_blocker:${task.id}:${missingBlocker}`);
@@ -1138,7 +1141,7 @@ export class TaskSelectionRepository {
       if (explanation.eligible) eligible.push({ task, explanation });
     }
     if (reconciliationReasons.length > 0) return { outcome: "reconciliation_required", reasons: Object.freeze([...new Set(reconciliationReasons)].sort()), explanations: Object.freeze(explanations) };
-    eligible.sort((left, right) => left.task.priority - right.task.priority || (left.explanation.queueOrder ?? Number.MAX_SAFE_INTEGER) - (right.explanation.queueOrder ?? Number.MAX_SAFE_INTEGER) || left.task.id.localeCompare(right.task.id));
+    eligible.sort((left, right) => (left.explanation.queueOrder ?? Number.MAX_SAFE_INTEGER) - (right.explanation.queueOrder ?? Number.MAX_SAFE_INTEGER) || left.task.id.localeCompare(right.task.id));
     return eligible[0] === undefined ? { outcome: "no_runnable_task", explanations: Object.freeze(explanations) } : { outcome: "selected", candidate: eligible[0], explanations: Object.freeze(explanations) };
   }
 }
@@ -1270,16 +1273,26 @@ export class ReleaseRepository {
     return this.#store.execute(() => {
       const current = this.get(id);
       if (current.outcome !== "success") return current;
-      if (current.value.version !== input.expectedVersion) return conflict("Release compare-and-set failed.");
-      if (current.value.state === input.to) return current;
-      if (!RELEASE_TRANSITIONS[current.value.state].includes(input.to)) return conflict(`Release cannot transition from ${current.value.state} to ${input.to}.`);
       const requiresReason = input.to === "failed" || input.to === "blocked" || input.to === "human_action_required" || input.to === "rolled_back";
       if (requiresReason && input.failureReason === undefined) return { outcome: "invalid_record", message: "Failure, block, human-action, and rollback transitions require a reason." };
+      if (Date.parse(input.now) < Date.parse(current.value.updatedAt)) return { outcome: "invalid_record", message: "Release transition time cannot move backwards." };
       const pullRequest = input.releasePullRequest ?? current.value.releasePullRequest;
       const mergeRevision = input.mergeRevision ?? current.value.mergeRevision;
       const deploymentProviderId = input.deploymentProviderId ?? current.value.deploymentProviderId;
       const productionVersion = input.productionVersion ?? current.value.productionVersion;
       const failureReason = input.failureReason ?? (requiresReason ? current.value.failureReason : undefined);
+      if (current.value.state === input.to) {
+        const samePullRequest = input.releasePullRequest === undefined || (current.value.releasePullRequest?.nodeId === input.releasePullRequest.nodeId && current.value.releasePullRequest.number === input.releasePullRequest.number && current.value.releasePullRequest.url === input.releasePullRequest.url);
+        const sameEvidence = samePullRequest && (input.mergeRevision === undefined || current.value.mergeRevision === input.mergeRevision) && (input.deploymentProviderId === undefined || current.value.deploymentProviderId === input.deploymentProviderId) && (input.productionVersion === undefined || current.value.productionVersion === input.productionVersion) && (!requiresReason || current.value.failureReason === input.failureReason);
+        const replayVersion = input.expectedVersion === current.value.version || input.expectedVersion === current.value.version - 1;
+        return sameEvidence && replayVersion && input.now === current.value.updatedAt ? current : conflict("Release transition replay conflicts with durable state.");
+      }
+      if (current.value.version !== input.expectedVersion) return conflict("Release compare-and-set failed.");
+      if (!RELEASE_TRANSITIONS[current.value.state].includes(input.to)) return conflict(`Release cannot transition from ${current.value.state} to ${input.to}.`);
+      if ((input.to === "merging" || input.to === "deploying" || input.to === "production_verification" || input.to === "deployed") && pullRequest === undefined) return { outcome: "invalid_record", message: `${input.to} requires a release pull request.` };
+      if ((input.to === "deploying" || input.to === "production_verification" || input.to === "deployed") && mergeRevision === undefined) return { outcome: "invalid_record", message: `${input.to} requires a merge revision.` };
+      if ((input.to === "production_verification" || input.to === "deployed") && deploymentProviderId === undefined) return { outcome: "invalid_record", message: `${input.to} requires a deployment provider ID.` };
+      if (input.to === "deployed" && productionVersion === undefined) return { outcome: "invalid_record", message: "deployed requires a production version." };
       try {
         const updated = this.#store.database.prepare("UPDATE runtime_releases SET state = ?, version = version + 1, updated_at = ?, release_pr_node_id = ?, release_pr_number = ?, release_pr_url = ?, merge_revision = ?, deployment_provider_id = ?, production_version = ?, failure_reason = ? WHERE id = ? AND state = ? AND version = ?").run(input.to, input.now, pullRequest?.nodeId ?? null, pullRequest?.number ?? null, pullRequest?.url ?? null, mergeRevision ?? null, deploymentProviderId ?? null, productionVersion ?? null, failureReason ?? null, id, current.value.state, input.expectedVersion);
         if (updated.changes !== 1) return conflict("Release compare-and-set failed.");
