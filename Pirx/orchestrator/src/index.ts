@@ -204,10 +204,14 @@ export {
   MAX_CLAUDE_TIMEOUT_MS,
   buildClaudeArguments,
   buildClaudeHandoffArguments,
+  buildClaudeStructuredArguments,
   ClaudeCodeCliRunner,
   type ClaudeCodeCliRunnerOptions,
   type ClaudeHandoffRequest,
   type ClaudeHandoffResult,
+  type ClaudeStructuredRequest,
+  type ClaudeStructuredResult,
+  type ClaudeStructuredSuccess,
   type ClaudeRoundTripFailure,
   type ClaudeRoundTripOutcome,
   type ClaudeRoundTripRequest,
@@ -216,6 +220,15 @@ export {
   type ClaudeSpawn,
   type ClaudeSpawnOptions,
 } from "./claude/cli-runner.js";
+export {
+  ClaudeCodeProcessAdapter,
+  createClaudeCodeProcessAdapter,
+  type ClaudeCodeAdapterOptions,
+  type ClaudeCodeInputSource,
+  type ClaudeCodeProcessResult,
+  type ClaudeCodePromptRenderer,
+  type ClaudeStructuredRunner,
+} from "./claude/worker-adapter.js";
 export {
   ATTEMPT_RESULTS,
   TASK_DOMAIN_SCHEMA_VERSION,

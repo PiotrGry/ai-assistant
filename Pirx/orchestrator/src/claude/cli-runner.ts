@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 export const CLAUDE_ROUND_TRIP_OUTCOMES = [
   "success",
@@ -41,6 +41,12 @@ export interface ClaudeHandoffRequest extends ClaudeRoundTripRequest {
   readonly handoffId: string;
   readonly envelope: unknown;
 }
+export interface ClaudeStructuredRequest extends ClaudeRoundTripRequest {
+  readonly requestId: string;
+  readonly cwd: string;
+  readonly prompt: string;
+  readonly responseSchema: unknown;
+}
 
 export interface ClaudeRoundTripSuccess {
   readonly outcome: "success";
@@ -58,6 +64,8 @@ export interface ClaudeRoundTripFailure {
 }
 export type ClaudeRoundTripResult = ClaudeRoundTripSuccess | ClaudeRoundTripFailure;
 export type ClaudeHandoffResult = ClaudeRoundTripResult;
+export interface ClaudeStructuredSuccess { readonly outcome: "success"; readonly requestId: string; readonly structuredOutput: unknown; readonly durationMs: number; readonly exitCode: 0; }
+export type ClaudeStructuredResult = ClaudeStructuredSuccess | ClaudeRoundTripFailure;
 
 export interface ClaudeSpawnOptions {
   readonly cwd: string;
@@ -144,6 +152,16 @@ export function buildClaudeHandoffArguments(handoffId: string, envelope: unknown
     "--no-session-persistence", "--max-turns", "1", "--output-format", "json",
     "--json-schema", JSON.stringify(roundTripSchema(handoffId)),
     `Acknowledge receipt of this structured failure handoff. Use handoff ID "${handoffId}" exactly. Return only the structured response required by the JSON schema. Payload: ${serialized}`,
+  ];
+}
+export function buildClaudeStructuredArguments(requestId: string, prompt: string, responseSchema: unknown): readonly string[] {
+  const schema = JSON.stringify(responseSchema);
+  if (schema === undefined || Buffer.byteLength(schema, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > MAX_CLAUDE_OUTPUT_BYTES) throw new RangeError("Claude structured request is too large or invalid.");
+  return [
+    "--restricted", "-p", "--tools", "", "--disallowedTools", "mcp__*",
+    "--permission-prompts", "none", "--disable-slash-commands",
+    "--no-session-persistence", "--max-turns", "1", "--output-format", "json",
+    "--json-schema", schema, prompt,
   ];
 }
 function buildEnvironment(source: NodeJS.ProcessEnv, additional: Readonly<Record<string, string | undefined>> | undefined): NodeJS.ProcessEnv {
@@ -239,11 +257,27 @@ export class ClaudeCodeCliRunner {
     }
   }
 
+  public async runStructured(request: ClaudeStructuredRequest): Promise<ClaudeStructuredResult> {
+    const startedAt = Date.now();
+    const timeoutMs = boundedInteger(request.timeoutMs, DEFAULT_CLAUDE_TIMEOUT_MS, MAX_CLAUDE_TIMEOUT_MS);
+    const maxStdoutBytes = boundedInteger(request.maxStdoutBytes, DEFAULT_CLAUDE_STDOUT_BYTES, MAX_CLAUDE_OUTPUT_BYTES);
+    const maxStderrBytes = boundedInteger(request.maxStderrBytes, DEFAULT_CLAUDE_STDERR_BYTES, MAX_CLAUDE_OUTPUT_BYTES);
+    if (request.requestId.trim().length === 0 || request.requestId.length > 256 || !isAbsolute(request.cwd) || timeoutMs === undefined || maxStdoutBytes === undefined || maxStderrBytes === undefined) return failure("process_error", request.requestId, startedAt, null);
+    if (request.signal?.aborted === true) return failure("cancelled", request.requestId, startedAt, null);
+    let cwd: string;
+    try { cwd = await realpath(request.cwd); const info = await stat(cwd); if (!info.isDirectory()) return failure("process_error", request.requestId, startedAt, null); }
+    catch { return failure("process_error", request.requestId, startedAt, null); }
+    try {
+      return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: buildClaudeStructuredArguments(request.requestId, request.prompt, request.responseSchema), structuredOutput: true }) as ClaudeStructuredResult;
+    } catch { return failure("process_error", request.requestId, startedAt, null); }
+  }
+
   private async execute(input: {
     readonly requestId: string; readonly startedAt: number; readonly workingDirectory: string;
     readonly signal: AbortSignal | undefined; readonly timeoutMs: number;
     readonly maxStdoutBytes: number; readonly maxStderrBytes: number;
     readonly arguments: readonly string[];
+    readonly structuredOutput?: boolean;
   }): Promise<ClaudeRoundTripResult> {
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
@@ -318,6 +352,10 @@ export class ClaudeCodeCliRunner {
     if (explicit !== undefined) return failure(explicit, input.requestId, input.startedAt, exitCode);
     if (exitCode !== 0) return failure("process_error", input.requestId, input.startedAt, exitCode);
     if (!isRecord(parsed) || parsed.type !== "result" || parsed.subtype !== "success" || parsed.is_error !== false) return failure("invalid_output", input.requestId, input.startedAt, exitCode);
+    if (input.structuredOutput === true) {
+      if (!isRecord(parsed.structured_output)) return failure("invalid_output", input.requestId, input.startedAt, exitCode);
+      return { outcome: "success", requestId: input.requestId, structuredOutput: parsed.structured_output, durationMs: Math.max(0, Date.now() - input.startedAt), exitCode: 0 } as unknown as ClaudeRoundTripResult;
+    }
     if (!validateStructuredOutput(parsed.structured_output, input.requestId)) return failure("invalid_output", input.requestId, input.startedAt, exitCode);
     return { outcome: "success", requestId: input.requestId, acknowledgement: parsed.structured_output.acknowledgement, durationMs: Math.max(0, Date.now() - input.startedAt), exitCode: 0 };
   }
