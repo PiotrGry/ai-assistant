@@ -185,6 +185,23 @@ konkretnym narzędziem, celem i skrótem argumentów. Model nie może sam nadać
 sobie uprawnień przez argument narzędzia. Klucz idempotencji jest wyznaczany
 przez hosta, więc ponowienie tej samej operacji nie tworzy drugiego zapisu.
 
+### Controlled shipment round-trip POC
+
+Po ustawieniu `PIRX_GITHUB_SHIPMENT_POC=1` serwer udostępnia dodatkowo
+`github_shipment_round_trip_poc`. Narzędzie przyjmuje tylko `eventId`, branch
+`pirx/poc-*`, dokładny SHA oraz bounded watch settings. Cel jest na stałe
+ustawiony na `PiotrGry/zdrovena-reconciliation`, a bazy na `develop` i `main`.
+Operacja weryfikuje branch, tworzy lub odzyskuje feature PR, obserwuje CI dla
+dokładnego SHA, scala wyłącznie feature PR do `develop`, a następnie tworzy lub
+odzyskuje release PR i obserwuje jego CI. Zawsze zatrzymuje się przed merge do
+`main` i zwraca `production_approval_required`, gdy release CI jest zielone.
+
+Stan wznowień jest przechowywany lokalnie w katalogu stanu użytkownika
+(`$XDG_STATE_HOME/pirx/github-shipment-poc.json` lub
+`~/.local/state/pirx/github-shipment-poc.json`); ścieżkę można zmienić przez
+`PIRX_GITHUB_SHIPMENT_POC_STATE_FILE`. Plik nie
+zawiera tokenów, logów jobów ani surowych odpowiedzi GitHuba.
+
 ## LazyVim
 
 W `:LazyExtras` włącz `lang.typescript`, zrestartuj Neovim i otwórz dowolny plik z `agent/src` albo `mcp-server/src`. `:LspInfo` powinno wtedy pokazać `vtsls`; serwer językowy sam odczyta tutejszy `tsconfig` i zależności z workspace.

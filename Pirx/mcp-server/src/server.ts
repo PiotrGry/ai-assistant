@@ -1,4 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   GitHubIssueMutator,
   GitHubIssueReader,
@@ -6,6 +8,10 @@ import {
   GitHubTransport,
   GitHubWriteQueue,
   GitHubConfigurationError,
+  FileGitHubShipmentPocStore,
+  GitHubShipmentPocGateway,
+  type GitHubShipmentPocStore,
+  type GitHubShipmentPocTransport,
   loadGitHubConfig,
   type GitHubConfig,
   type GitHubIssueMutationTransport,
@@ -24,6 +30,7 @@ import { registerObsidianTools } from "./tools/obsidian.js";
 import { registerGitHubPocTool } from "./tools/github.js";
 import { registerGitHubIssueTools } from "./tools/github-issues.js";
 import { registerGitHubActionsWatchTool } from "./tools/github-actions.js";
+import { registerGitHubShipmentPocTool } from "./tools/github-shipment-poc.js";
 
 export type GitHubPocTransport = GitHubIssueReadTransport & GitHubIssueMutationTransport;
 
@@ -34,6 +41,9 @@ export interface McpServerOptions {
   readonly githubPocTransport?: GitHubPocTransport;
   readonly githubPocConfig?: GitHubConfig;
   readonly githubAuthorizationSecret?: string;
+  readonly githubShipmentPocConfig?: GitHubConfig;
+  readonly githubShipmentPocTransport?: GitHubShipmentPocTransport;
+  readonly githubShipmentPocStore?: GitHubShipmentPocStore;
 }
 
 export function createMcpServer(options: McpServerOptions = {}): McpServer {
@@ -99,6 +109,28 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
     gateway: githubActionsGateway,
     configurationError: githubConfigurationError,
   });
+  const shipmentEnabled = options.githubShipmentPocConfig !== undefined || ["1", "true"].includes(environment.PIRX_GITHUB_SHIPMENT_POC?.trim().toLowerCase() ?? "");
+  let shipmentConfig = options.githubShipmentPocConfig;
+  if (shipmentEnabled && shipmentConfig === undefined && githubConfig !== undefined) {
+    shipmentConfig = { ...githubConfig, owner: "PiotrGry", repository: "zdrovena-reconciliation" };
+  }
+  const shipmentTransport = shipmentEnabled
+    ? options.githubShipmentPocTransport ?? (shipmentConfig === undefined ? undefined : new GitHubTransport(shipmentConfig))
+    : undefined;
+  const shipmentQueue = shipmentTransport === undefined ? undefined : new GitHubWriteQueue();
+  const shipmentGateway = shipmentTransport === undefined || shipmentConfig === undefined || shipmentQueue === undefined
+    ? undefined
+    : new GitHubShipmentPocGateway(shipmentTransport, shipmentConfig, shipmentQueue);
+  if (shipmentEnabled) {
+    const stateFile = environment.PIRX_GITHUB_SHIPMENT_POC_STATE_FILE?.trim() || join(environment.XDG_STATE_HOME?.trim() || join(homedir(), ".local", "state"), "pirx", "github-shipment-poc.json");
+    registerGitHubShipmentPocTool(server, {
+      config: shipmentConfig,
+      gateway: shipmentGateway,
+      store: options.githubShipmentPocStore ?? new FileGitHubShipmentPocStore(stateFile),
+      authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
+      ...(githubConfigurationError === undefined ? {} : { configurationError: githubConfigurationError }),
+    });
+  }
   if ((environment.PIRX_GITHUB_POC_ISSUE?.trim().length ?? 0) > 0) {
     registerGitHubPocTool(server, {
       issue: config.githubPocIssue,
@@ -110,12 +142,13 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
       mutator: githubMutator,
     });
   }
-  if (githubQueue !== undefined) {
+  if (githubQueue !== undefined || shipmentQueue !== undefined) {
     const close = server.close.bind(server);
     let closed: Promise<void> | undefined;
     server.close = () => {
       closed ??= (async () => {
-        await githubQueue.close({ drain: true });
+        await githubQueue?.close({ drain: true });
+        await shipmentQueue?.close({ drain: true });
         await close();
       })();
       return closed;

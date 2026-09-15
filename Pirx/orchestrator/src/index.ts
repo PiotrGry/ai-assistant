@@ -136,6 +136,28 @@ export {
   type GitHubActionsWorkflowRun,
 } from "./github/ci-watch.js";
 export {
+  FileGitHubShipmentPocStore,
+  GitHubShipmentPoc,
+  GitHubShipmentPocGateway,
+  InMemoryGitHubShipmentPocStore,
+  SHIPMENT_POC_FEATURE_BASE,
+  SHIPMENT_POC_RELEASE_BASE,
+  SHIPMENT_POC_REPOSITORY,
+  type GitHubShipmentBranchHead,
+  type GitHubShipmentCreatePullRequestRequest,
+  type GitHubShipmentMergeResult,
+  type GitHubShipmentPocEvidence,
+  type GitHubShipmentPocGatewayPort,
+  type GitHubShipmentPocOutcome,
+  type GitHubShipmentPocRecord,
+  type GitHubShipmentPocRequest,
+  type GitHubShipmentPocResult,
+  type GitHubShipmentPocStore,
+  type GitHubShipmentPocTransport,
+  type GitHubShipmentPocWatcher,
+  type GitHubShipmentPullRequest,
+} from "./github/shipment-poc.js";
+export {
   CLAUDE_CLI_ENV_ALLOWLIST,
   CLAUDE_ROUND_TRIP_OUTCOMES,
   CLAUDE_TERMINATION_GRACE_MS,
