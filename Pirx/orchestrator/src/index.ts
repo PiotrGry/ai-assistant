@@ -500,6 +500,15 @@ export {
   type WorkspaceProvisionResult,
 } from "./runtime/workspace.js";
 export {
+  WORKSPACE_RESUME_VALIDATION_LIMITS,
+  WorkspaceResumeValidator,
+  validateWorkspaceForResume,
+  type WorkspaceResumeValidationObserved,
+  type WorkspaceResumeValidationOutcome,
+  type WorkspaceResumeValidationRequest,
+  type WorkspaceResumeValidationResult,
+} from "./runtime/workspace-resume-validator.js";
+export {
   GITHUB_LIFECYCLE_EVENT_TYPES,
   GitHubLifecycleProjectionPublisher,
   type GitHubLifecycleEventType,
