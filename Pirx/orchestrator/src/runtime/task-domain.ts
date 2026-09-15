@@ -12,7 +12,7 @@ export type TaskPriority = number;
 
 export const TASK_TRANSITIONS: Readonly<Record<TaskState, readonly TaskState[]>> = Object.freeze({
   ready: ["in_progress", "blocked", "cancelled"],
-  in_progress: ["blocked", "failed", "completed", "cancelled"],
+  in_progress: ["in_progress", "blocked", "failed", "completed", "cancelled"],
   blocked: ["ready", "in_progress", "cancelled"],
   failed: ["ready", "in_progress", "cancelled"],
   completed: [],

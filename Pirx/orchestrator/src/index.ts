@@ -83,6 +83,14 @@ export {
   type GitHubIssueRoundTripRequest,
 } from "./github/issue-round-trip.js";
 export {
+  CI_RETRY_LIMITS,
+  CI_RETRY_SCHEMA_VERSION,
+  CiRetryCoordinator,
+  type CiRetryOutcome,
+  type CiRetryRequest,
+  type CiRetryResult,
+} from "./runtime/ci-retry.js";
+export {
   GITHUB_PROJECT_FIELD_NAMES,
   GitHubProjectSchemaResolver,
   GitHubProjectSynchronizer,
