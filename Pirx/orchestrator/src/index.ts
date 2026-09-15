@@ -400,6 +400,7 @@ export {
   CheckpointRepository,
   CiCorrelationRepository,
   CiFailureEvidenceRepository,
+  FeatureMergeRepository,
   LeaseRepository,
   PullRequestProvenanceRepository,
   ProjectionRepository,
@@ -431,6 +432,18 @@ export {
   type PullRequestProvenanceRecord,
 } from "./runtime/sqlite.js";
 export {
+  FEATURE_MERGE_LIMITS,
+  FEATURE_MERGE_SCHEMA_VERSION,
+  FeatureMergeCoordinator,
+  type FeatureMergeMethod,
+  type FeatureMergeOutcome,
+  type FeatureMergePolicy,
+  type FeatureMergeRecord,
+  type FeatureMergeRequest,
+  type FeatureMergeResult,
+  type FeatureMergeState,
+} from "./runtime/feature-merge.js";
+export {
   CI_CORRELATION_SCHEMA_VERSION,
   CiCorrelationService,
   type CiCorrelationInput,
@@ -456,6 +469,7 @@ export {
   type GitHubPullRequest,
   type GitHubPullRequestCreateInput,
   type GitHubPullRequestGatewayPort,
+  type GitHubPullRequestMergeResult,
   type GitHubPullRequestTransport,
 } from "./github/pull-request.js";
 export {

@@ -89,8 +89,9 @@ import {
 } from "./workspace-ownership.js";
 import type { CiCorrelationInput, CiCorrelationObservation, CiCorrelationRecord, CiCorrelationState } from "./ci-correlation.js";
 import type { CiFailureEvidenceRecord } from "./ci-evidence.js";
+import type { FeatureMergeRecord } from "./feature-merge.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 15 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 16 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -194,6 +195,7 @@ export interface RuntimeTransaction {
   readonly pullRequests: PullRequestProvenanceRepository;
   readonly ciCorrelations: CiCorrelationRepository;
   readonly ciEvidence: CiFailureEvidenceRepository;
+  readonly featureMerges: FeatureMergeRepository;
 }
 
 export class RuntimeStorageError extends Error {
@@ -522,6 +524,29 @@ const MIGRATIONS: readonly string[] = [
   "CREATE TABLE IF NOT EXISTS runtime_pull_request_provenance (task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT, attempt_id TEXT PRIMARY KEY REFERENCES runtime_attempts(id) ON DELETE RESTRICT, repository TEXT NOT NULL CHECK (length(trim(repository)) > 0), issue_number INTEGER NOT NULL CHECK (issue_number > 0), issue_node_id TEXT NOT NULL CHECK (length(trim(issue_node_id)) > 0), issue_url TEXT NOT NULL CHECK (length(trim(issue_url)) > 0), worker_id TEXT NOT NULL CHECK (length(trim(worker_id)) > 0), head_branch TEXT NOT NULL CHECK (length(trim(head_branch)) > 0), base_branch TEXT NOT NULL CHECK (length(trim(base_branch)) > 0), observed_head_sha TEXT NOT NULL CHECK (length(trim(observed_head_sha)) > 0), pull_request_node_id TEXT NOT NULL UNIQUE CHECK (length(trim(pull_request_node_id)) > 0), pull_request_number INTEGER NOT NULL CHECK (pull_request_number > 0), pull_request_url TEXT NOT NULL CHECK (length(trim(pull_request_url)) > 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (task_id, attempt_id), UNIQUE (repository, pull_request_number)); CREATE INDEX IF NOT EXISTS runtime_pull_request_provenance_task_attempt ON runtime_pull_request_provenance (task_id, attempt_id); CREATE INDEX IF NOT EXISTS runtime_pull_request_provenance_pull ON runtime_pull_request_provenance (repository, pull_request_number);",
   "CREATE TABLE IF NOT EXISTS runtime_ci_correlations (task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT, attempt_id TEXT PRIMARY KEY REFERENCES runtime_attempts(id) ON DELETE RESTRICT, schema_version INTEGER NOT NULL CHECK (schema_version = 1), repository TEXT NOT NULL CHECK (length(trim(repository)) > 0), issue_number INTEGER NOT NULL CHECK (issue_number > 0), issue_node_id TEXT NOT NULL CHECK (length(trim(issue_node_id)) > 0), issue_url TEXT NOT NULL CHECK (length(trim(issue_url)) > 0), feature_pr_node_id TEXT NOT NULL CHECK (length(trim(feature_pr_node_id)) > 0), feature_pr_number INTEGER NOT NULL CHECK (feature_pr_number > 0), feature_pr_url TEXT NOT NULL CHECK (length(trim(feature_pr_url)) > 0), worker_id TEXT NOT NULL CHECK (length(trim(worker_id)) > 0), head_branch TEXT NOT NULL CHECK (length(trim(head_branch)) > 0), base_branch TEXT NOT NULL CHECK (length(trim(base_branch)) > 0), pushed_commit TEXT NOT NULL CHECK (length(trim(pushed_commit)) > 0), provider TEXT NOT NULL CHECK (length(trim(provider)) > 0), required_workflow_name TEXT NOT NULL CHECK (length(trim(required_workflow_name)) > 0), provider_run_id TEXT, provider_run_url TEXT, workflow_name TEXT, provider_pipeline_id TEXT, tested_revision TEXT, state TEXT NOT NULL CHECK (state IN ('pending', 'success', 'failed', 'cancelled', 'timed_out', 'not_found', 'ambiguous', 'stale', 'rate_limited', 'retryable', 'permanent', 'unknown', 'unavailable')), observed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, version INTEGER NOT NULL CHECK (version > 0), UNIQUE (repository, feature_pr_number), UNIQUE (provider, provider_run_id)); CREATE INDEX IF NOT EXISTS runtime_ci_correlations_task_attempt ON runtime_ci_correlations (task_id, attempt_id); CREATE INDEX IF NOT EXISTS runtime_ci_correlations_commit ON runtime_ci_correlations (repository, pushed_commit); CREATE INDEX IF NOT EXISTS runtime_ci_correlations_provider_run ON runtime_ci_correlations (provider, provider_run_id);",
   "CREATE TABLE IF NOT EXISTS runtime_ci_evidence (task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT, attempt_id TEXT PRIMARY KEY REFERENCES runtime_attempts(id) ON DELETE RESTRICT, schema_version INTEGER NOT NULL CHECK (schema_version = 1), repository TEXT NOT NULL CHECK (length(trim(repository)) > 0), issue_number INTEGER NOT NULL CHECK (issue_number > 0), feature_pr_number INTEGER NOT NULL CHECK (feature_pr_number > 0), feature_pr_url TEXT NOT NULL CHECK (length(trim(feature_pr_url)) > 0), head_branch TEXT NOT NULL CHECK (length(trim(head_branch)) > 0), pushed_commit TEXT NOT NULL CHECK (length(trim(pushed_commit)) > 0), provider TEXT NOT NULL CHECK (length(trim(provider)) > 0), provider_run_id TEXT NOT NULL CHECK (length(trim(provider_run_id)) > 0), provider_run_url TEXT NOT NULL CHECK (length(trim(provider_run_url)) > 0), workflow_name TEXT NOT NULL CHECK (length(trim(workflow_name)) > 0), conclusion TEXT NOT NULL CHECK (length(trim(conclusion)) > 0), tested_revision TEXT NOT NULL CHECK (length(trim(tested_revision)) > 0), failed_jobs_json TEXT NOT NULL, log_excerpt TEXT, redaction_count INTEGER NOT NULL CHECK (redaction_count >= 0), evidence_bytes INTEGER NOT NULL CHECK (evidence_bytes > 0), evidence_digest TEXT NOT NULL CHECK (length(trim(evidence_digest)) = 64), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, version INTEGER NOT NULL CHECK (version > 0), UNIQUE (provider, provider_run_id)); CREATE INDEX IF NOT EXISTS runtime_ci_evidence_task_attempt ON runtime_ci_evidence (task_id, attempt_id); CREATE INDEX IF NOT EXISTS runtime_ci_evidence_commit ON runtime_ci_evidence (repository, pushed_commit); CREATE INDEX IF NOT EXISTS runtime_ci_evidence_provider_run ON runtime_ci_evidence (provider, provider_run_id);",
+  `
+    CREATE TABLE IF NOT EXISTS runtime_feature_merges (
+      task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT,
+      attempt_id TEXT PRIMARY KEY REFERENCES runtime_attempts(id) ON DELETE RESTRICT,
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      repository TEXT NOT NULL CHECK (length(trim(repository)) > 0),
+      pull_request_node_id TEXT NOT NULL UNIQUE CHECK (length(trim(pull_request_node_id)) > 0),
+      pull_request_number INTEGER NOT NULL CHECK (pull_request_number > 0),
+      pull_request_url TEXT NOT NULL CHECK (length(trim(pull_request_url)) > 0),
+      head_branch TEXT NOT NULL CHECK (length(trim(head_branch)) > 0),
+      base_branch TEXT NOT NULL CHECK (length(trim(base_branch)) > 0),
+      expected_head_sha TEXT NOT NULL CHECK (length(trim(expected_head_sha)) > 0),
+      state TEXT NOT NULL CHECK (state IN ('pending', 'merged')),
+      merge_sha TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      version INTEGER NOT NULL CHECK (version > 0),
+      UNIQUE (repository, pull_request_number),
+      CHECK ((state = 'merged' AND merge_sha IS NOT NULL) OR state = 'pending')
+    );
+    CREATE INDEX IF NOT EXISTS runtime_feature_merges_task_attempt ON runtime_feature_merges (task_id, attempt_id);
+    CREATE INDEX IF NOT EXISTS runtime_feature_merges_repository_head ON runtime_feature_merges (repository, head_branch, expected_head_sha);
+  `,
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -1897,6 +1922,60 @@ export class CiFailureEvidenceRepository {
   }
 }
 
+function featureMergeFromRow(row: Record<string, unknown>): StorageResult<FeatureMergeRecord> {
+  try {
+    const strings = ["task_id", "attempt_id", "repository", "pull_request_node_id", "pull_request_url", "head_branch", "base_branch", "expected_head_sha", "state", "created_at", "updated_at"];
+    if (strings.some((key) => typeof row[key] !== "string" || (row[key] as string).trim().length === 0) || row.schema_version !== 1 || typeof row.pull_request_number !== "number" || typeof row.version !== "number" || !Number.isSafeInteger(row.pull_request_number) || !Number.isSafeInteger(row.version) || row.pull_request_number <= 0 || row.version <= 0 || !["pending", "merged"].includes(row.state as string) || !utcTimestamp(row.created_at as string).ok || !utcTimestamp(row.updated_at as string).ok) return invalidRecord();
+    const mergeSha = optionalText(row.merge_sha);
+    if (row.merge_sha !== null && mergeSha === undefined) return invalidRecord();
+    if (row.state === "merged" && mergeSha === undefined) return invalidRecord();
+    return success({ schemaVersion: 1, taskId: row.task_id as TaskId, attemptId: row.attempt_id as AttemptId, repository: row.repository as string, pullRequestNodeId: row.pull_request_node_id as string, pullRequestNumber: row.pull_request_number as number, pullRequestUrl: row.pull_request_url as string, headBranch: row.head_branch as string, baseBranch: row.base_branch as string, expectedHeadSha: row.expected_head_sha as string, state: row.state as FeatureMergeRecord["state"], ...(mergeSha === undefined ? {} : { mergeSha }), createdAt: row.created_at as UtcTimestamp, updatedAt: row.updated_at as UtcTimestamp, version: row.version as number });
+  } catch { return invalidRecord(); }
+}
+
+export class FeatureMergeRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+  public getByTaskAttempt(taskId: string, attemptId: string): StorageResult<FeatureMergeRecord> { return this.#get("task_id = ? AND attempt_id = ?", taskId, attemptId); }
+  public getByPullRequest(repository: string, number: number): StorageResult<FeatureMergeRecord> { return this.#get("repository = ? AND pull_request_number = ?", repository, number); }
+  public start(record: FeatureMergeRecord): StorageResult<FeatureMergeRecord> {
+    if (record.schemaVersion !== 1 || record.state !== "pending" || record.taskId.trim().length === 0 || record.attemptId.trim().length === 0 || record.repository.trim().length === 0 || record.pullRequestNodeId.trim().length === 0 || record.pullRequestUrl.trim().length === 0 || record.headBranch.trim().length === 0 || record.baseBranch.trim().length === 0 || record.expectedHeadSha.trim().length === 0 || !Number.isSafeInteger(record.pullRequestNumber) || record.pullRequestNumber <= 0 || record.mergeSha !== undefined || record.version !== 1 || !utcTimestamp(record.createdAt).ok || !utcTimestamp(record.updatedAt).ok) return invalidRecord();
+    return this.#store.execute(() => {
+      const task = this.#store.tasks.get(record.taskId); const attempt = this.#store.attempts.get(record.attemptId);
+      if (task.outcome !== "success") return task;
+      if (attempt.outcome !== "success") return attempt;
+      if (attempt.value.taskId !== record.taskId) return conflict("Feature merge Attempt does not belong to the Task.");
+      const existing = this.getByTaskAttempt(record.taskId, record.attemptId);
+      if (existing.outcome === "success") return JSON.stringify(existing.value) === JSON.stringify(record) ? existing : conflict("Feature merge ledger conflicts with the stored identity.");
+      if (existing.outcome !== "not_found") return existing;
+      const byPull = this.getByPullRequest(record.repository, record.pullRequestNumber);
+      if (byPull.outcome === "success") return JSON.stringify(byPull.value) === JSON.stringify(record) ? byPull : conflict("Feature merge ledger already owns this pull request.");
+      if (byPull.outcome !== "not_found") return byPull;
+      try {
+        this.#store.database.prepare("INSERT INTO runtime_feature_merges (task_id, attempt_id, schema_version, repository, pull_request_node_id, pull_request_number, pull_request_url, head_branch, base_branch, expected_head_sha, state, merge_sha, created_at, updated_at, version) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?, 1)").run(record.taskId, record.attemptId, record.repository, record.pullRequestNodeId, record.pullRequestNumber, record.pullRequestUrl, record.headBranch, record.baseBranch, record.expectedHeadSha, record.createdAt, record.updatedAt);
+        return this.getByTaskAttempt(record.taskId, record.attemptId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+  public markMerged(taskId: string, attemptId: string, mergeSha: string, updatedAt: UtcTimestamp): StorageResult<FeatureMergeRecord> {
+    if (mergeSha.trim().length === 0 || !utcTimestamp(updatedAt).ok) return invalidRecord();
+    return this.#store.execute(() => {
+      const current = this.getByTaskAttempt(taskId, attemptId);
+      if (current.outcome !== "success") return current;
+      if (current.value.state === "merged") return current.value.mergeSha === mergeSha ? current : conflict("Feature merge already has a different merge revision.");
+      try {
+        this.#store.database.prepare("UPDATE runtime_feature_merges SET state = 'merged', merge_sha = ?, updated_at = ?, version = version + 1 WHERE task_id = ? AND attempt_id = ? AND version = ? AND state = 'pending'").run(mergeSha, updatedAt, taskId, attemptId, current.value.version);
+        return this.getByTaskAttempt(taskId, attemptId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+  #get(where: string, ...parameters: readonly (string | number)[]): StorageResult<FeatureMergeRecord> {
+    return this.#store.execute(() => {
+      try { const row = this.#store.database.prepare("SELECT * FROM runtime_feature_merges WHERE " + where).get(...parameters) as Record<string, unknown> | undefined; return row === undefined ? notFound("Feature merge ledger was not found.") : featureMergeFromRow(row); } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+}
+
 export class RuntimeSqliteStore {
   readonly #database: DatabaseSync;
   readonly #filename: string;
@@ -1914,6 +1993,7 @@ export class RuntimeSqliteStore {
   readonly pullRequests: PullRequestProvenanceRepository;
   readonly ciCorrelations: CiCorrelationRepository;
   readonly ciEvidence: CiFailureEvidenceRepository;
+  readonly featureMerges: FeatureMergeRepository;
 
   private constructor(database: DatabaseSync, filename: string) {
     this.#database = database;
@@ -1930,6 +2010,7 @@ export class RuntimeSqliteStore {
     this.pullRequests = new PullRequestProvenanceRepository(this);
     this.ciCorrelations = new CiCorrelationRepository(this);
     this.ciEvidence = new CiFailureEvidenceRepository(this);
+    this.featureMerges = new FeatureMergeRepository(this);
   }
 
   public static open(options: RuntimeSqliteStoreOptions = {}): RuntimeSqliteStore {
@@ -1979,14 +2060,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;

@@ -16,6 +16,8 @@ export interface GitHubPullRequest {
   readonly headSha: string;
   readonly baseBranch: string;
   readonly merged: boolean;
+  readonly mergeable?: boolean;
+  readonly mergeCommitSha?: string;
 }
 export interface GitHubBranchHead { readonly branch: string; readonly sha: string; }
 export interface GitHubPullRequestCreateInput {
@@ -32,14 +34,18 @@ export interface GitHubPullRequestGatewayPort {
   listPullRequests(headBranch: string, baseBranch: string, context: GitHubRequestContext): Promise<GitHubOperationResult<readonly GitHubPullRequest[]>>;
   getPullRequest(number: number, context: GitHubRequestContext): Promise<GitHubOperationResult<GitHubPullRequest>>;
   createPullRequest(input: GitHubPullRequestCreateInput): Promise<GitHubOperationResult<GitHubPullRequest>>;
+  mergePullRequest?(number: number, expectedHeadSha: string, input: { readonly idempotencyKey: string; readonly correlationId: string; readonly timeoutMs?: number; readonly mergeMethod?: "squash" | "merge" | "rebase" }): Promise<GitHubOperationResult<GitHubPullRequestMergeResult>>;
+  getApprovedReviewCount?(number: number, context: GitHubRequestContext): Promise<GitHubOperationResult<number>>;
 }
+export interface GitHubPullRequestMergeResult { readonly merged: boolean; readonly sha?: string; readonly message?: string; }
 export interface GitHubPullRequestTransport {
   restRead<T>(request: GitHubRestReadRequest, context: GitHubRequestContext): Promise<GitHubOperationResult<T>>;
   restWrite<T>(request: GitHubRestWriteRequest, context: GitHubRequestContext): Promise<GitHubOperationResult<T>>;
 }
 
 interface RefPayload { readonly object?: unknown; }
-interface PullPayload { readonly number?: unknown; readonly html_url?: unknown; readonly state?: unknown; readonly title?: unknown; readonly body?: unknown; readonly head?: unknown; readonly base?: unknown; readonly merged?: unknown; }
+interface PullPayload { readonly number?: unknown; readonly html_url?: unknown; readonly state?: unknown; readonly title?: unknown; readonly body?: unknown; readonly head?: unknown; readonly base?: unknown; readonly merged?: unknown; readonly mergeable?: unknown; readonly merge_commit_sha?: unknown; }
+interface MergePayload { readonly merged?: unknown; readonly sha?: unknown; readonly message?: unknown; }
 const DEFAULT_RETRY: GitHubRetryPolicyOptions = { maxAttempts: 2, maxTotalDelayMs: 5_000, baseDelayMs: 250, maxDelayMs: 2_000, jitterRatio: 0 };
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function text(value: unknown, max = 2_048): string | undefined { return typeof value === "string" && value.length > 0 && value.length <= max && !(/[\u0000-\u001f\u007f]/u.test(value)) ? value : undefined; }
@@ -58,7 +64,8 @@ function mapPull(value: unknown): GitHubPullRequest | undefined {
   if (number === undefined || pullUrl === undefined || state === undefined || headBranch === undefined || headSha === undefined || baseBranch === undefined) return undefined;
   const title = value.title === undefined || value.title === null ? undefined : text(value.title, 512);
   const body = value.body === undefined || value.body === null ? undefined : text(value.body, 65_536);
-  return { number, url: pullUrl, state, ...(title === undefined ? {} : { title }), ...(body === undefined ? {} : { body }), headBranch, headSha, baseBranch, merged: value.merged === true };
+  const mergeCommitSha = sha(value.merge_commit_sha);
+  return { number, url: pullUrl, state, ...(title === undefined ? {} : { title }), ...(body === undefined ? {} : { body }), headBranch, headSha, baseBranch, merged: value.merged === true, ...(typeof value.mergeable === "boolean" ? { mergeable: value.mergeable } : {}), ...(mergeCommitSha === undefined ? {} : { mergeCommitSha }) };
 }
 
 export class GitHubPullRequestGateway implements GitHubPullRequestGatewayPort {
@@ -96,6 +103,28 @@ export class GitHubPullRequestGateway implements GitHubPullRequestGatewayPort {
     if (result.outcome !== "success") return result as GitHubOperationResult<GitHubPullRequest>;
     const pull = mapPull(result.value);
     return pull === undefined ? failure("unknown", "malformed_response", "GitHub accepted the pull request but returned no usable identity.", result.correlationId, "unknown") : { ...result, value: pull };
+  }
+  public async mergePullRequest(number: number, expectedHeadSha: string, input: { readonly idempotencyKey: string; readonly correlationId: string; readonly timeoutMs?: number; readonly mergeMethod?: "squash" | "merge" | "rebase" }): Promise<GitHubOperationResult<GitHubPullRequestMergeResult>> {
+    const result = await this.#queue.submit<MergePayload>({
+      operationKind: "merge_feature_pull_request", idempotencyKey: input.idempotencyKey, target: "pull:" + this.#config.owner + "/" + this.#config.repository + "#" + number,
+      correlationId: input.correlationId, payloadIdentity: expectedHeadSha, timeoutMs: input.timeoutMs ?? this.#config.timeoutMs, idempotent: true,
+      execute: (context) => this.#transport.restWrite<MergePayload>({ method: "PUT", path: repoPath(this.#config) + "/pulls/" + String(number) + "/merge", body: { sha: expectedHeadSha, merge_method: input.mergeMethod ?? "squash" } }, context),
+    });
+    if (result.outcome !== "success") return result;
+    if (result.value.merged !== true) return failure("permanent_error", "conflict", text(result.value.message, 256) ?? "GitHub did not merge the feature pull request.", result.correlationId, "not_accepted", result.response);
+    const mergedSha = sha(result.value.sha); const mergeMessage = text(result.value.message, 256);
+    return { ...result, value: { merged: true, ...(mergedSha === undefined ? {} : { sha: mergedSha }), ...(mergeMessage === undefined ? {} : { message: mergeMessage }) } };
+  }
+  public async getApprovedReviewCount(number: number, context: GitHubRequestContext): Promise<GitHubOperationResult<number>> {
+    const result = await this.#read<unknown[]>({ method: "GET", path: repoPath(this.#config) + "/pulls/" + String(number) + "/reviews", query: { per_page: 100 } }, context);
+    if (result.outcome !== "success") return result;
+    if (!Array.isArray(result.value)) return malformed(result.correlationId);
+    const latest = new Map<string, string>();
+    for (const item of result.value) {
+      if (!isRecord(item) || typeof item.user !== "object" || item.user === null || typeof (item.user as Record<string, unknown>).id !== "number" || typeof item.state !== "string") return malformed(result.correlationId);
+      latest.set(String((item.user as Record<string, unknown>).id), item.state);
+    }
+    return { ...result, value: [...latest.values()].filter((state) => state === "APPROVED").length };
   }
   public async close(): Promise<void> { await this.#queue.close({ drain: true }); }
   async #read<T>(request: GitHubRestReadRequest, context: GitHubRequestContext): Promise<GitHubOperationResult<T>> {
