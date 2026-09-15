@@ -31,6 +31,7 @@ import { registerGitHubPocTool } from "./tools/github.js";
 import { registerGitHubIssueTools } from "./tools/github-issues.js";
 import { registerGitHubActionsWatchTool } from "./tools/github-actions.js";
 import { registerGitHubShipmentPocTool } from "./tools/github-shipment-poc.js";
+import { registerGitHubShipmentCycleTool } from "./tools/github-shipment-cycle.js";
 import { registerGitHubFailureHandoffPocTool } from "./tools/github-failure-handoff-poc.js";
 import { CodexCliRunner } from "@pirx/orchestrator";
 import {
@@ -119,7 +120,9 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
     gateway: githubActionsGateway,
     configurationError: githubConfigurationError,
   });
-  const shipmentEnabled = options.githubShipmentPocConfig !== undefined || ["1", "true"].includes(environment.PIRX_GITHUB_SHIPMENT_POC?.trim().toLowerCase() ?? "");
+  const shipmentPocEnabled = options.githubShipmentPocConfig !== undefined || ["1", "true"].includes(environment.PIRX_GITHUB_SHIPMENT_POC?.trim().toLowerCase() ?? "");
+  const shipmentCycleEnabled = ["1", "true"].includes(environment.PIRX_GITHUB_SHIPMENT_CYCLE?.trim().toLowerCase() ?? "");
+  const shipmentEnabled = shipmentPocEnabled || shipmentCycleEnabled;
   let shipmentConfig = options.githubShipmentPocConfig;
   if (shipmentEnabled && shipmentConfig === undefined && githubConfig !== undefined) {
     shipmentConfig = { ...githubConfig, owner: "PiotrGry", repository: "zdrovena-reconciliation" };
@@ -131,13 +134,22 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   const shipmentGateway = shipmentTransport === undefined || shipmentConfig === undefined || shipmentQueue === undefined
     ? undefined
     : new GitHubShipmentPocGateway(shipmentTransport, shipmentConfig, shipmentQueue);
-  if (shipmentEnabled) {
+  if (shipmentPocEnabled) {
     const stateFile = environment.PIRX_GITHUB_SHIPMENT_POC_STATE_FILE?.trim() || join(environment.XDG_STATE_HOME?.trim() || join(homedir(), ".local", "state"), "pirx", "github-shipment-poc.json");
     registerGitHubShipmentPocTool(server, {
       config: shipmentConfig,
       gateway: shipmentGateway,
       store: options.githubShipmentPocStore ?? new FileGitHubShipmentPocStore(stateFile),
       authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
+      ...(githubConfigurationError === undefined ? {} : { configurationError: githubConfigurationError }),
+    });
+  }
+  if (shipmentCycleEnabled) {
+    registerGitHubShipmentCycleTool(server, {
+      config: shipmentConfig,
+      transport: shipmentTransport,
+      authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
+      environment,
       ...(githubConfigurationError === undefined ? {} : { configurationError: githubConfigurationError }),
     });
   }

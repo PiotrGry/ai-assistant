@@ -154,6 +154,24 @@ test("shipment POC is annotated as a mutating operation", async (context) => {
   assert.equal(tool.annotations?.destructiveHint, true);
 });
 
+test("durable shipment cycle is listed as a mutating operation", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-shipment-cycle-server-vault-"));
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = createMcpServer({
+    environment: { PIRX_GITHUB_SHIPMENT_CYCLE: "1" },
+    obsidianVault: new ObsidianVault(root),
+    calendar: fakeCalendar(),
+    githubPocConfig: { token: "test", owner: "PiotrGry", repository: "ai-assistant", apiUrl: "https://api.github.com", timeoutMs: 100 },
+    githubShipmentPocTransport: { async restRead() { throw new Error("not called while listing tools"); }, async restWrite() { throw new Error("not called while listing tools"); } },
+  });
+  const client = new Client({ name: "pirx-test", version: "0.1.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  context.after(async () => { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); });
+  const listed = await client.listTools();
+  const tool = listed.tools.find((item) => item.name === "github_shipment_cycle");
+  assert.ok(tool); assert.equal(tool.annotations?.readOnlyHint, false); assert.equal(tool.annotations?.destructiveHint, true); assert.equal(tool.annotations?.idempotentHint, true);
+});
+
 test("failed-CI handoff POC is listed as mutating and denies missing host authorization", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pirx-failure-handoff-server-vault-"));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
