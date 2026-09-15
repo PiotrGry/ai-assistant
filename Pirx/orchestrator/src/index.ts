@@ -482,6 +482,14 @@ export {
   type WorkerWorkspaceScope,
 } from "./runtime/worker-contract.js";
 export {
+  CapabilityAwareWorkerExecutionPort,
+  executeWorkerWithCapabilities,
+  type CapabilityWorkerExecutionOutcome,
+  type CapabilityWorkerExecutionResult,
+  type WorkerAdapterRegistry,
+  type WorkerExecutionOptions,
+} from "./runtime/worker-execution.js";
+export {
   WORKSPACE_PROVISION_LIMITS,
   WORKSPACE_PROVISION_SCHEMA_VERSION,
   GitWorkspaceCommandRunner,
