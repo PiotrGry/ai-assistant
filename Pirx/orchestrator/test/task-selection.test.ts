@@ -6,7 +6,11 @@ import test from "node:test";
 
 import {
   RuntimeSqliteStore,
+  createCheckpoint,
   createTask,
+  retryTask,
+  startInitialAttempt,
+  transitionAttempt,
   type TaskSelectionMetadataInput,
   type TaskId,
   type TaskSnapshot,
@@ -97,6 +101,41 @@ test("returns no_runnable_task for an empty eligible set and excludes non-ready 
     const result = store.selection.select({ evaluatedAt: t2, worker: { workerId: "pirx", capabilities: ["tests.run"] } });
     assert.equal(result.outcome, "no_runnable_task");
     if (result.outcome === "no_runnable_task") assert.equal(result.explanations[0]?.reasonCode, "NOT_READY");
+  } finally {
+    store.close();
+    await rm(setup.directory, { recursive: true, force: true });
+  }
+});
+
+test("selects only an explicitly checkpointed failed-CI successor Attempt from an in_progress Task", async () => {
+  const setup = await fixture();
+  const store = RuntimeSqliteStore.open({ filename: setup.filename });
+  try {
+    const currentTask = task("task-ci-retry", 1);
+    assert.equal(store.tasks.create(currentTask).outcome, "success");
+    assert.equal(sync(store, currentTask.id, 10).outcome, "success");
+    const first = startInitialAttempt(currentTask, [], { id: "task-ci-retry-attempt-1" as never, worker: "pirx", provider: "test", branch: "pirx/task-ci-retry", worktree: "/tmp/pirx-task-ci-retry", currentCommit: "a".repeat(40) }, t1);
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+    assert.equal(store.tasks.update(first.value.task, { state: currentTask.state, updatedAt: currentTask.updatedAt }).outcome, "success");
+    assert.equal(store.attempts.create(first.value.attempt).outcome, "success");
+    const terminal = transitionAttempt(first.value.attempt, "running", { type: "finish", result: "CODE_PUSHED", branch: "pirx/task-ci-retry", finalCommit: "a".repeat(40) }, t2);
+    assert.equal(terminal.ok, true, terminal.ok ? "" : JSON.stringify(terminal.error));
+    if (!terminal.ok) return;
+    assert.equal(store.attempts.update(terminal.value, "running").outcome, "success");
+    const checkpoint = createCheckpoint({ id: "task-ci-retry-checkpoint" as never, taskId: currentTask.id, previousAttemptId: first.value.attempt.id, trigger: "REQUIRED_ATTEMPT", createdAt: t2, goal: currentTask.goal, currentState: "in_progress", repository: "PiotrGry/ai-assistant", branch: "pirx/task-ci-retry", worktree: "/tmp/pirx-task-ci-retry", currentCommit: "a".repeat(40), completedWork: ["recorded failed CI"], remainingWork: ["run the retry"], changedFiles: [], findings: ["required workflow failed"], hypotheses: [], tests: [{ command: "Required tests", result: "failed" }], evidence: [{ reference: "ci-evidence:retry", summary: "bounded failure evidence" }], lastAction: "recorded failed CI", resumeInstruction: "run the retry through the scheduler" });
+    assert.equal(checkpoint.ok, true);
+    if (!checkpoint.ok) return;
+    assert.equal(store.checkpoints.save(checkpoint.value).outcome, "success");
+    const retried = retryTask(first.value.task, [terminal.value], { id: "task-ci-retry-attempt-2" as never, worker: "pirx", provider: "test", predecessorAttemptId: terminal.value.id, branch: "pirx/task-ci-retry", worktree: "/tmp/pirx-task-ci-retry", currentCommit: "a".repeat(40), checkpointReference: checkpoint.value.id }, t2);
+    assert.equal(retried.ok, true);
+    if (!retried.ok) return;
+    assert.equal(store.tasks.update(retried.value.task, { state: first.value.task.state, updatedAt: first.value.task.updatedAt }).outcome, "success");
+    assert.equal(store.attempts.create(retried.value.attempt).outcome, "success");
+
+    const result = store.selection.select({ evaluatedAt: t3, worker: { workerId: "pirx", capabilities: ["tests.run"] } });
+    assert.equal(result.outcome, "selected");
+    if (result.outcome === "selected") assert.equal(result.candidate.task.id, currentTask.id);
   } finally {
     store.close();
     await rm(setup.directory, { recursive: true, force: true });

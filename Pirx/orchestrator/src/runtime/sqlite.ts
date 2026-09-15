@@ -86,6 +86,7 @@ import {
   workspaceOwnershipTimestamp,
   type WorkspaceOwnershipInput,
   type WorkspaceOwnershipRecord,
+  type WorkspaceOwnershipTransferInput,
 } from "./workspace-ownership.js";
 import type { CiCorrelationInput, CiCorrelationObservation, CiCorrelationRecord, CiCorrelationState } from "./ci-correlation.js";
 import type { CiFailureEvidenceRecord } from "./ci-evidence.js";
@@ -1157,6 +1158,27 @@ export class TaskSelectionRepository {
   readonly #store: RuntimeSqliteStore;
   public constructor(store: RuntimeSqliteStore) { this.#store = store; }
 
+  #retryReadiness(task: TaskSnapshot): { readonly runnable: boolean; readonly reconciliationReason?: string } {
+    if (task.state !== "in_progress") return { runnable: false };
+    const history = this.#store.attempts.listByTask(task.id);
+    if (history.outcome !== "success") return { runnable: false, reconciliationReason: `attempt_history_unavailable:${task.id}` };
+    const running = history.value.filter((attempt) => attempt.state === "running");
+    if (running.length === 0) return { runnable: false };
+    if (running.length !== 1) return { runnable: false, reconciliationReason: `multiple_running_attempts:${task.id}` };
+    const successor = running[0]!;
+    if (successor.predecessorAttemptId === undefined && successor.checkpointReference === undefined) return { runnable: false };
+    if (successor.predecessorAttemptId === undefined || successor.checkpointReference === undefined) return { runnable: false, reconciliationReason: `incomplete_retry_identity:${task.id}` };
+    const predecessor = history.value.find((attempt) => attempt.id === successor.predecessorAttemptId);
+    if (predecessor?.state !== "terminal" || predecessor.ordinal + 1 !== successor.ordinal) return { runnable: false, reconciliationReason: `invalid_retry_predecessor:${task.id}` };
+    const checkpoint = this.#store.checkpoints.get(successor.checkpointReference);
+    if (checkpoint.outcome !== "success") return { runnable: false, reconciliationReason: `retry_checkpoint_unavailable:${task.id}` };
+    if (checkpoint.value.taskId !== task.id || checkpoint.value.previousAttemptId !== predecessor.id) return { runnable: false, reconciliationReason: `retry_checkpoint_mismatch:${task.id}` };
+    const activeLease = this.#store.leases.getActiveByTask(task.id);
+    if (activeLease.outcome === "success") return { runnable: false, reconciliationReason: `active_lease_requires_reconciliation:${task.id}` };
+    if (activeLease.outcome !== "not_found") return { runnable: false, reconciliationReason: `lease_lookup_unavailable:${task.id}` };
+    return { runnable: true };
+  }
+
   public synchronize(input: TaskSelectionMetadataInput): StorageResult<TaskSelectionMetadata> {
     const validated = validateTaskSelectionMetadata(input);
     if (!validated.ok) return { outcome: "invalid_record", message: validated.message };
@@ -1202,8 +1224,15 @@ export class TaskSelectionRepository {
     const explanations: TaskEligibilityExplanation[] = [];
     const reconciliationReasons: string[] = [];
     const metadataByTask = new Map<string, TaskSelectionMetadata>();
-    const ready = tasks.value.filter((task) => task.state === "ready");
-    for (const task of ready) {
+    const retryRunnable = new Set<string>();
+    const runnable = tasks.value.filter((task) => {
+      if (task.state === "ready") return true;
+      const retry = this.#retryReadiness(task);
+      if (retry.reconciliationReason !== undefined) reconciliationReasons.push(retry.reconciliationReason);
+      if (retry.runnable) retryRunnable.add(task.id);
+      return retry.runnable;
+    });
+    for (const task of runnable) {
       const metadata = this.get(task.id);
       if (metadata.outcome !== "success") {
         reconciliationReasons.push(`missing_selection_metadata:${task.id}`);
@@ -1222,13 +1251,13 @@ export class TaskSelectionRepository {
     for (const [order, ids] of queueOrders) if (ids.length > 1) reconciliationReasons.push(`duplicate_queue_order:${order}`);
     for (const task of tasks.value) {
       const metadata = metadataByTask.get(task.id);
-      if (task.state !== "ready") {
+      if (task.state !== "ready" && !retryRunnable.has(task.id)) {
         explanations.push({ taskId: task.id, eligible: false, reasonCode: "NOT_READY", priority: task.priority, ...(metadata?.queueOrder === undefined ? {} : { queueOrder: metadata.queueOrder }), missingCapabilities: [], blockers: metadata?.blockers ?? [] });
       }
     }
     if (reconciliationReasons.length > 0) return { outcome: "reconciliation_required", reasons: Object.freeze([...new Set(reconciliationReasons)].sort()), explanations: Object.freeze(explanations) };
     const eligible: RunnableTaskCandidate[] = [];
-    for (const task of ready) {
+    for (const task of runnable) {
       const metadata = metadataByTask.get(task.id);
       if (metadata === undefined) continue;
       if (metadata.queueOrder === undefined) {
@@ -1676,6 +1705,30 @@ export class WorkspaceOwnershipRepository {
       try {
         const row = this.#store.database.prepare("SELECT * FROM runtime_workspace_ownership WHERE task_id = ? AND attempt_id = ?").get(taskId, attemptId) as Record<string, unknown> | undefined;
         return row === undefined ? notFound("No workspace ownership was found for the Task and Attempt.") : workspaceOwnershipFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public transfer(input: WorkspaceOwnershipTransferInput): StorageResult<WorkspaceOwnershipRecord> {
+    try {
+      workspaceOwnershipId(input.taskId, "Task ID");
+      workspaceOwnershipId(input.fromAttemptId, "Source Attempt ID");
+      workspaceOwnershipId(input.toAttemptId, "Target Attempt ID");
+      workspaceOwnershipTimestamp(input.transferredAt, "Transfer timestamp");
+      if (input.fromAttemptId === input.toAttemptId) throw new Error("Source and target Attempt must differ.");
+    } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Workspace transfer is invalid." }; }
+    return this.#store.execute(() => {
+      try {
+        const source = this.#store.database.prepare("SELECT * FROM runtime_workspace_ownership WHERE task_id = ? AND attempt_id = ? AND ownership_state = 'active'").get(input.taskId, input.fromAttemptId) as Record<string, unknown> | undefined;
+        if (source === undefined) return notFound("No active predecessor workspace was found.");
+        const sourceValue = workspaceOwnershipFromRow(source);
+        if (sourceValue.outcome !== "success") return sourceValue;
+        const target = this.#store.database.prepare("SELECT task_id, state, predecessor_attempt_id FROM runtime_attempts WHERE id = ?").get(input.toAttemptId) as { task_id: string; state: string; predecessor_attempt_id: string | null } | undefined;
+        if (target === undefined) return notFound("Retry Attempt was not found.");
+        if (target.task_id !== input.taskId || target.state !== "running" || target.predecessor_attempt_id !== input.fromAttemptId) return conflict("Workspace transfer target is not the exact running successor Attempt.");
+        const updated = this.#store.database.prepare("UPDATE runtime_workspace_ownership SET attempt_id = ?, updated_at = ?, version = version + 1 WHERE task_id = ? AND attempt_id = ? AND ownership_state = 'active' AND version = ?").run(input.toAttemptId, input.transferredAt, input.taskId, input.fromAttemptId, sourceValue.value.version);
+        if (updated.changes !== 1) return conflict("Workspace ownership transfer compare-and-set failed.");
+        return this.#readAttempt(input.toAttemptId);
       } catch (error: unknown) { return classifyStorageError(error); }
     });
   }

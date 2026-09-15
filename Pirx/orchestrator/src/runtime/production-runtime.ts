@@ -180,10 +180,18 @@ export class ProductionRuntime {
     const history = this.#store.attempts.listByTask(taskId);
     if (history.outcome !== "success") return portFailure(history.message);
     const ordinal = history.value.length + 1;
+    const previous = history.value[history.value.length - 1];
+    if (task.value.state !== "ready") {
+      if (task.value.state !== "in_progress" || previous?.state !== "running" || previous.predecessorAttemptId === undefined || previous.checkpointReference === undefined) return portFailure("Only an explicitly checkpointed retry Attempt can be claimed by the scheduler.", "conflict");
+      const predecessor = history.value.find((attempt) => attempt.id === previous.predecessorAttemptId);
+      const checkpoint = this.#store.checkpoints.get(previous.checkpointReference);
+      if (predecessor?.state !== "terminal" || predecessor.ordinal + 1 !== previous.ordinal || checkpoint.outcome !== "success" || checkpoint.value.taskId !== taskId || checkpoint.value.previousAttemptId !== predecessor.id) return portFailure("Retry Attempt checkpoint or predecessor does not match the durable history.", "conflict");
+      if (previous.worker !== workerId || previous.provider !== this.#options.provider) return portFailure("Retry Attempt worker identity does not match the scheduler.", "conflict");
+      return { outcome: "success", value: { attemptId: previous.id } };
+    }
     const id = this.#options.attemptIdFactory?.(taskId, ordinal, now) ?? attemptId(taskId, ordinal, now);
     const assignedBranch = this.#options.branchFactory?.(task.value) ?? branch(task.value);
     const worktree = resolve(this.#options.worktreeParent, `pirx-${taskId}-${id}`);
-    const previous = history.value[history.value.length - 1];
     const started = this.#store.startAttempt(taskId, { id, worker: workerId, provider: this.#options.provider, ...(previous?.id === undefined ? {} : { predecessorAttemptId: previous.id }), branch: assignedBranch, worktree, ...(previous?.state === "terminal" && previous.finalCommit !== undefined ? { currentCommit: previous.finalCommit } : {}) }, now);
     if (started.outcome !== "success") return portFailure(started.message, started.outcome === "conflict" ? "conflict" : "failed");
     return { outcome: "success", value: { attemptId: started.value.attempt.id } };
@@ -197,11 +205,20 @@ export class ProductionRuntime {
     let binding: WorkspaceBinding | undefined;
     if (ownership.outcome === "success") binding = { schemaVersion: 1, taskId: ownership.value.taskId, attemptId: ownership.value.attemptId, repositoryRoot: ownership.value.repositoryRoot, assignedBranch: ownership.value.assignedBranch, expectedBaseRevision: ownership.value.expectedBaseRevision, worktreePath: ownership.value.worktreePath };
     else {
-      const provisioned = await this.#workspace.provision(workspaceRequest);
-      if (provisioned.binding === undefined || !["created", "existing_compatible"].includes(provisioned.outcome)) return { outcome: signal.aborted ? "cancelled" : "unknown", reason: provisioned.message };
-      binding = provisioned.binding;
-      const claimed = this.#store.workspaces.claim({ taskId: task.value.id, attemptId: attempt.value.id, repository: repository.repository, repositoryRoot: binding.repositoryRoot, assignedBranch: binding.assignedBranch, worktreePath: binding.worktreePath, expectedBaseRevision: binding.expectedBaseRevision, acquiredAt: this.#clock.now() });
-      if (claimed.outcome !== "success") return { outcome: "unknown", reason: claimed.message };
+      const predecessor = attempt.value.predecessorAttemptId === undefined ? undefined : this.#store.workspaces.getByTask(task.value.id);
+      if (predecessor?.outcome === "success") {
+        if (attempt.value.predecessorAttemptId !== predecessor.value.attemptId || predecessor.value.repository !== repository.repository || predecessor.value.assignedBranch !== attempt.value.branch || predecessor.value.expectedBaseRevision !== repository.baseRevision) return { outcome: "unknown", reason: "Retry workspace ownership does not match its predecessor Attempt." };
+        const transferred = this.#store.workspaces.transfer({ taskId: task.value.id, fromAttemptId: predecessor.value.attemptId, toAttemptId: attempt.value.id, transferredAt: this.#clock.now() });
+        if (transferred.outcome !== "success") return { outcome: "unknown", reason: transferred.message };
+        binding = { schemaVersion: 1, taskId: transferred.value.taskId, attemptId: transferred.value.attemptId, repositoryRoot: transferred.value.repositoryRoot, assignedBranch: transferred.value.assignedBranch, expectedBaseRevision: transferred.value.expectedBaseRevision, worktreePath: transferred.value.worktreePath };
+      } else {
+        if (predecessor !== undefined && predecessor.outcome !== "not_found") return { outcome: "unknown", reason: predecessor.message };
+        const provisioned = await this.#workspace.provision(workspaceRequest);
+        if (provisioned.binding === undefined || !["created", "existing_compatible"].includes(provisioned.outcome)) return { outcome: signal.aborted ? "cancelled" : "unknown", reason: provisioned.message };
+        binding = provisioned.binding;
+        const claimed = this.#store.workspaces.claim({ taskId: task.value.id, attemptId: attempt.value.id, repository: repository.repository, repositoryRoot: binding.repositoryRoot, assignedBranch: binding.assignedBranch, worktreePath: binding.worktreePath, expectedBaseRevision: binding.expectedBaseRevision, acquiredAt: this.#clock.now() });
+        if (claimed.outcome !== "success") return { outcome: "unknown", reason: claimed.message };
+      }
     }
     const input: WorkerRequestInput = { task: task.value, attempt: attempt.value, workerId: this.#options.workerId, provider: this.#options.provider, repository: repositoryParts(repository.repository)!, workspace: { branch: binding.assignedBranch, worktree: binding.worktreePath }, capabilityGrant: { grantedCapabilities: this.#options.workerCapabilities, resourceScope: { repository: repository.repository, branch: binding.assignedBranch, worktree: binding.worktreePath } }, correlationId: `${task.value.id}:${attempt.value.id}`, limits: { timeoutMs: this.#options.workerTimeoutMs ?? 30_000, maxOutputBytes: this.#options.workerOutputBytes ?? 16_384, maxErrorBytes: this.#options.workerErrorBytes ?? 16_384 }, ...(attempt.value.checkpointReference === undefined ? {} : { resumeContextReference: attempt.value.checkpointReference }) };
     const parsed = createWorkerRequest(input);

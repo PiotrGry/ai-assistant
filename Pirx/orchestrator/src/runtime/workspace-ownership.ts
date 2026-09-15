@@ -36,6 +36,13 @@ export interface WorkspaceOwnershipRecord extends WorkspaceOwnershipInput {
   readonly updatedAt: UtcTimestamp;
 }
 
+export interface WorkspaceOwnershipTransferInput {
+  readonly taskId: TaskId;
+  readonly fromAttemptId: AttemptId;
+  readonly toAttemptId: AttemptId;
+  readonly transferredAt: UtcTimestamp;
+}
+
 export type WorkspaceOwnershipMutationResult =
   | { readonly ok: true; readonly value: WorkspaceOwnershipRecord }
   | { readonly ok: false; readonly code: "invalid_input" | "conflict"; readonly message: string };

@@ -501,6 +501,7 @@ export {
   type WorkspaceOwnershipInput,
   type WorkspaceOwnershipMutationResult,
   type WorkspaceOwnershipRecord,
+  type WorkspaceOwnershipTransferInput,
   type WorkspaceOwnershipState,
 } from "./runtime/workspace-ownership.js";
 export { WorkspaceOwnershipRepository } from "./runtime/sqlite.js";
