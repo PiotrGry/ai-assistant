@@ -544,3 +544,11 @@ export {
   type GitHubLifecycleProjectionOutcome,
   type GitHubLifecycleProjectionResult,
 } from "./github/lifecycle-projection.js";
+export {
+  WorkerLifecycleCoordinator,
+  type WorkerLifecycleEvent,
+  type WorkerLifecycleOptions,
+  type WorkerLifecycleOutcome,
+  type WorkerLifecycleProjectionPort,
+  type WorkerLifecycleResult,
+} from "./runtime/worker-lifecycle.js";
