@@ -91,6 +91,15 @@ export {
   type CiRetryResult,
 } from "./runtime/ci-retry.js";
 export {
+  PRODUCTION_RUNTIME_LIMITS,
+  PRODUCTION_RUNTIME_SCHEMA_VERSION,
+  ProductionRuntime,
+  type ProductionRepositoryConfig,
+  type ProductionRuntimeOptions,
+  type ProductionRuntimeStatus,
+  type ProductionWorkspacePort,
+} from "./runtime/production-runtime.js";
+export {
   GITHUB_PROJECT_FIELD_NAMES,
   GitHubProjectSchemaResolver,
   GitHubProjectSynchronizer,
