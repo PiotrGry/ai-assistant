@@ -488,6 +488,25 @@ export class GitHubActionsWatcher {
         const resolved = await this.#resolveRun(request, context);
         providerAttempts += resolved.attempts;
         if (resolved.result.outcome !== "success") {
+          // GitHub may acknowledge a PR before its pull_request workflow run is
+          // visible through the Actions API. For a named gate, keep polling the
+          // bounded window; a gate that never appears still ends fail-closed as
+          // timeout rather than being mistaken for green evidence.
+          if (request.requiredWorkflowName !== undefined && resolved.result.error.code === "not_found") {
+            const remaining = deadline - this.#clock.now();
+            if (remaining <= 0) {
+              return { outcome: "timeout", repository: `${this.#config.owner}/${this.#config.repository}`, ...requestIdentity(request), errorCode: "timeout", message: "The required GitHub Actions workflow did not become observable before the watch timed out.", polls, providerAttempts };
+            }
+            try {
+              await this.#clock.sleep(Math.min(pollIntervalMs, remaining), controller.signal);
+            } catch {
+              if (request.signal !== undefined && request.signal.aborted) {
+                return { outcome: "cancelled", repository: `${this.#config.owner}/${this.#config.repository}`, ...requestIdentity(request), errorCode: "cancelled", message: "GitHub Actions watch was cancelled.", polls, providerAttempts };
+              }
+              return { outcome: "timeout", repository: `${this.#config.owner}/${this.#config.repository}`, ...requestIdentity(request), errorCode: "timeout", message: "The required GitHub Actions workflow did not become observable before the watch timed out.", polls, providerAttempts };
+            }
+            continue;
+          }
           return mapProviderFailure(this.#config, request, resolved.result, polls, providerAttempts, deadlineExpired);
         }
         const run = resolved.result.value;

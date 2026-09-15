@@ -170,7 +170,7 @@ test("watcher selects only the explicitly required workflow and fails closed on 
 
   const missing = new FakeGateway([], [run({ name: "Other workflow", status: "completed", conclusion: "success" })]);
   const missingResult = await new GitHubActionsWatcher(missing, config, { clock }).watch({ pullRequestNumber: 189, expectedHeadSha: "sha-current", requiredWorkflowName: "Develop — Fast Gate", timeoutMs: 10 });
-  assert.equal(missingResult.outcome, "not_found");
+  assert.equal(missingResult.outcome, "timeout");
 
   const duplicate = new FakeGateway([], [run({ name: "Develop — Fast Gate" }), run({ id: 902, name: "Develop — Fast Gate" })]);
   const duplicateResult = await new GitHubActionsWatcher(duplicate, config, { clock }).watch({ pullRequestNumber: 189, expectedHeadSha: "sha-current", requiredWorkflowName: "Develop — Fast Gate", timeoutMs: 10 });
