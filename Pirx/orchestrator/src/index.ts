@@ -467,6 +467,16 @@ export {
   type WorkerWorkspaceScope,
 } from "./runtime/worker-contract.js";
 export {
+  WORKSPACE_PROVISION_LIMITS,
+  WORKSPACE_PROVISION_SCHEMA_VERSION,
+  GitWorkspaceCommandRunner,
+  WorkspaceProvisioner,
+  type WorkspaceBinding,
+  type WorkspaceProvisionOutcome,
+  type WorkspaceProvisionRequest,
+  type WorkspaceProvisionResult,
+} from "./runtime/workspace.js";
+export {
   GITHUB_LIFECYCLE_EVENT_TYPES,
   GitHubLifecycleProjectionPublisher,
   type GitHubLifecycleEventType,
