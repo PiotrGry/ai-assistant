@@ -48,7 +48,7 @@ test("persists ownership, both lookup directions, revision CAS, release, and res
   let store = RuntimeSqliteStore.open({ filename: value.filename });
   try {
     const schema = store.database.prepare("SELECT MAX(version) AS version FROM runtime_schema_migrations").get() as { version: number };
-    assert.equal(schema.version, 13);
+    assert.equal(schema.version, 14);
     start(store, "workspace-task", "workspace-attempt");
     const claimed = store.workspaces.claim(input("workspace-task", "workspace-attempt"));
     assert.equal(claimed.outcome, "success");

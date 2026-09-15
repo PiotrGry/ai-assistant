@@ -380,6 +380,7 @@ export {
   RUNTIME_STORAGE_SCHEMA_VERSION,
   AttemptRepository,
   CheckpointRepository,
+  CiCorrelationRepository,
   LeaseRepository,
   PullRequestProvenanceRepository,
   ProjectionRepository,
@@ -410,6 +411,16 @@ export {
   type PullRequestProvenanceInput,
   type PullRequestProvenanceRecord,
 } from "./runtime/sqlite.js";
+export {
+  CI_CORRELATION_SCHEMA_VERSION,
+  CiCorrelationService,
+  type CiCorrelationInput,
+  type CiCorrelationObservation,
+  type CiCorrelationRecord,
+  type CiCorrelationRequest,
+  type CiCorrelationResult,
+  type CiCorrelationState,
+} from "./runtime/ci-correlation.js";
 export {
   GitHubPullRequestGateway,
   type GitHubBranchHead,

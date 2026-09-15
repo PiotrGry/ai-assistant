@@ -87,8 +87,9 @@ import {
   type WorkspaceOwnershipInput,
   type WorkspaceOwnershipRecord,
 } from "./workspace-ownership.js";
+import type { CiCorrelationInput, CiCorrelationObservation, CiCorrelationRecord, CiCorrelationState } from "./ci-correlation.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 13 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 14 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -190,6 +191,7 @@ export interface RuntimeTransaction {
   readonly webhooks: WebhookRepository;
   readonly workspaces: WorkspaceOwnershipRepository;
   readonly pullRequests: PullRequestProvenanceRepository;
+  readonly ciCorrelations: CiCorrelationRepository;
 }
 
 export class RuntimeStorageError extends Error {
@@ -516,6 +518,7 @@ const MIGRATIONS: readonly string[] = [
       ON runtime_workspace_ownership (ownership_state, updated_at, attempt_id);
   `,
   "CREATE TABLE IF NOT EXISTS runtime_pull_request_provenance (task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT, attempt_id TEXT PRIMARY KEY REFERENCES runtime_attempts(id) ON DELETE RESTRICT, repository TEXT NOT NULL CHECK (length(trim(repository)) > 0), issue_number INTEGER NOT NULL CHECK (issue_number > 0), issue_node_id TEXT NOT NULL CHECK (length(trim(issue_node_id)) > 0), issue_url TEXT NOT NULL CHECK (length(trim(issue_url)) > 0), worker_id TEXT NOT NULL CHECK (length(trim(worker_id)) > 0), head_branch TEXT NOT NULL CHECK (length(trim(head_branch)) > 0), base_branch TEXT NOT NULL CHECK (length(trim(base_branch)) > 0), observed_head_sha TEXT NOT NULL CHECK (length(trim(observed_head_sha)) > 0), pull_request_node_id TEXT NOT NULL UNIQUE CHECK (length(trim(pull_request_node_id)) > 0), pull_request_number INTEGER NOT NULL CHECK (pull_request_number > 0), pull_request_url TEXT NOT NULL CHECK (length(trim(pull_request_url)) > 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (task_id, attempt_id), UNIQUE (repository, pull_request_number)); CREATE INDEX IF NOT EXISTS runtime_pull_request_provenance_task_attempt ON runtime_pull_request_provenance (task_id, attempt_id); CREATE INDEX IF NOT EXISTS runtime_pull_request_provenance_pull ON runtime_pull_request_provenance (repository, pull_request_number);",
+  "CREATE TABLE IF NOT EXISTS runtime_ci_correlations (task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT, attempt_id TEXT PRIMARY KEY REFERENCES runtime_attempts(id) ON DELETE RESTRICT, schema_version INTEGER NOT NULL CHECK (schema_version = 1), repository TEXT NOT NULL CHECK (length(trim(repository)) > 0), issue_number INTEGER NOT NULL CHECK (issue_number > 0), issue_node_id TEXT NOT NULL CHECK (length(trim(issue_node_id)) > 0), issue_url TEXT NOT NULL CHECK (length(trim(issue_url)) > 0), feature_pr_node_id TEXT NOT NULL CHECK (length(trim(feature_pr_node_id)) > 0), feature_pr_number INTEGER NOT NULL CHECK (feature_pr_number > 0), feature_pr_url TEXT NOT NULL CHECK (length(trim(feature_pr_url)) > 0), worker_id TEXT NOT NULL CHECK (length(trim(worker_id)) > 0), head_branch TEXT NOT NULL CHECK (length(trim(head_branch)) > 0), base_branch TEXT NOT NULL CHECK (length(trim(base_branch)) > 0), pushed_commit TEXT NOT NULL CHECK (length(trim(pushed_commit)) > 0), provider TEXT NOT NULL CHECK (length(trim(provider)) > 0), required_workflow_name TEXT NOT NULL CHECK (length(trim(required_workflow_name)) > 0), provider_run_id TEXT, provider_run_url TEXT, workflow_name TEXT, provider_pipeline_id TEXT, tested_revision TEXT, state TEXT NOT NULL CHECK (state IN ('pending', 'success', 'failed', 'cancelled', 'timed_out', 'not_found', 'ambiguous', 'stale', 'rate_limited', 'retryable', 'permanent', 'unknown', 'unavailable')), observed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, version INTEGER NOT NULL CHECK (version > 0), UNIQUE (repository, feature_pr_number), UNIQUE (provider, provider_run_id)); CREATE INDEX IF NOT EXISTS runtime_ci_correlations_task_attempt ON runtime_ci_correlations (task_id, attempt_id); CREATE INDEX IF NOT EXISTS runtime_ci_correlations_commit ON runtime_ci_correlations (repository, pushed_commit); CREATE INDEX IF NOT EXISTS runtime_ci_correlations_provider_run ON runtime_ci_correlations (provider, provider_run_id);",
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -1745,6 +1748,114 @@ export class PullRequestProvenanceRepository {
   }
 }
 
+function optionalText(value: unknown): string | undefined {
+  return value === null || value === undefined ? undefined : typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function ciCorrelationFromRow(row: Record<string, unknown>): StorageResult<CiCorrelationRecord> {
+  try {
+    const required = ["task_id", "attempt_id", "repository", "issue_node_id", "issue_url", "feature_pr_node_id", "feature_pr_url", "worker_id", "head_branch", "base_branch", "pushed_commit", "provider", "required_workflow_name", "state", "created_at", "updated_at"];
+    if (required.some((key) => typeof row[key] !== "string" || (row[key] as string).trim().length === 0) || typeof row.issue_number !== "number" || typeof row.feature_pr_number !== "number" || typeof row.version !== "number" || row.schema_version !== 1 || !Number.isSafeInteger(row.issue_number) || !Number.isSafeInteger(row.feature_pr_number) || !Number.isSafeInteger(row.version) || row.issue_number <= 0 || row.feature_pr_number <= 0 || row.version <= 0 || !utcTimestamp(row.created_at as string).ok || !utcTimestamp(row.updated_at as string).ok) return invalidRecord();
+    const states: ReadonlySet<string> = new Set(["pending", "success", "failed", "cancelled", "timed_out", "not_found", "ambiguous", "stale", "rate_limited", "retryable", "permanent", "unknown", "unavailable"]);
+    if (!states.has(row.state as string)) return invalidRecord();
+    const observedAt = optionalText(row.observed_at);
+    const providerRunId = optionalText(row.provider_run_id);
+    const providerRunUrl = optionalText(row.provider_run_url);
+    const workflowName = optionalText(row.workflow_name);
+    const providerPipelineId = optionalText(row.provider_pipeline_id);
+    const testedRevision = optionalText(row.tested_revision);
+    const optionalColumns = [row.provider_run_id, row.provider_run_url, row.workflow_name, row.provider_pipeline_id, row.tested_revision];
+    if (optionalColumns.some((value) => value !== null && (typeof value !== "string" || value.trim().length === 0)) || (providerRunUrl !== undefined && !/^https:\/\//u.test(providerRunUrl))) return invalidRecord();
+    if (observedAt !== undefined && !utcTimestamp(observedAt).ok) return invalidRecord();
+    return success({
+      schemaVersion: 1,
+      taskId: row.task_id as CiCorrelationRecord["taskId"],
+      attemptId: row.attempt_id as CiCorrelationRecord["attemptId"],
+      repository: row.repository as string,
+      issueNumber: row.issue_number as number,
+      issueNodeId: row.issue_node_id as string,
+      issueUrl: row.issue_url as string,
+      featurePullRequest: { nodeId: row.feature_pr_node_id as string, number: row.feature_pr_number as number, url: row.feature_pr_url as string },
+      workerId: row.worker_id as string,
+      headBranch: row.head_branch as string,
+      baseBranch: row.base_branch as string,
+      pushedCommit: row.pushed_commit as string,
+      provider: row.provider as string,
+      requiredWorkflowName: row.required_workflow_name as string,
+      ...(providerRunId === undefined ? {} : { providerRunId }),
+      ...(providerRunUrl === undefined ? {} : { providerRunUrl }),
+      ...(workflowName === undefined ? {} : { workflowName }),
+      ...(providerPipelineId === undefined ? {} : { providerPipelineId }),
+      ...(testedRevision === undefined ? {} : { testedRevision }),
+      state: row.state as CiCorrelationState,
+      ...(observedAt === undefined ? {} : { observedAt: observedAt as UtcTimestamp }),
+      createdAt: row.created_at as CiCorrelationRecord["createdAt"],
+      updatedAt: row.updated_at as CiCorrelationRecord["updatedAt"],
+      version: row.version as number,
+    });
+  } catch { return invalidRecord(); }
+}
+
+export class CiCorrelationRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public getByTaskAttempt(taskId: string, attemptId: string): StorageResult<CiCorrelationRecord> { return this.#get("task_id = ? AND attempt_id = ?", taskId, attemptId); }
+  public getByPullRequest(repository: string, number: number): StorageResult<CiCorrelationRecord> { return this.#get("repository = ? AND feature_pr_number = ?", repository, number); }
+  public getByCommit(repository: string, commit: string): StorageResult<CiCorrelationRecord> { return this.#get("repository = ? AND pushed_commit = ?", repository, commit); }
+  public getByProviderRun(provider: string, providerRunId: string): StorageResult<CiCorrelationRecord> { return this.#get("provider = ? AND provider_run_id = ?", provider, providerRunId); }
+
+  public start(input: CiCorrelationInput): StorageResult<CiCorrelationRecord> {
+    try {
+      validatePullRequest(input.featurePullRequest);
+      if (input.taskId.trim().length === 0 || input.attemptId.trim().length === 0 || input.repository.trim().length === 0 || input.issueNodeId.trim().length === 0 || input.issueUrl.trim().length === 0 || input.workerId.trim().length === 0 || input.headBranch.trim().length === 0 || input.baseBranch.trim().length === 0 || input.pushedCommit.trim().length === 0 || input.provider.trim().length === 0 || input.requiredWorkflowName.trim().length === 0 || !Number.isSafeInteger(input.issueNumber) || input.issueNumber <= 0 || !utcTimestamp(input.createdAt).ok || !utcTimestamp(input.updatedAt).ok) return invalidRecord();
+    } catch { return invalidRecord(); }
+    return this.#store.execute(() => {
+      const provenance = this.#store.pullRequests.getByTaskAttempt(input.taskId, input.attemptId);
+      if (provenance.outcome !== "success") return provenance.outcome === "not_found" ? conflict("CI correlation requires feature pull request provenance.") : provenance;
+      const attempt = this.#store.attempts.get(input.attemptId);
+      if (attempt.outcome !== "success") return attempt.outcome === "not_found" ? conflict("CI correlation requires a durable Attempt.") : attempt;
+      if (attempt.value.provider !== input.provider) return conflict("CI correlation provider does not match the Attempt provider.");
+      if (provenance.value.repository !== input.repository || provenance.value.issueNumber !== input.issueNumber || provenance.value.issueNodeId !== input.issueNodeId || provenance.value.issueUrl !== input.issueUrl || provenance.value.workerId !== input.workerId || provenance.value.headBranch !== input.headBranch || provenance.value.baseBranch !== input.baseBranch || provenance.value.observedHeadSha !== input.pushedCommit || JSON.stringify(provenance.value.pullRequest) !== JSON.stringify(input.featurePullRequest)) return conflict("CI correlation does not match feature pull request provenance.");
+      const existing = this.getByTaskAttempt(input.taskId, input.attemptId);
+      if (existing.outcome === "success") {
+        const stored = existing.value;
+        const sameIdentity = stored.taskId === input.taskId && stored.attemptId === input.attemptId && stored.repository === input.repository && stored.issueNumber === input.issueNumber && stored.issueNodeId === input.issueNodeId && stored.issueUrl === input.issueUrl && JSON.stringify(stored.featurePullRequest) === JSON.stringify(input.featurePullRequest) && stored.workerId === input.workerId && stored.headBranch === input.headBranch && stored.baseBranch === input.baseBranch && stored.pushedCommit === input.pushedCommit && stored.provider === input.provider && stored.requiredWorkflowName === input.requiredWorkflowName;
+        return sameIdentity ? existing : conflict("CI correlation conflicts with the stored relationship.");
+      }
+      if (existing.outcome !== "not_found") return existing;
+      try {
+        this.#store.database.prepare("INSERT INTO runtime_ci_correlations (task_id, attempt_id, schema_version, repository, issue_number, issue_node_id, issue_url, feature_pr_node_id, feature_pr_number, feature_pr_url, worker_id, head_branch, base_branch, pushed_commit, provider, required_workflow_name, state, created_at, updated_at, version) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 1)").run(input.taskId, input.attemptId, input.repository, input.issueNumber, input.issueNodeId, input.issueUrl, input.featurePullRequest.nodeId, input.featurePullRequest.number, input.featurePullRequest.url, input.workerId, input.headBranch, input.baseBranch, input.pushedCommit, input.provider, input.requiredWorkflowName, input.createdAt, input.updatedAt);
+        return this.getByTaskAttempt(input.taskId, input.attemptId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public recordObservation(taskId: string, attemptId: string, observation: CiCorrelationObservation): StorageResult<CiCorrelationRecord> {
+    if (!utcTimestamp(observation.observedAt).ok) return invalidRecord();
+    return this.#store.execute(() => {
+      const existing = this.getByTaskAttempt(taskId, attemptId);
+      if (existing.outcome !== "success") return existing;
+      const current = existing.value;
+      const run = observation.run;
+      if (current.state !== "pending") return JSON.stringify({ state: observation.state, run }) === JSON.stringify({ state: current.state, run: current.providerRunId === undefined ? undefined : { providerRunId: current.providerRunId } }) ? existing : conflict("CI correlation is already terminal and cannot be rewritten.");
+      try {
+        this.#store.database.prepare("UPDATE runtime_ci_correlations SET provider_run_id = ?, provider_run_url = ?, workflow_name = ?, provider_pipeline_id = ?, tested_revision = ?, state = ?, observed_at = ?, updated_at = ?, version = version + 1 WHERE task_id = ? AND attempt_id = ? AND version = ? AND state = 'pending'").run(run?.providerRunId ?? null, run?.url ?? null, run?.name ?? null, run?.pipeline?.providerPipelineId ?? null, run?.testedRevision ?? null, observation.state, observation.observedAt, observation.observedAt, current.taskId, current.attemptId, current.version);
+        return this.getByTaskAttempt(taskId, attemptId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  #get(where: string, ...parameters: readonly (string | number)[]): StorageResult<CiCorrelationRecord> {
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_ci_correlations WHERE " + where).get(...parameters) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound("CI correlation was not found.") : ciCorrelationFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+}
+
 export class RuntimeSqliteStore {
   readonly #database: DatabaseSync;
   readonly #filename: string;
@@ -1760,6 +1871,7 @@ export class RuntimeSqliteStore {
   readonly webhooks: WebhookRepository;
   readonly workspaces: WorkspaceOwnershipRepository;
   readonly pullRequests: PullRequestProvenanceRepository;
+  readonly ciCorrelations: CiCorrelationRepository;
 
   private constructor(database: DatabaseSync, filename: string) {
     this.#database = database;
@@ -1774,6 +1886,7 @@ export class RuntimeSqliteStore {
     this.webhooks = new WebhookRepository(this);
     this.workspaces = new WorkspaceOwnershipRepository(this);
     this.pullRequests = new PullRequestProvenanceRepository(this);
+    this.ciCorrelations = new CiCorrelationRepository(this);
   }
 
   public static open(options: RuntimeSqliteStoreOptions = {}): RuntimeSqliteStore {
@@ -1823,14 +1936,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;

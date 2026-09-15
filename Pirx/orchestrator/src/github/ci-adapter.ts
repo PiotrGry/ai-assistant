@@ -30,11 +30,11 @@ function mapRun(run: GitHubActionsWorkflowRun): CiRun {
 }
 function mapFailure(watched: GitHubActionsWatchResult): CiRunResult {
   if (watched.outcome === "success") {
-    const run: CiRun = { schemaVersion: 1, provider: "github-actions", providerRunId: String(watched.workflowRunId), ...(watched.workflowName === undefined ? {} : { name: watched.workflowName }), status: "completed", conclusion: "success", testedRevision: watched.testedRevision, url: watched.runUrl, pullRequestNumbers: watched.pullRequestNumber === undefined ? [] : [watched.pullRequestNumber] };
+    const run: CiRun = { schemaVersion: 1, provider: "github-actions", providerRunId: String(watched.workflowRunId), ...(watched.workflowName === undefined ? {} : { name: watched.workflowName }), status: "completed", conclusion: "success", testedRevision: watched.testedRevision, ...(watched.headBranch === undefined ? {} : { headBranch: watched.headBranch }), url: watched.runUrl, pullRequestNumbers: watched.pullRequestNumber === undefined ? [] : [watched.pullRequestNumber] };
     return result("success", "The exact GitHub Actions workflow completed successfully.", watched.polls, run);
   }
   if ((watched.outcome === "failed" || watched.outcome === "cancelled") && "testedRevision" in watched) {
-    const run: CiRun = { schemaVersion: 1, provider: "github-actions", providerRunId: String(watched.workflowRunId), ...(watched.workflowName === undefined ? {} : { name: watched.workflowName }), status: "completed", conclusion: conclusion(watched.conclusion), testedRevision: watched.testedRevision, url: watched.runUrl, pullRequestNumbers: watched.pullRequestNumber === undefined ? [] : [watched.pullRequestNumber] };
+    const run: CiRun = { schemaVersion: 1, provider: "github-actions", providerRunId: String(watched.workflowRunId), ...(watched.workflowName === undefined ? {} : { name: watched.workflowName }), status: "completed", conclusion: conclusion(watched.conclusion), testedRevision: watched.testedRevision, ...(watched.headBranch === undefined ? {} : { headBranch: watched.headBranch }), url: watched.runUrl, pullRequestNumbers: watched.pullRequestNumber === undefined ? [] : [watched.pullRequestNumber] };
     return result(watched.outcome === "cancelled" ? "cancelled" : watched.conclusion === "timed_out" ? "timed_out" : "failed", "The exact GitHub Actions workflow completed without success.", watched.polls, run);
   }
   const outcome = watched.outcome === "timeout" ? "timed_out" : watched.outcome === "ambiguous" ? "ambiguous" : watched.outcome === "stale" ? "stale" : watched.outcome === "not_found" ? "not_found" : watched.outcome === "rate_limited" ? "rate_limited" : watched.outcome === "cancelled" ? "cancelled" : watched.outcome === "unknown" ? "unknown" : "unavailable";

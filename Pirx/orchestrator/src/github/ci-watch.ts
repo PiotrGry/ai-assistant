@@ -343,6 +343,7 @@ export interface GitHubActionsWatchTerminalResult extends WatchIdentity {
   readonly outcome: "success" | "failed" | "cancelled";
   readonly repository: string;
   readonly testedRevision: string;
+  readonly headBranch?: string;
   readonly status: "completed";
   readonly conclusion: GitHubActionsRunConclusion;
   readonly runUrl: string;
@@ -618,6 +619,7 @@ export class GitHubActionsWatcher {
       ...requestIdentity(request),
       workflowRunId: run.id,
       testedRevision: run.headSha,
+      ...(run.headBranch === undefined ? {} : { headBranch: run.headBranch }),
       status: "completed",
       conclusion,
       runUrl: run.url,
