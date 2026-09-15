@@ -138,6 +138,7 @@ export function buildWorkerResultSchema(request: WorkerRequest): unknown {
   return Object.freeze({
     type: "object",
     additionalProperties: false,
+    required: ["kind", "schemaVersion", "taskId", "attemptId", "correlationId", "outcome"],
     properties: {
       ...baseProperties,
       outcome: { enum: ["CODE_PUSHED", "BLOCKED", "FAILED", "QUOTA_EXHAUSTED", "CANCELLED", "UNKNOWN"] },
@@ -145,9 +146,5 @@ export function buildWorkerResultSchema(request: WorkerRequest): unknown {
       finalCommit: { type: "string", pattern: "^[0-9a-fA-F]{4,64}$" },
       reason: { type: "string", minLength: 1, maxLength: 1_000 },
     },
-    oneOf: [
-      { required: ["kind", "schemaVersion", "taskId", "attemptId", "correlationId", "outcome", "branch", "finalCommit"], properties: { outcome: { const: "CODE_PUSHED" }, branch: { const: request.workspace.branch } }, not: { required: ["reason"] } },
-      { required: ["kind", "schemaVersion", "taskId", "attemptId", "correlationId", "outcome", "reason"], properties: { outcome: { enum: ["BLOCKED", "FAILED", "QUOTA_EXHAUSTED", "CANCELLED", "UNKNOWN"] } }, not: { anyOf: [{ required: ["branch"] }, { required: ["finalCommit"] }] } },
-    ],
   });
 }

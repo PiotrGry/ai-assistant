@@ -170,7 +170,10 @@ export function buildClaudeStructuredArguments(requestId: string, prompt: string
 export function buildClaudeWorkerArguments(requestId: string, prompt: string, responseSchema: unknown, profile: ClaudeCodeWorkerProfile): readonly string[] {
   const schema = JSON.stringify(responseSchema);
   if (schema === undefined || Buffer.byteLength(schema, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || profile.permissionMode !== "dontAsk" || !Number.isSafeInteger(profile.maxTurns) || profile.maxTurns <= 1 || profile.maxTurns > 32 || profile.allowedTools.some((value) => /[\u0000-\u001f\u007f;&|<>`$\\]/u.test(value)) || profile.disallowedTools.some((value) => /[\u0000-\u001f\u007f]/u.test(value)) || JSON.stringify(profile).includes("bypassPermissions")) throw new RangeError("Claude code-worker profile is unsafe or invalid.");
-  const arguments_: string[] = ["--restricted", "-p", "--tools", profile.tools.join(",")];
+  // Current Claude Code exposes the explicit tool set through --tools; the
+  // permission mode and deny-by-default prompt target keep every other tool
+  // unavailable without relying on an unsupported legacy --restricted flag.
+  const arguments_: string[] = ["-p", "--tools", profile.tools.join(",")];
   for (const tool of profile.allowedTools) arguments_.push("--allowedTools", tool);
   for (const tool of profile.disallowedTools) arguments_.push("--disallowedTools", tool);
   arguments_.push("--permission-mode", profile.permissionMode, "--permission-prompts", "none", "--disable-slash-commands", "--no-session-persistence", "--max-turns", String(profile.maxTurns), "--output-format", "json", "--json-schema", schema, prompt);
