@@ -38,7 +38,8 @@ pnpm tui
 ```
 
 W TUI Enter wysyła wiadomość, Shift+Enter dodaje nową linię, Ctrl+O otwiera
-listę modeli zainstalowanych w Ollamie, a Ctrl+C kończy sesję. Historia używa
+listę modeli zainstalowanych w Ollamie, a Ctrl+C kończy sesję. Pełnoekranowy
+widok pokazuje ostatnią część rozmowy, a pełna historia trafia również do
 zwykłego bufora terminala: kółko myszy przewija, przeciągnięcie zaznacza tekst,
 a Cmd+C (macOS) lub Ctrl+Shift+C (Linux/Windows) kopiuje zaznaczenie. `pnpm
 start` pozostaje dotychczasowym interfejsem CLI.

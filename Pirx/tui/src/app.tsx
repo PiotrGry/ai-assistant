@@ -47,6 +47,8 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
   const [activeTools, setActiveTools] = useState<readonly string[]>([]);
 
   const layout = calculateTuiLayout(terminalSize.rows, terminalSize.columns);
+  const historyLines = buildHistoryLines(history, layout.contentWidth);
+  const visibleHistoryLines = historyLines.slice(-layout.historyRows);
 
   useEffect(() => {
     const updateTerminalSize = (): void => {
@@ -195,11 +197,14 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
   return (
     <Box
       flexDirection="column"
+      height={layout.rows}
       paddingX={1}
+      overflow="hidden"
     >
       {/* Completed chat items stay in terminal scrollback instead of being
           redrawn in a virtual full-screen viewport. This lets the terminal
-          own mouse scrolling, text selection, and clipboard shortcuts. */}
+          own mouse scrolling, text selection, and clipboard shortcuts. The
+          live viewport below keeps the full-screen application experience. */}
       <Static items={history}>
         {(item, itemIndex) => (
           <Box key={`history-${itemIndex}`} flexDirection="column" width={layout.contentWidth}>
@@ -245,8 +250,31 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
         )}
       </Box>
 
-      <Box flexDirection="column" width={layout.contentWidth} paddingY={1}>
-        {history.length === 0 ? <Text color="gray">Ask Pirx something. Ctrl+O switches the model.</Text> : null}
+      <Box
+        flexDirection="column"
+        width={layout.contentWidth}
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={1}
+        overflow="hidden"
+        paddingY={1}
+      >
+        {visibleHistoryLines.length === 0 ? <Text color="gray">Ask Pirx something. Ctrl+O switches the model.</Text> : null}
+        {visibleHistoryLines.map((line) => (
+          <Text
+            key={line.key}
+            {...(line.emphasis ? { bold: true } : {})}
+            {...(line.kind === "error"
+              ? { color: "red" }
+              : line.kind === "user"
+                ? { color: "cyan" }
+                : line.kind === "tool"
+                  ? { color: "yellow" }
+                  : {})}
+          >
+            {line.text}
+          </Text>
+        ))}
         {activeTools.map((name, index) => <Text key={`${name}-${index}`} color="yellow">[tool] {name} …</Text>)}
         {busy ? <Text color="yellow">◌ Pirx is thinking…</Text> : null}
       </Box>
