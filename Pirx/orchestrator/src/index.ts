@@ -484,6 +484,7 @@ export {
   SHIPMENT_CYCLE_SCHEMA_VERSION,
   ShipmentCycleCoordinator,
   type ShipmentCycleRecord,
+  type ShipmentCompletionMode,
   type ShipmentCycleRequest,
   type ShipmentCycleResult,
   type ShipmentCycleState,

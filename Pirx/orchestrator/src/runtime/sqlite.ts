@@ -94,7 +94,7 @@ import type { FeatureMergeRecord } from "./feature-merge.js";
 import type { ShipmentCycleRecord, ShipmentCycleState, ShipmentOutcome } from "./shipment-coordinator.js";
 import type { RetryDecisionInput, RetryDecisionRecord } from "./ci-retry.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 21 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 22 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -606,6 +606,7 @@ const MIGRATIONS: readonly string[] = [
     CREATE INDEX IF NOT EXISTS runtime_retry_decisions_task_attempt ON runtime_retry_decisions (task_id, attempt_id);
     CREATE INDEX IF NOT EXISTS runtime_retry_decisions_event ON runtime_retry_decisions (failure_event_id, evidence_digest);
   `,
+  `ALTER TABLE runtime_shipment_cycles ADD COLUMN completion_mode TEXT NOT NULL DEFAULT 'merge' CHECK (completion_mode IN ('merge', 'exact_green'));`,
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -2107,15 +2108,15 @@ export class FeatureMergeRepository {
 
 function shipmentCycleFromRow(row: Record<string, unknown>): StorageResult<ShipmentCycleRecord> {
   try {
-    const strings = ["task_id", "attempt_id", "event_id", "correlation_id", "repository", "head_branch", "base_branch", "expected_head_sha", "provider", "workflow_name", "state", "message", "created_at", "updated_at"];
+    const strings = ["task_id", "attempt_id", "event_id", "correlation_id", "repository", "head_branch", "base_branch", "expected_head_sha", "provider", "workflow_name", "completion_mode", "state", "message", "created_at", "updated_at"];
     const states: ReadonlySet<string> = new Set(["started", "pr_correlated", "ci_failed", "evidence_collected", "retry_created", "ci_succeeded", "recovery_success", "blocked", "reconciliation_required"]);
     const outcomes: ReadonlySet<string> = new Set(["recovery_success", "retry_created", "retry_ci_failed", "pending_or_timeout", "stale_or_conflicting_evidence", "policy_blocked", "rate_limited", "reconciliation_required", "worker_unavailable", "worker_authentication_required", "worker_quota_exhausted", "repair_failed", "unknown", "invalid_request"]);
-    if (strings.some((key) => typeof row[key] !== "string" || (row[key] as string).trim().length === 0) || row.schema_version !== 1 || !states.has(row.state as string) || (row.outcome !== null && !outcomes.has(row.outcome as string)) || typeof row.version !== "number" || !Number.isSafeInteger(row.version) || row.version <= 0 || !utcTimestamp(row.created_at as string).ok || !utcTimestamp(row.updated_at as string).ok) return invalidRecord();
+    if (strings.some((key) => typeof row[key] !== "string" || (row[key] as string).trim().length === 0) || row.schema_version !== 1 || !["merge", "exact_green"].includes(row.completion_mode as string) || !states.has(row.state as string) || (row.outcome !== null && !outcomes.has(row.outcome as string)) || typeof row.version !== "number" || !Number.isSafeInteger(row.version) || row.version <= 0 || !utcTimestamp(row.created_at as string).ok || !utcTimestamp(row.updated_at as string).ok) return invalidRecord();
     const optionalNumber = (value: unknown): number | undefined => value === null ? undefined : typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
     const optional = (value: unknown): string | undefined => value === null ? undefined : typeof value === "string" && value.trim().length > 0 ? value : undefined;
     const pullRequestNumber = optionalNumber(row.pull_request_number);
     if (row.pull_request_number !== null && pullRequestNumber === undefined) return invalidRecord();
-    return success({ schemaVersion: 1, taskId: row.task_id as TaskId, attemptId: row.attempt_id as AttemptId, eventId: row.event_id as string, correlationId: row.correlation_id as string, repository: row.repository as string, headBranch: row.head_branch as string, baseBranch: row.base_branch as string, expectedHeadSha: row.expected_head_sha as string, provider: row.provider as string, workflowName: row.workflow_name as string, state: row.state as ShipmentCycleState, ...(row.outcome === null ? {} : { outcome: row.outcome as ShipmentOutcome }), ...(pullRequestNumber === undefined ? {} : { pullRequestNumber }), ...(optional(row.pull_request_url) === undefined ? {} : { pullRequestUrl: optional(row.pull_request_url)! }), ...(optional(row.provider_run_id) === undefined ? {} : { providerRunId: optional(row.provider_run_id)! }), ...(optional(row.evidence_digest) === undefined ? {} : { evidenceDigest: optional(row.evidence_digest)! }), ...(optional(row.successor_attempt_id) === undefined ? {} : { successorAttemptId: optional(row.successor_attempt_id) as AttemptId }), ...(optional(row.merge_sha) === undefined ? {} : { mergeSha: optional(row.merge_sha)! }), message: row.message as string, createdAt: row.created_at as UtcTimestamp, updatedAt: row.updated_at as UtcTimestamp, version: row.version as number });
+    return success({ schemaVersion: 1, taskId: row.task_id as TaskId, attemptId: row.attempt_id as AttemptId, eventId: row.event_id as string, correlationId: row.correlation_id as string, repository: row.repository as string, headBranch: row.head_branch as string, baseBranch: row.base_branch as string, expectedHeadSha: row.expected_head_sha as string, provider: row.provider as string, workflowName: row.workflow_name as string, completionMode: row.completion_mode as ShipmentCycleRecord["completionMode"], state: row.state as ShipmentCycleState, ...(row.outcome === null ? {} : { outcome: row.outcome as ShipmentOutcome }), ...(pullRequestNumber === undefined ? {} : { pullRequestNumber }), ...(optional(row.pull_request_url) === undefined ? {} : { pullRequestUrl: optional(row.pull_request_url)! }), ...(optional(row.provider_run_id) === undefined ? {} : { providerRunId: optional(row.provider_run_id)! }), ...(optional(row.evidence_digest) === undefined ? {} : { evidenceDigest: optional(row.evidence_digest)! }), ...(optional(row.successor_attempt_id) === undefined ? {} : { successorAttemptId: optional(row.successor_attempt_id) as AttemptId }), ...(optional(row.merge_sha) === undefined ? {} : { mergeSha: optional(row.merge_sha)! }), message: row.message as string, createdAt: row.created_at as UtcTimestamp, updatedAt: row.updated_at as UtcTimestamp, version: row.version as number });
   } catch { return invalidRecord(); }
 }
 
@@ -2140,7 +2141,7 @@ export class ShipmentCycleRepository {
       if (existingAttempt.outcome === "success") return conflict("Attempt already belongs to another shipment event.");
       if (existingAttempt.outcome !== "not_found") return existingAttempt;
       try {
-        this.#store.database.prepare("INSERT INTO runtime_shipment_cycles (task_id, attempt_id, schema_version, event_id, correlation_id, repository, head_branch, base_branch, expected_head_sha, provider, workflow_name, state, outcome, pull_request_number, pull_request_url, provider_run_id, evidence_digest, successor_attempt_id, merge_sha, message, created_at, updated_at, version) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'started', NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, 1)").run(record.taskId, record.attemptId, record.eventId, record.correlationId, record.repository, record.headBranch, record.baseBranch, record.expectedHeadSha, record.provider, record.workflowName, record.message, record.createdAt, record.updatedAt);
+        this.#store.database.prepare("INSERT INTO runtime_shipment_cycles (task_id, attempt_id, schema_version, event_id, correlation_id, repository, head_branch, base_branch, expected_head_sha, provider, workflow_name, completion_mode, state, outcome, pull_request_number, pull_request_url, provider_run_id, evidence_digest, successor_attempt_id, merge_sha, message, created_at, updated_at, version) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, 1)").run(record.taskId, record.attemptId, record.eventId, record.correlationId, record.repository, record.headBranch, record.baseBranch, record.expectedHeadSha, record.provider, record.workflowName, record.completionMode, record.message, record.createdAt, record.updatedAt);
         return this.getByTaskAttempt(record.taskId, record.attemptId);
       } catch (error: unknown) { return classifyStorageError(error); }
     });

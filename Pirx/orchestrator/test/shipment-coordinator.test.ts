@@ -76,11 +76,11 @@ async function fixture(): Promise<{ directory: string; store: RuntimeSqliteStore
   return { directory, store, github: new FakeGithub(), ci: new FakeCi() };
 }
 async function dispose(value: { directory: string; store: RuntimeSqliteStore }): Promise<void> { try { value.store.close(); } finally { await rm(value.directory, { recursive: true, force: true }); } }
-function request(attemptId: AttemptId = attempt1, expectedHeadSha = sha1, eventId = "shipment-event-1") { return { taskId, attemptId, eventId, correlationId: "shipment-correlation-" + eventId, repository: { owner: "PiotrGry", repository: "ai-assistant" }, headBranch: branch, baseBranch: "develop", expectedHeadSha, provider: "github-actions", workflowName: "Required gate", mergePolicy: policy, now: attemptId === attempt1 ? t1 : t2 }; }
+function request(attemptId: AttemptId = attempt1, expectedHeadSha = sha1, eventId = "shipment-event-1") { return { taskId, attemptId, eventId, correlationId: "shipment-correlation-" + eventId, repository: { owner: "PiotrGry", repository: "ai-assistant" }, headBranch: branch, baseBranch: "develop", expectedHeadSha, provider: "github-actions", workflowName: "Required gate", completionMode: "merge" as const, mergePolicy: policy, now: attemptId === attempt1 ? t1 : t2 }; }
 
 async function seedPartialCycle(value: Awaited<ReturnType<typeof fixture>>, state: "started" | "pr_correlated" | "ci_failed" | "evidence_collected", eventId: string): Promise<void> {
   const current = request(attempt1, sha1, eventId);
-  const started = value.store.shipmentCycles.start({ schemaVersion: 1, taskId, attemptId: attempt1, eventId, correlationId: current.correlationId, repository, headBranch: branch, baseBranch: "develop", expectedHeadSha: sha1, provider: "github-actions", workflowName: "Required gate", state: "started", message: "Shipment cycle started.", createdAt: t1, updatedAt: t1, version: 1 });
+  const started = value.store.shipmentCycles.start({ schemaVersion: 1, taskId, attemptId: attempt1, eventId, correlationId: current.correlationId, repository, headBranch: branch, baseBranch: "develop", expectedHeadSha: sha1, provider: "github-actions", workflowName: "Required gate", completionMode: "merge", state: "started", message: "Shipment cycle started.", createdAt: t1, updatedAt: t1, version: 1 });
   if (started.outcome !== "success") throw new Error(started.message);
   if (state === "started") return;
   const pr = await new GitHubFeaturePullRequestService(value.store, value.github).createOrReuse({ taskId, attemptId: attempt1, repository: current.repository, baseBranch: "develop", expectedHeadSha: sha1, correlationId: current.correlationId });
@@ -160,6 +160,19 @@ test("reuses the same feature PR and records exact green CI and recovery after t
     const firstPr = value.store.pullRequests.getByTaskAttempt(taskId, attempt1); const secondPr = value.store.pullRequests.getByTaskAttempt(taskId, failureOutput.successorAttemptId); assert.equal(firstPr.outcome, "success"); assert.equal(secondPr.outcome, "success"); if (firstPr.outcome === "success" && secondPr.outcome === "success") assert.equal(firstPr.value.pullRequest.number, secondPr.value.pullRequest.number);
     const firstCorrelation = value.store.ciCorrelations.getByTaskAttempt(taskId, attempt1); const secondCorrelation = value.store.ciCorrelations.getByTaskAttempt(taskId, failureOutput.successorAttemptId); assert.equal(firstCorrelation.outcome, "success"); assert.equal(secondCorrelation.outcome, "success"); if (firstCorrelation.outcome === "success" && secondCorrelation.outcome === "success") { assert.equal(firstCorrelation.value.provider, "github-actions"); assert.equal(secondCorrelation.value.provider, "github-actions"); }
     const cycle = value.store.shipmentCycles.getByEvent("shipment-event-2"); assert.equal(cycle.outcome, "success"); if (cycle.outcome === "success") { assert.equal(cycle.value.state, "recovery_success"); assert.equal(cycle.value.expectedHeadSha, sha2); }
+  } finally { await dispose(value); }
+});
+
+test("records exact-green recovery without merging when the cycle policy stops before merge", async () => {
+  const value = await fixture();
+  try {
+    const coordinator = new ShipmentCycleCoordinator(value.store, value.github, value.ci); const failureOutput = await coordinator.run({ ...request(), completionMode: "exact_green" }); assert.equal(failureOutput.outcome, "retry_created"); if (failureOutput.successorAttemptId === undefined) throw new Error("missing successor");
+    const successor = value.store.attempts.get(failureOutput.successorAttemptId); assert.equal(successor.outcome, "success"); if (successor.outcome !== "success") return;
+    const repaired = transitionAttempt(successor.value, "running", { type: "finish", result: "CODE_PUSHED", branch, finalCommit: sha2, currentCommit: sha2 }, t2); assert.equal(repaired.ok, true); if (!repaired.ok) return; assert.equal(value.store.attempts.update(repaired.value, "running").outcome, "success"); value.github.branchSha = sha2; value.github.pull = { ...value.github.pull!, headSha: sha2 }; value.ci.phase = "success";
+    const greenRequest = { ...request(failureOutput.successorAttemptId, sha2, "shipment-event-exact-green"), completionMode: "exact_green" as const };
+    const green = await coordinator.run(greenRequest); assert.equal(green.outcome, "recovery_success", JSON.stringify(green)); assert.equal(value.github.mergeCalls, 0); assert.equal(green.mergeSha, undefined); assert.equal(green.pullRequest?.merged, false);
+    const replay = await coordinator.run(greenRequest); assert.equal(replay.outcome, "recovery_success"); assert.equal(replay.pullRequest?.merged, false); assert.equal(value.github.mergeCalls, 0); assert.equal(value.ci.resolveCalls, 2);
+    const cycle = value.store.shipmentCycles.getByEvent("shipment-event-exact-green"); assert.equal(cycle.outcome, "success"); if (cycle.outcome === "success") assert.equal(cycle.value.completionMode, "exact_green");
   } finally { await dispose(value); }
 });
 

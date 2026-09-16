@@ -10,6 +10,7 @@ import type { ProviderIndependentCiGateway } from "./ci-contract.js";
 import type { GitHubPullRequestGatewayPort } from "../github/pull-request.js";
 
 export const SHIPMENT_CYCLE_SCHEMA_VERSION = 1 as const;
+export type ShipmentCompletionMode = "merge" | "exact_green";
 export type ShipmentCycleState = "started" | "pr_correlated" | "ci_failed" | "evidence_collected" | "retry_created" | "ci_succeeded" | "recovery_success" | "blocked" | "reconciliation_required";
 export type ShipmentOutcome = "recovery_success" | "retry_created" | "retry_ci_failed" | "pending_or_timeout" | "stale_or_conflicting_evidence" | "policy_blocked" | "rate_limited" | "reconciliation_required" | "worker_unavailable" | "worker_authentication_required" | "worker_quota_exhausted" | "repair_failed" | "unknown" | "invalid_request";
 
@@ -25,6 +26,7 @@ export interface ShipmentCycleRecord {
   readonly expectedHeadSha: string;
   readonly provider: string;
   readonly workflowName: string;
+  readonly completionMode: ShipmentCompletionMode;
   readonly state: ShipmentCycleState;
   readonly outcome?: ShipmentOutcome;
   readonly pullRequestNumber?: number;
@@ -50,6 +52,7 @@ export interface ShipmentCycleRequest {
   readonly expectedHeadSha: string;
   readonly provider: string;
   readonly workflowName: string;
+  readonly completionMode?: ShipmentCompletionMode;
   readonly mergePolicy: FeatureMergePolicy;
   readonly now: UtcTimestamp;
   readonly failureEventId?: string;
@@ -101,7 +104,7 @@ export class ShipmentCycleCoordinator {
       if (!this.#sameIdentity(existing.value, request)) return result(request, "reconciliation_required", "Stored shipment cycle identity conflicts with the resumed request.");
       cycle = existing.value;
     } else if (existing.outcome === "not_found") {
-      const started = this.#store.shipmentCycles.start({ schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, eventId: request.eventId, correlationId: request.correlationId, repository: `${request.repository.owner}/${request.repository.repository}`, headBranch: request.headBranch, baseBranch: request.baseBranch, expectedHeadSha: request.expectedHeadSha, provider: request.provider, workflowName: request.workflowName, state: "started", message: "Shipment cycle started.", createdAt: request.now, updatedAt: request.now, version: 1 });
+      const started = this.#store.shipmentCycles.start({ schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, eventId: request.eventId, correlationId: request.correlationId, repository: `${request.repository.owner}/${request.repository.repository}`, headBranch: request.headBranch, baseBranch: request.baseBranch, expectedHeadSha: request.expectedHeadSha, provider: request.provider, workflowName: request.workflowName, completionMode: request.completionMode ?? "merge", state: "started", message: "Shipment cycle started.", createdAt: request.now, updatedAt: request.now, version: 1 });
       if (started.outcome !== "success") return result(request, "reconciliation_required", started.message);
       cycle = started.value;
     } else return result(request, "reconciliation_required", existing.message);
@@ -141,13 +144,16 @@ export class ShipmentCycleCoordinator {
       const succeeded = this.#store.shipmentCycles.advance(request.taskId, request.attemptId, { state: "ci_succeeded", ...(ci.record.providerRunId === undefined ? {} : { providerRunId: ci.record.providerRunId }), message: "Exact CI success was durably correlated." }, request.now);
       if (succeeded.outcome !== "success") return result(request, "reconciliation_required", succeeded.message);
     }
+    if ((request.completionMode ?? "merge") === "exact_green") {
+      return this.#finish(request, result(request, "recovery_success", "Exact-current-head CI succeeded; shipment stopped before merge by policy.", { pullRequest: pr.pullRequest, ...(ci.record.providerRunId === undefined ? {} : { providerRunId: ci.record.providerRunId }) }), "recovery_success");
+    }
     const merged = await this.#merge.merge({ taskId: request.taskId, attemptId: request.attemptId, policy: request.mergePolicy, correlationId: request.correlationId, now: request.now, ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }), ...(request.signal === undefined ? {} : { signal: request.signal }) });
     if (merged.outcome !== "merged" && merged.outcome !== "replayed") return this.#finish(request, result(request, merged.outcome === "rate_limited" ? "rate_limited" : merged.outcome === "reconciliation_required" ? "reconciliation_required" : merged.outcome === "stale" ? "stale_or_conflicting_evidence" : merged.outcome === "authorization_required" ? "worker_authentication_required" : "policy_blocked", merged.message, merged.pullRequest === undefined ? {} : { pullRequest: merged.pullRequest }), "blocked");
     return this.#finish(request, result(request, "recovery_success", merged.message, { ...(merged.mergeSha === undefined ? {} : { mergeSha: merged.mergeSha }), ...(merged.pullRequest === undefined ? {} : { pullRequest: merged.pullRequest }), ...(ci.record.providerRunId === undefined ? {} : { providerRunId: ci.record.providerRunId }) }), "recovery_success");
   }
 
   #sameIdentity(record: ShipmentCycleRecord, request: ShipmentCycleRequest): boolean {
-    return record.taskId === request.taskId && record.attemptId === request.attemptId && record.eventId === request.eventId && record.correlationId === request.correlationId && record.repository === `${request.repository.owner}/${request.repository.repository}` && record.headBranch === request.headBranch && record.baseBranch === request.baseBranch && record.expectedHeadSha === request.expectedHeadSha && record.provider === request.provider && record.workflowName === request.workflowName;
+    return record.taskId === request.taskId && record.attemptId === request.attemptId && record.eventId === request.eventId && record.correlationId === request.correlationId && record.repository === `${request.repository.owner}/${request.repository.repository}` && record.headBranch === request.headBranch && record.baseBranch === request.baseBranch && record.expectedHeadSha === request.expectedHeadSha && record.provider === request.provider && record.workflowName === request.workflowName && record.completionMode === (request.completionMode ?? "merge");
   }
 
   async #resumeBlockedRetry(request: ShipmentCycleRequest, cycle: ShipmentCycleRecord): Promise<ShipmentCycleResult> {
@@ -169,5 +175,5 @@ export class ShipmentCycleCoordinator {
   }
 
   #finish(request: ShipmentCycleRequest, output: ShipmentCycleResult, state: ShipmentCycleState): ShipmentCycleResult { this.#store.shipmentCycles.advance(request.taskId, request.attemptId, { state, outcome: output.outcome, ...(output.successorAttemptId === undefined ? {} : { successorAttemptId: output.successorAttemptId }), ...(output.evidenceDigest === undefined ? {} : { evidenceDigest: output.evidenceDigest }), ...(output.mergeSha === undefined ? {} : { mergeSha: output.mergeSha }), ...(output.providerRunId === undefined ? {} : { providerRunId: output.providerRunId }), ...(output.pullRequest === undefined ? {} : { pullRequestNumber: output.pullRequest.number, pullRequestUrl: output.pullRequest.url }), message: output.message }, request.now); return output; }
-  #fromRecord(record: ShipmentCycleRecord): ShipmentCycleResult { return { outcome: record.outcome ?? "reconciliation_required", taskId: record.taskId, attemptId: record.attemptId, eventId: record.eventId, message: record.message, ...(record.pullRequestNumber === undefined || record.pullRequestUrl === undefined ? {} : { pullRequest: { number: record.pullRequestNumber, url: record.pullRequestUrl, state: "open" as const, headBranch: record.headBranch, headSha: record.expectedHeadSha, baseBranch: record.baseBranch, merged: record.state === "recovery_success" } }), ...(record.providerRunId === undefined ? {} : { providerRunId: record.providerRunId }), ...(record.evidenceDigest === undefined ? {} : { evidenceDigest: record.evidenceDigest }), ...(record.successorAttemptId === undefined ? {} : { successorAttemptId: record.successorAttemptId }), ...(record.mergeSha === undefined ? {} : { mergeSha: record.mergeSha }) }; }
+  #fromRecord(record: ShipmentCycleRecord): ShipmentCycleResult { return { outcome: record.outcome ?? "reconciliation_required", taskId: record.taskId, attemptId: record.attemptId, eventId: record.eventId, message: record.message, ...(record.pullRequestNumber === undefined || record.pullRequestUrl === undefined ? {} : { pullRequest: { number: record.pullRequestNumber, url: record.pullRequestUrl, state: record.mergeSha === undefined ? "open" as const : "closed" as const, headBranch: record.headBranch, headSha: record.expectedHeadSha, baseBranch: record.baseBranch, merged: record.mergeSha !== undefined } }), ...(record.providerRunId === undefined ? {} : { providerRunId: record.providerRunId }), ...(record.evidenceDigest === undefined ? {} : { evidenceDigest: record.evidenceDigest }), ...(record.successorAttemptId === undefined ? {} : { successorAttemptId: record.successorAttemptId }), ...(record.mergeSha === undefined ? {} : { mergeSha: record.mergeSha }) }; }
 }
