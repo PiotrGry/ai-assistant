@@ -30,23 +30,16 @@ async function main(): Promise<void> {
   }
 
   let instance: ReturnType<typeof render> | undefined;
-  const alternateScreen = process.stdout.isTTY === true;
-  if (alternateScreen) {
-    process.stdout.write("\u001B[?1049h\u001B[H");
-  }
 
   try {
+    // Deliberately use the normal terminal buffer. An alternate screen would
+    // hide chat history from native scrolling, selection, and clipboard UX.
     instance = render(
       <App agent={agent} events={events} recorder={logger} initialNotice={recordingNotice} />,
       {
         exitOnCtrlC: false,
       },
     );
-    const onStdoutResize = (): void => {
-      // tmux can resize before Ink has rendered the new React layout. Clear
-      // the old frame so log-update never combines two different dimensions.
-      instance?.clear();
-    };
     const onSigwinch = (): void => {
       // Ink 5 listens for stdout's resize event, while tmux may only deliver
       // SIGWINCH to the process. Forward the signal so Ink recalculates Yoga
@@ -64,19 +57,13 @@ async function main(): Promise<void> {
       }
       process.stdout.emit("resize");
     };
-    process.stdout.on("resize", onStdoutResize);
     process.on("SIGWINCH", onSigwinch);
     try {
       await instance.waitUntilExit();
     } finally {
-      process.stdout.off("resize", onStdoutResize);
       process.off("SIGWINCH", onSigwinch);
-      instance.clear();
     }
   } finally {
-    if (alternateScreen) {
-      process.stdout.write("\u001B[?1049l");
-    }
     await logger?.close().catch(() => undefined);
     await agent.close();
   }

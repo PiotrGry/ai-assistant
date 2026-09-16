@@ -38,8 +38,10 @@ pnpm tui
 ```
 
 W TUI Enter wysyła wiadomość, Shift+Enter dodaje nową linię, Ctrl+O otwiera
-listę modeli zainstalowanych w Ollamie, a Ctrl+C kończy sesję. `pnpm start`
-pozostaje dotychczasowym interfejsem CLI.
+listę modeli zainstalowanych w Ollamie, a Ctrl+C kończy sesję. Historia używa
+zwykłego bufora terminala: kółko myszy przewija, przeciągnięcie zaznacza tekst,
+a Cmd+C (macOS) lub Ctrl+Shift+C (Linux/Windows) kopiuje zaznaczenie. `pnpm
+start` pozostaje dotychczasowym interfejsem CLI.
 
 Agent domyślnie używa modelu `gemma4:12b` i Ollamy pod `http://localhost:11434`. Ustawienia można nadpisać zmiennymi:
 

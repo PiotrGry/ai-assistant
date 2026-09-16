@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Box, Text, useApp, useInput, useStdin, useStdout } from "ink";
+import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
 
 import type { PirxAgent, TurnMetrics } from "@pirx/agent";
 
@@ -29,7 +29,6 @@ function compactDetail(value: string): string {
 
 export function App({ agent, events, recorder, initialNotice }: AppProps): React.JSX.Element {
   const { exit } = useApp();
-  const { stdin } = useStdin();
   const { stdout } = useStdout();
   const [terminalSize, setTerminalSize] = useState({
     rows: stdout.rows ?? 24,
@@ -45,19 +44,9 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
   const [modelIndex, setModelIndex] = useState(0);
   const [modelLoading, setModelLoading] = useState(false);
   const [modelError, setModelError] = useState<string | undefined>();
-  const [historyScroll, setHistoryScroll] = useState(0);
-  const [vimMode, setVimMode] = useState<"insert" | "normal">("insert");
-  const [pendingVimG, setPendingVimG] = useState(false);
+  const [activeTools, setActiveTools] = useState<readonly string[]>([]);
 
   const layout = calculateTuiLayout(terminalSize.rows, terminalSize.columns);
-  const historyLines = buildHistoryLines(history, layout.contentWidth);
-  const maxHistoryScroll = Math.max(0, historyLines.length - layout.historyRows);
-  const effectiveHistoryScroll = Math.min(historyScroll, maxHistoryScroll);
-  const historyEnd = historyLines.length - effectiveHistoryScroll;
-  const visibleHistoryLines = historyLines.slice(
-    Math.max(0, historyEnd - layout.historyRows),
-    historyEnd,
-  );
 
   useEffect(() => {
     const updateTerminalSize = (): void => {
@@ -74,78 +63,26 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
     };
   }, [stdout]);
 
-  useEffect(() => {
-    setHistoryScroll(0);
-  }, [history.length]);
-
-  useEffect(() => {
-    if (historyScroll > maxHistoryScroll) {
-      setHistoryScroll(maxHistoryScroll);
-    }
-  }, [historyScroll, maxHistoryScroll]);
-
-  useEffect(() => {
-    if (stdin.isTTY !== true) return;
-
-    const enableMouse = "\u001B[?1000h\u001B[?1006h";
-    const disableMouse = "\u001B[?1006l\u001B[?1000l";
-    stdout.write(enableMouse);
-    let buffer = "";
-    const mousePattern = /\u001B\[<(\d+);\d+;\d+[mM]/g;
-    const onData = (chunk: Buffer | string): void => {
-      buffer += chunk.toString();
-      let consumed = 0;
-      let match: RegExpExecArray | null;
-      while ((match = mousePattern.exec(buffer)) !== null) {
-        consumed = mousePattern.lastIndex;
-        const button = Number(match[1]);
-        if (button === 64) {
-          setHistoryScroll((current) => Math.min(maxHistoryScroll, current + 3));
-        } else if (button === 65) {
-          setHistoryScroll((current) => Math.max(0, current - 3));
-        }
-      }
-      buffer = buffer.slice(consumed);
-      const incompleteStart = buffer.lastIndexOf("\u001B[<");
-      buffer = incompleteStart === -1 ? "" : buffer.slice(incompleteStart);
-      if (buffer.length > 64) buffer = "";
-      mousePattern.lastIndex = 0;
-    };
-
-    stdin.on("data", onData);
-    return () => {
-      stdin.off("data", onData);
-      stdout.write(disableMouse);
-    };
-  }, [maxHistoryScroll, stdin, stdout]);
-
   useEffect(() => events.subscribe((event: TuiEvent) => {
     if (event.type === "tool-started") {
-      setHistory((current) => [...current, {
-        kind: "tool",
-        name: event.name,
-        status: "running",
-      }]);
+      setActiveTools((current) => [...current, event.name]);
       return;
     }
 
     if (event.type === "tool-finished") {
-      setHistory((current) => {
+      setActiveTools((current) => {
         const next = [...current];
-        const pendingIndex = next.findLastIndex(
-          (item) => item.kind === "tool" && item.name === event.name && item.status === "running",
-        );
-        const replacement: Extract<ChatItem, { kind: "tool" }> = {
-          kind: "tool",
-          name: event.name,
-          status: event.isError ? "error" : "done",
-          durationMs: event.durationMs,
-          ...(event.isError ? { detail: compactDetail(event.text) } : {}),
-        };
-        if (pendingIndex === -1) next.push(replacement);
-        else next[pendingIndex] = replacement;
+        const pendingIndex = next.lastIndexOf(event.name);
+        if (pendingIndex !== -1) next.splice(pendingIndex, 1);
         return next;
       });
+      setHistory((current) => [...current, {
+        kind: "tool",
+        name: event.name,
+        status: event.isError ? "error" : "done",
+        durationMs: event.durationMs,
+        ...(event.isError ? { detail: compactDetail(event.text) } : {}),
+      }]);
       return;
     }
 
@@ -178,72 +115,6 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
       return;
     }
 
-    const scrollBy = (delta: number): void => {
-      setHistoryScroll((current) => Math.min(maxHistoryScroll, Math.max(0, current + delta)));
-    };
-
-    if (key.escape) {
-      setPendingVimG(false);
-      if (selectorOpen) {
-        setSelectorOpen(false);
-        return;
-      }
-      setVimMode("normal");
-      return;
-    }
-
-    if (vimMode === "normal") {
-      if (input === "i" || input === "a") {
-        setVimMode("insert");
-        setPendingVimG(false);
-        return;
-      }
-      if (input === "g") {
-        if (pendingVimG) setHistoryScroll(maxHistoryScroll);
-        setPendingVimG(!pendingVimG);
-        return;
-      }
-      if (input === "G") {
-        setHistoryScroll(0);
-        setPendingVimG(false);
-        return;
-      }
-      if (input === "k" || key.upArrow) {
-        scrollBy(1);
-        return;
-      }
-      if (input === "j" || key.downArrow) {
-        scrollBy(-1);
-        return;
-      }
-      if (input === "u" || key.pageUp) {
-        scrollBy(layout.historyRows);
-        return;
-      }
-      if (input === "d" || key.pageDown) {
-        scrollBy(-layout.historyRows);
-        return;
-      }
-      setPendingVimG(false);
-      return;
-    }
-
-    if (key.pageUp) {
-      setHistoryScroll((current) => Math.min(maxHistoryScroll, current + layout.historyRows));
-      return;
-    }
-    if (key.pageDown) {
-      setHistoryScroll((current) => Math.max(0, current - layout.historyRows));
-      return;
-    }
-    if (key.ctrl && key.upArrow) {
-      setHistoryScroll((current) => Math.min(maxHistoryScroll, current + 3));
-      return;
-    }
-    if (key.ctrl && key.downArrow) {
-      setHistoryScroll((current) => Math.max(0, current - 3));
-      return;
-    }
     if (selectorOpen) {
       if (key.escape) {
         setSelectorOpen(false);
@@ -316,22 +187,41 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
     : lastMetrics.generation_tokens_per_second === null
       ? "—"
       : `${lastMetrics.generation_tokens_per_second.toFixed(1)} tok/s`;
-  const hint = notice ?? (
-    vimMode === "normal"
-      ? "NORMAL · j/k scroll · u/d page · gg top · G bottom · i insert"
-      : busy
-        ? "working…"
-        : "INSERT · Esc normal · PgUp/PgDn or mouse scroll · Ctrl+O models"
-  );
+  const hint = notice ?? (busy
+    ? "working…"
+    : "mouse wheel scroll · select text · Cmd/Ctrl+Shift+C copy · Ctrl+O models");
   const mcpColor = agent.mcpAvailable ? "green" : "red";
 
   return (
     <Box
       flexDirection="column"
-      height={layout.rows}
       paddingX={1}
-      overflow="hidden"
     >
+      {/* Completed chat items stay in terminal scrollback instead of being
+          redrawn in a virtual full-screen viewport. This lets the terminal
+          own mouse scrolling, text selection, and clipboard shortcuts. */}
+      <Static items={history}>
+        {(item, itemIndex) => (
+          <Box key={`history-${itemIndex}`} flexDirection="column" width={layout.contentWidth}>
+            {buildHistoryLines([item], layout.contentWidth).map((line) => (
+              <Text
+                key={line.key}
+                {...(line.emphasis ? { bold: true } : {})}
+                {...(line.kind === "error"
+                  ? { color: "red" }
+                  : line.kind === "user"
+                    ? { color: "cyan" }
+                    : line.kind === "tool"
+                      ? { color: "yellow" }
+                      : {})}
+              >
+                {line.text}
+              </Text>
+            ))}
+          </Box>
+        )}
+      </Static>
+
       <Box width={layout.contentWidth} flexShrink={0}>
         {layout.tiny ? (
           <Text bold color="cyan">◆ Pirx</Text>
@@ -355,32 +245,9 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
         )}
       </Box>
 
-      <Box
-        flexDirection="column"
-        width={layout.contentWidth}
-        flexGrow={1}
-        flexShrink={1}
-        minHeight={1}
-        overflow="hidden"
-        paddingY={1}
-      >
-        {visibleHistoryLines.length === 0 ? <Text color="gray">Ask Pirx something. Ctrl+O switches the model.</Text> : null}
-        {visibleHistoryLines.map((line) => (
-          <Text
-            key={line.key}
-            {...(line.emphasis ? { bold: true } : {})}
-            {...(line.kind === "error"
-              ? { color: "red" }
-              : line.kind === "user"
-                ? { color: "cyan" }
-                : line.kind === "tool"
-                  ? { color: "yellow" }
-                  : {})}
-          >
-            {line.text}
-          </Text>
-        ))}
-        {effectiveHistoryScroll > 0 ? <Text color="gray">↑ older messages · PageUp/PageDown scroll</Text> : null}
+      <Box flexDirection="column" width={layout.contentWidth} paddingY={1}>
+        {history.length === 0 ? <Text color="gray">Ask Pirx something. Ctrl+O switches the model.</Text> : null}
+        {activeTools.map((name, index) => <Text key={`${name}-${index}`} color="yellow">[tool] {name} …</Text>)}
         {busy ? <Text color="yellow">◌ Pirx is thinking…</Text> : null}
       </Box>
 
@@ -401,9 +268,9 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
             {visibleModels.map((model, offset) => {
               const index = modelStart + offset;
               return (
-              <Text key={model} {...(index === modelIndex ? { color: "cyan" } : {})}>
-                {index === modelIndex ? "› " : "  "}{model}{model === agent.model ? " · current" : ""}
-              </Text>
+                <Text key={model} {...(index === modelIndex ? { color: "cyan" } : {})}>
+                  {index === modelIndex ? "› " : "  "}{model}{model === agent.model ? " · current" : ""}
+                </Text>
               );
             })}
             {models.length > visibleModels.length ? <Text color="gray">… {models.length - visibleModels.length} more</Text> : null}
@@ -412,7 +279,7 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
         ) : (
           <Composer
             clearToken={clearToken}
-            disabled={busy || vimMode === "normal"}
+            disabled={busy}
             onSubmit={submit}
             width={layout.contentWidth}
           />
@@ -431,7 +298,7 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
             paddingTop={1}
           >
             <Text wrap="truncate-end" color={notice ? "yellow" : "gray"}>
-              {notice ? "⚠ " : vimMode === "normal" ? "▸ " : busy ? "◌ " : "› "}{hint}
+              {notice ? "⚠ " : busy ? "◌ " : "› "}{hint}
             </Text>
             <Text wrap="truncate-end" color="gray">
               {context}  ·  <Text color="magenta">{speed} tok/s</Text>
