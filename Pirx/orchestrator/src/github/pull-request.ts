@@ -49,6 +49,7 @@ interface MergePayload { readonly merged?: unknown; readonly sha?: unknown; read
 const DEFAULT_RETRY: GitHubRetryPolicyOptions = { maxAttempts: 2, maxTotalDelayMs: 5_000, baseDelayMs: 250, maxDelayMs: 2_000, jitterRatio: 0 };
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function text(value: unknown, max = 2_048): string | undefined { return typeof value === "string" && value.length > 0 && value.length <= max && !(/[\u0000-\u001f\u007f]/u.test(value)) ? value : undefined; }
+function markdown(value: unknown, max = 65_536): string | undefined { return typeof value === "string" && value.length > 0 && value.length <= max && !(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)) ? value : undefined; }
 function positive(value: unknown): number | undefined { return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined; }
 function sha(value: unknown): string | undefined { const candidate = text(value, 128); return candidate !== undefined && /^[A-Za-z0-9._-]+$/u.test(candidate) ? candidate : undefined; }
 function url(value: unknown): string | undefined { const candidate = text(value); return candidate !== undefined && /^https:\/\/github\.com\//u.test(candidate) ? candidate : undefined; }
@@ -63,7 +64,7 @@ function mapPull(value: unknown): GitHubPullRequest | undefined {
   const headBranch = text(head?.ref, 512); const headSha = sha(head?.sha); const baseBranch = text(base?.ref, 512);
   if (number === undefined || pullUrl === undefined || state === undefined || headBranch === undefined || headSha === undefined || baseBranch === undefined) return undefined;
   const title = value.title === undefined || value.title === null ? undefined : text(value.title, 512);
-  const body = value.body === undefined || value.body === null ? undefined : text(value.body, 65_536);
+  const body = value.body === undefined || value.body === null ? undefined : markdown(value.body);
   const mergeCommitSha = sha(value.merge_commit_sha);
   return { number, url: pullUrl, state, ...(title === undefined ? {} : { title }), ...(body === undefined ? {} : { body }), headBranch, headSha, baseBranch, merged: value.merged === true, ...(typeof value.mergeable === "boolean" ? { mergeable: value.mergeable } : {}), ...(mergeCommitSha === undefined ? {} : { mergeCommitSha }) };
 }
