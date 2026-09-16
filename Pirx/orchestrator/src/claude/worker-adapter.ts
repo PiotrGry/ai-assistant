@@ -52,6 +52,21 @@ export type ClaudeCodeProcessResult =
 
 const DEFAULT_RESPONSE_SCHEMA = Object.freeze({ type: "object", additionalProperties: true });
 const SECRET_PATTERN = /(token|secret|password|passwd|api[_-]?key|authorization|cookie|private[_ -]?key|credential|connection[_ -]?string)/iu;
+// Prompt policy text may legitimately mention sensitive-data categories.  At
+// this boundary reject secret-shaped values, while keeping the broad contract
+// guard for untrusted WorkerResult fields below.
+const PROMPT_SECRET_PATTERNS: readonly RegExp[] = [
+  /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/iu,
+  /\b(?:proxy-)?authorization\s*:\s*[^\r\n]+/iu,
+  /\bbearer\s+[A-Za-z0-9._~+/=-]+/iu,
+  /\b(?:cookie|set-cookie)\s*:\s*[^\r\n]+/iu,
+  /\b(?:password|passwd|pwd|secret|token|api[_-]?key|connection(?:[_ -]?string)?)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s;,]+)/iu,
+  /\b(?:ghp_|github_pat_|xox[baprs]-|sk-[A-Za-z0-9_-])[A-Za-z0-9._-]+/u,
+];
+
+function containsPromptSecret(value: string): boolean {
+  return PROMPT_SECRET_PATTERNS.some((pattern) => pattern.test(value));
+}
 
 function failure(outcome: "invalid_request" | "invalid_input", requestId: string, text: string, code: "binding_mismatch" | "permission_denied" | "adapter_failure" = "binding_mismatch"): ClaudeCodeProcessResult {
   return { outcome, requestId, message: text.slice(0, 256), exitCode: null, durationMs: 0, diagnostic: createWorkerFailureDiagnostic(code) };
@@ -92,7 +107,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     if (input.value.taskId !== value.taskId || input.value.attemptId !== value.attemptId || input.value.correlationId !== value.correlationId || input.value.workspace.worktree !== value.workspace.worktree || input.value.workspace.branch !== value.workspace.branch) return failure("invalid_input", value.correlationId, "Claude input is not bound to the assigned worker request.");
     let prompt: string;
     try { prompt = this.#promptRenderer.render(input.value); } catch { return failure("invalid_input", value.correlationId, "Claude prompt rendering failed before process invocation."); }
-    if (prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > 64 * 1024 || SECRET_PATTERN.test(prompt)) return failure("invalid_input", value.correlationId, "Claude prompt is invalid or contains forbidden sensitive material.", "permission_denied");
+    if (prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > 64 * 1024 || containsPromptSecret(prompt)) return failure("invalid_input", value.correlationId, "Claude prompt is invalid or contains forbidden sensitive material.", "permission_denied");
     const result = await this.#runner.runStructured({ requestId: value.correlationId, cwd: value.workspace.worktree, prompt, responseSchema: this.#repositoryPolicy === undefined ? this.#responseSchema : buildWorkerResultSchema(value), ...(workerProfile === undefined ? {} : { workerProfile }), signal, timeoutMs: value.limits.timeoutMs, maxStdoutBytes: value.limits.maxOutputBytes, maxStderrBytes: value.limits.maxErrorBytes });
     if (result.outcome !== "success") return result;
     return { outcome: "success", requestId: result.requestId, structuredOutput: result.structuredOutput, durationMs: Math.max(0, Date.now() - startedAt), exitCode: 0 };

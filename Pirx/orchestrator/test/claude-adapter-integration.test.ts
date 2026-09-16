@@ -209,6 +209,26 @@ test("rejects wrong workspace, branch, capability, and secret prompt before Clau
     const secretAdapter = new ClaudeCodeProcessAdapter({ runner, inputSource: { create: (value) => inputFor(value, "new") }, promptRenderer: { render: () => "token=fixture-secret" } });
     assert.equal((await secretAdapter.run(request(), new AbortController().signal)).outcome, "invalid_input");
     assert.equal(calls, 0);
+    const privateKeyAdapter = new ClaudeCodeProcessAdapter({ runner, inputSource: { create: (value) => inputFor(value, "new") }, promptRenderer: { render: () => "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----" } });
+    assert.equal((await privateKeyAdapter.run(request(), new AbortController().signal)).outcome, "invalid_input");
+    assert.equal(calls, 0);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("allows sanitized repair policy prose and redacted evidence while blocking secret-shaped evidence", async () => {
+  const value = await fixture();
+  try {
+    let calls = 0;
+    const runner: ClaudeStructuredRunner = { runStructured: async (input) => { calls += 1; return { outcome: "success", requestId: input.requestId, structuredOutput: { kind: "worker_result", schemaVersion: 1, taskId, attemptId: attemptOne, correlationId: "claude-integration-new", outcome: "CODE_PUSHED", branch, finalCommit: "dddddddddddddddddddddddddddddddddddddddd" }, durationMs: 1, exitCode: 0 }; } };
+    const safePrompt = new ClaudeCodeProcessAdapter({ runner, inputSource: { create: (input) => inputFor(input, "new") }, promptRenderer: { render: () => "Do not modify CI/CD, infrastructure, secrets, other branches, or remotes. Evidence: [REDACTED]." } });
+    const accepted = await safePrompt.run(request("new", value.worktree), new AbortController().signal);
+    assert.equal(accepted.outcome, "success");
+    assert.equal(calls, 1);
+    const evidenceWithSecret = new ClaudeCodeProcessAdapter({ runner, inputSource: { create: (input) => inputFor(input, "new") }, promptRenderer: { render: () => "Failure log excerpt: token=fixture-secret" } });
+    const rejected = await evidenceWithSecret.run(request("new", value.worktree), new AbortController().signal);
+    assert.equal(rejected.outcome, "invalid_input");
+    assert.equal(calls, 1);
+    assert.equal(JSON.stringify(rejected).includes("fixture-secret"), false);
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
 
