@@ -92,8 +92,9 @@ import type { CiCorrelationInput, CiCorrelationObservation, CiCorrelationRecord,
 import type { CiFailureEvidenceRecord } from "./ci-evidence.js";
 import type { FeatureMergeRecord } from "./feature-merge.js";
 import type { ShipmentCycleRecord, ShipmentCycleState, ShipmentOutcome } from "./shipment-coordinator.js";
+import type { RetryDecisionInput, RetryDecisionRecord } from "./ci-retry.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 20 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 21 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -199,6 +200,7 @@ export interface RuntimeTransaction {
   readonly ciEvidence: CiFailureEvidenceRepository;
   readonly featureMerges: FeatureMergeRepository;
   readonly shipmentCycles: ShipmentCycleRepository;
+  readonly retryDecisions: RetryDecisionRepository;
 }
 
 export class RuntimeStorageError extends Error {
@@ -583,6 +585,27 @@ const MIGRATIONS: readonly string[] = [
   "CREATE TABLE IF NOT EXISTS runtime_retry_pull_request_provenance (task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT, attempt_id TEXT PRIMARY KEY REFERENCES runtime_attempts(id) ON DELETE RESTRICT, repository TEXT NOT NULL CHECK (length(trim(repository)) > 0), issue_number INTEGER NOT NULL CHECK (issue_number > 0), issue_node_id TEXT NOT NULL CHECK (length(trim(issue_node_id)) > 0), issue_url TEXT NOT NULL CHECK (length(trim(issue_url)) > 0), worker_id TEXT NOT NULL CHECK (length(trim(worker_id)) > 0), head_branch TEXT NOT NULL CHECK (length(trim(head_branch)) > 0), base_branch TEXT NOT NULL CHECK (length(trim(base_branch)) > 0), observed_head_sha TEXT NOT NULL CHECK (length(trim(observed_head_sha)) > 0), pull_request_node_id TEXT NOT NULL CHECK (length(trim(pull_request_node_id)) > 0), pull_request_number INTEGER NOT NULL CHECK (pull_request_number > 0), pull_request_url TEXT NOT NULL CHECK (length(trim(pull_request_url)) > 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS runtime_retry_pull_request_task_attempt ON runtime_retry_pull_request_provenance (task_id, attempt_id); CREATE INDEX IF NOT EXISTS runtime_retry_pull_request_pull ON runtime_retry_pull_request_provenance (repository, pull_request_number);",
   "CREATE TABLE IF NOT EXISTS runtime_retry_ci_correlations (task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT, attempt_id TEXT PRIMARY KEY REFERENCES runtime_attempts(id) ON DELETE RESTRICT, schema_version INTEGER NOT NULL CHECK (schema_version = 1), repository TEXT NOT NULL CHECK (length(trim(repository)) > 0), issue_number INTEGER NOT NULL CHECK (issue_number > 0), issue_node_id TEXT NOT NULL CHECK (length(trim(issue_node_id)) > 0), issue_url TEXT NOT NULL CHECK (length(trim(issue_url)) > 0), feature_pr_node_id TEXT NOT NULL CHECK (length(trim(feature_pr_node_id)) > 0), feature_pr_number INTEGER NOT NULL CHECK (feature_pr_number > 0), feature_pr_url TEXT NOT NULL CHECK (length(trim(feature_pr_url)) > 0), worker_id TEXT NOT NULL CHECK (length(trim(worker_id)) > 0), head_branch TEXT NOT NULL CHECK (length(trim(head_branch)) > 0), base_branch TEXT NOT NULL CHECK (length(trim(base_branch)) > 0), pushed_commit TEXT NOT NULL CHECK (length(trim(pushed_commit)) > 0), provider TEXT NOT NULL CHECK (length(trim(provider)) > 0), required_workflow_name TEXT NOT NULL CHECK (length(trim(required_workflow_name)) > 0), provider_run_id TEXT, provider_run_url TEXT, workflow_name TEXT, provider_pipeline_id TEXT, tested_revision TEXT, state TEXT NOT NULL CHECK (state IN ('pending', 'success', 'failed', 'cancelled', 'timed_out', 'not_found', 'ambiguous', 'stale', 'rate_limited', 'retryable', 'permanent', 'unknown', 'unavailable')), observed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, version INTEGER NOT NULL CHECK (version > 0)); CREATE INDEX IF NOT EXISTS runtime_retry_ci_task_attempt ON runtime_retry_ci_correlations (task_id, attempt_id); CREATE INDEX IF NOT EXISTS runtime_retry_ci_commit ON runtime_retry_ci_correlations (repository, pushed_commit); CREATE INDEX IF NOT EXISTS runtime_retry_ci_run ON runtime_retry_ci_correlations (provider, provider_run_id);",
   `ALTER TABLE runtime_attempts ADD COLUMN diagnostic_json TEXT CHECK (diagnostic_json IS NULL OR json_valid(diagnostic_json));`,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_retry_decisions (
+      decision_id TEXT PRIMARY KEY CHECK (length(trim(decision_id)) > 0),
+      task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT,
+      attempt_id TEXT NOT NULL REFERENCES runtime_attempts(id) ON DELETE RESTRICT,
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      failure_event_id TEXT NOT NULL CHECK (length(trim(failure_event_id)) > 0),
+      evidence_digest TEXT NOT NULL CHECK (length(trim(evidence_digest)) = 64),
+      state TEXT NOT NULL CHECK (state IN ('blocked', 'created')),
+      blocker_code TEXT NOT NULL CHECK (length(trim(blocker_code)) > 0),
+      successor_attempt_id TEXT,
+      checkpoint_id TEXT,
+      message TEXT NOT NULL CHECK (length(trim(message)) > 0),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      version INTEGER NOT NULL CHECK (version > 0),
+      UNIQUE (task_id, attempt_id, failure_event_id, evidence_digest, state)
+    );
+    CREATE INDEX IF NOT EXISTS runtime_retry_decisions_task_attempt ON runtime_retry_decisions (task_id, attempt_id);
+    CREATE INDEX IF NOT EXISTS runtime_retry_decisions_event ON runtime_retry_decisions (failure_event_id, evidence_digest);
+  `,
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -2136,6 +2159,78 @@ export class ShipmentCycleRepository {
   #get(where: string, ...parameters: readonly (string | number)[]): StorageResult<ShipmentCycleRecord> { return this.#store.execute(() => { try { const row = this.#store.database.prepare("SELECT * FROM runtime_shipment_cycles WHERE " + where).get(...parameters) as Record<string, unknown> | undefined; return row === undefined ? notFound("Shipment cycle was not found.") : shipmentCycleFromRow(row); } catch (error: unknown) { return classifyStorageError(error); } }); }
 }
 
+function retryDecisionFromRow(row: Record<string, unknown>): StorageResult<RetryDecisionRecord> {
+  try {
+    const required = ["decision_id", "task_id", "attempt_id", "failure_event_id", "evidence_digest", "state", "blocker_code", "message", "created_at", "updated_at"];
+    if (required.some((key) => typeof row[key] !== "string" || (row[key] as string).trim().length === 0) || row.schema_version !== 1 || !["blocked", "created"].includes(row.state as string) || typeof row.version !== "number" || !Number.isSafeInteger(row.version) || row.version <= 0 || !/^\p{Hex_Digit}{64}$/u.test(row.evidence_digest as string) || !utcTimestamp(row.created_at as string).ok || !utcTimestamp(row.updated_at as string).ok) return invalidRecord();
+    const optional = (value: unknown): string | undefined => value === null ? undefined : typeof value === "string" && value.trim().length > 0 ? value : undefined;
+    const successorAttemptId = optional(row.successor_attempt_id);
+    const checkpointId = optional(row.checkpoint_id);
+    if (row.successor_attempt_id !== null && successorAttemptId === undefined || row.checkpoint_id !== null && checkpointId === undefined) return invalidRecord();
+    if (row.state === "created" && (successorAttemptId === undefined || checkpointId === undefined)) return invalidRecord();
+    return success({
+      schemaVersion: 1,
+      decisionId: row.decision_id as string,
+      taskId: row.task_id as TaskId,
+      attemptId: row.attempt_id as AttemptId,
+      failureEventId: row.failure_event_id as string,
+      evidenceDigest: row.evidence_digest as string,
+      state: row.state as RetryDecisionRecord["state"],
+      blockerCode: row.blocker_code as string,
+      ...(successorAttemptId === undefined ? {} : { successorAttemptId: successorAttemptId as AttemptId }),
+      ...(checkpointId === undefined ? {} : { checkpointId: checkpointId as Checkpoint["id"] }),
+      message: row.message as string,
+      createdAt: row.created_at as UtcTimestamp,
+      updatedAt: row.updated_at as UtcTimestamp,
+      version: row.version as number
+    });
+  } catch { return invalidRecord(); }
+}
+
+export class RetryDecisionRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public get(decisionId: string): StorageResult<RetryDecisionRecord> {
+    if (decisionId.trim().length === 0) return invalidRecord();
+    return this.#get("decision_id = ?", decisionId);
+  }
+
+  public getByIdentity(taskId: string, attemptId: string, failureEventId: string, evidenceDigest: string, state: RetryDecisionRecord["state"]): StorageResult<RetryDecisionRecord> {
+    return this.#get("task_id = ? AND attempt_id = ? AND failure_event_id = ? AND evidence_digest = ? AND state = ?", taskId, attemptId, failureEventId, evidenceDigest, state);
+  }
+
+  public save(record: RetryDecisionInput): StorageResult<RetryDecisionRecord> {
+    if (record.schemaVersion !== 1 || record.decisionId.trim().length === 0 || record.taskId.trim().length === 0 || record.attemptId.trim().length === 0 || record.failureEventId.trim().length === 0 || !/^\p{Hex_Digit}{64}$/u.test(record.evidenceDigest) || !["blocked", "created"].includes(record.state) || record.blockerCode.trim().length === 0 || record.message.trim().length === 0 || !Number.isSafeInteger(record.version) || record.version <= 0 || !utcTimestamp(record.createdAt).ok || !utcTimestamp(record.updatedAt).ok || (record.state === "created" && (record.successorAttemptId === undefined || record.checkpointId === undefined))) return invalidRecord();
+    return this.#store.execute(() => {
+      const task = this.#store.tasks.get(record.taskId);
+      const attempt = this.#store.attempts.get(record.attemptId);
+      if (task.outcome !== "success") return task;
+      if (attempt.outcome !== "success") return attempt;
+      if (attempt.value.taskId !== record.taskId) return conflict("Retry decision Attempt does not belong to the Task.");
+      const existing = this.get(record.decisionId);
+      if (existing.outcome === "success") return JSON.stringify(existing.value) === JSON.stringify(record) ? existing : conflict("Retry decision conflicts with the stored identity.");
+      if (existing.outcome !== "not_found") return existing;
+      const byIdentity = this.getByIdentity(record.taskId, record.attemptId, record.failureEventId, record.evidenceDigest, record.state);
+      if (byIdentity.outcome === "success") return JSON.stringify(byIdentity.value) === JSON.stringify(record) ? byIdentity : conflict("Retry decision already exists with a different identity.");
+      if (byIdentity.outcome !== "not_found") return byIdentity;
+      try {
+        this.#store.database.prepare("INSERT INTO runtime_retry_decisions (decision_id, task_id, attempt_id, schema_version, failure_event_id, evidence_digest, state, blocker_code, successor_attempt_id, checkpoint_id, message, created_at, updated_at, version) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(record.decisionId, record.taskId, record.attemptId, record.failureEventId, record.evidenceDigest, record.state, record.blockerCode, record.successorAttemptId ?? null, record.checkpointId ?? null, record.message, record.createdAt, record.updatedAt, record.version);
+        return this.get(record.decisionId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  #get(where: string, ...parameters: readonly (string | number)[]): StorageResult<RetryDecisionRecord> {
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare("SELECT * FROM runtime_retry_decisions WHERE " + where + " LIMIT 1").get(...parameters) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound("Retry decision was not found.") : retryDecisionFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+}
+
 export class RuntimeSqliteStore {
   readonly #database: DatabaseSync;
   readonly #filename: string;
@@ -2155,6 +2250,7 @@ export class RuntimeSqliteStore {
   readonly ciEvidence: CiFailureEvidenceRepository;
   readonly featureMerges: FeatureMergeRepository;
   readonly shipmentCycles: ShipmentCycleRepository;
+  readonly retryDecisions: RetryDecisionRepository;
 
   private constructor(database: DatabaseSync, filename: string) {
     this.#database = database;
@@ -2173,6 +2269,7 @@ export class RuntimeSqliteStore {
     this.ciEvidence = new CiFailureEvidenceRepository(this);
     this.featureMerges = new FeatureMergeRepository(this);
     this.shipmentCycles = new ShipmentCycleRepository(this);
+    this.retryDecisions = new RetryDecisionRepository(this);
   }
 
   public static open(options: RuntimeSqliteStoreOptions = {}): RuntimeSqliteStore {
@@ -2222,14 +2319,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;

@@ -3,7 +3,7 @@ import type { AttemptId, TaskId, UtcTimestamp } from "./task-domain.js";
 import { GitHubFeaturePullRequestService, type FeaturePullRequestResult } from "../github/feature-pull-request.js";
 import { CiCorrelationService, type CiCorrelationResult } from "./ci-correlation.js";
 import { CiFailureEvidenceService, type CiFailureEvidenceResult } from "./ci-evidence.js";
-import { CiRetryCoordinator, type CiRetryResult } from "./ci-retry.js";
+import { CiRetryCoordinator, RETRY_BLOCKER_EVALUATION_BEFORE_TASK_UPDATE_MESSAGE, type CiRetryResult } from "./ci-retry.js";
 import { FeatureMergeCoordinator, type FeatureMergePolicy, type FeatureMergeResult } from "./feature-merge.js";
 import type { RuntimeSqliteStore, StorageResult } from "./sqlite.js";
 import type { ProviderIndependentCiGateway } from "./ci-contract.js";
@@ -94,7 +94,10 @@ export class ShipmentCycleCoordinator {
     const existing = this.#store.shipmentCycles.getByEvent(request.eventId);
     let cycle: ShipmentCycleRecord;
     if (existing.outcome === "success") {
-      if (existing.value.outcome !== undefined) return this.#fromRecord(existing.value);
+      if (existing.value.outcome !== undefined) {
+        if (existing.value.state === "blocked" && existing.value.outcome === "stale_or_conflicting_evidence" && existing.value.message === RETRY_BLOCKER_EVALUATION_BEFORE_TASK_UPDATE_MESSAGE) return this.#resumeBlockedRetry(request, existing.value);
+        return this.#fromRecord(existing.value);
+      }
       if (!this.#sameIdentity(existing.value, request)) return result(request, "reconciliation_required", "Stored shipment cycle identity conflicts with the resumed request.");
       cycle = existing.value;
     } else if (existing.outcome === "not_found") {
@@ -145,6 +148,24 @@ export class ShipmentCycleCoordinator {
 
   #sameIdentity(record: ShipmentCycleRecord, request: ShipmentCycleRequest): boolean {
     return record.taskId === request.taskId && record.attemptId === request.attemptId && record.eventId === request.eventId && record.correlationId === request.correlationId && record.repository === `${request.repository.owner}/${request.repository.repository}` && record.headBranch === request.headBranch && record.baseBranch === request.baseBranch && record.expectedHeadSha === request.expectedHeadSha && record.provider === request.provider && record.workflowName === request.workflowName;
+  }
+
+  async #resumeBlockedRetry(request: ShipmentCycleRequest, cycle: ShipmentCycleRecord): Promise<ShipmentCycleResult> {
+    if (cycle.pullRequestNumber === undefined || cycle.pullRequestUrl === undefined || cycle.evidenceDigest === undefined) return result(request, "reconciliation_required", "Historical blocked retry is missing durable PR or evidence identity.");
+    const provenance = this.#store.pullRequests.getByTaskAttempt(request.taskId, request.attemptId);
+    if (provenance.outcome !== "success" || provenance.value.pullRequest.number !== cycle.pullRequestNumber || provenance.value.pullRequest.url !== cycle.pullRequestUrl) return result(request, "reconciliation_required", "Historical blocked retry cannot resume without matching durable PR provenance.");
+    const pr = await this.#pullRequests.createOrReuse({ taskId: request.taskId, attemptId: request.attemptId, repository: request.repository, baseBranch: request.baseBranch, expectedHeadSha: request.expectedHeadSha, correlationId: request.correlationId, ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }), ...(request.signal === undefined ? {} : { signal: request.signal }) });
+    if (!['replayed', 'reused', 'reconciled'].includes(pr.outcome) || pr.pullRequest === undefined) return result(request, "stale_or_conflicting_evidence", pr.message, pr.pullRequest === undefined ? {} : { pullRequest: pr.pullRequest });
+    if (pr.pullRequest.number !== cycle.pullRequestNumber || pr.pullRequest.url !== cycle.pullRequestUrl) return result(request, "stale_or_conflicting_evidence", "Historical blocked retry PR identity no longer matches the durable cycle.", { pullRequest: pr.pullRequest });
+    const ci = await this.#ci.observe({ taskId: request.taskId, attemptId: request.attemptId, repository: `${request.repository.owner}/${request.repository.repository}`, headBranch: request.headBranch, baseBranch: request.baseBranch, featurePullRequestNumber: pr.pullRequest.number, expectedHeadSha: request.expectedHeadSha, provider: request.provider, requiredWorkflowName: request.workflowName, correlationId: request.correlationId, now: request.now, ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }), ...(request.signal === undefined ? {} : { signal: request.signal }) });
+    if (ci.outcome !== "observed" && ci.outcome !== "replayed") return result(request, "reconciliation_required", ci.message);
+    if (ci.state !== "failed") return result(request, "stale_or_conflicting_evidence", "Historical blocked retry no longer has the exact terminal failed CI correlation.");
+    const evidence = await this.#evidence.collect({ taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, now: request.now, ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }), ...(request.signal === undefined ? {} : { signal: request.signal }) });
+    if (evidence.outcome !== "collected" && evidence.outcome !== "partial" && evidence.outcome !== "replayed") return result(request, evidence.outcome === "rate_limited" ? "rate_limited" : "stale_or_conflicting_evidence", evidence.message);
+    if (evidence.record.evidenceDigest !== cycle.evidenceDigest) return result(request, "stale_or_conflicting_evidence", "Historical blocked retry evidence no longer matches the durable evidence digest.");
+    const retry = this.#retry.create({ taskId: request.taskId, attemptId: request.attemptId, failureEventId: request.failureEventId ?? request.eventId, evidenceDigest: evidence.record.evidenceDigest, now: request.now });
+    if (retry.outcome !== "created" && retry.outcome !== "already_retried") return result(request, retry.outcome === "blocked" ? "stale_or_conflicting_evidence" : retry.outcome === "reconciliation_required" ? "reconciliation_required" : "stale_or_conflicting_evidence", retry.message, { evidenceDigest: evidence.record.evidenceDigest });
+    return result(request, "retry_created", retry.message, { evidenceDigest: evidence.record.evidenceDigest, ...(retry.successorAttemptId === undefined ? {} : { successorAttemptId: retry.successorAttemptId }) });
   }
 
   #finish(request: ShipmentCycleRequest, output: ShipmentCycleResult, state: ShipmentCycleState): ShipmentCycleResult { this.#store.shipmentCycles.advance(request.taskId, request.attemptId, { state, outcome: output.outcome, ...(output.successorAttemptId === undefined ? {} : { successorAttemptId: output.successorAttemptId }), ...(output.evidenceDigest === undefined ? {} : { evidenceDigest: output.evidenceDigest }), ...(output.mergeSha === undefined ? {} : { mergeSha: output.mergeSha }), ...(output.providerRunId === undefined ? {} : { providerRunId: output.providerRunId }), ...(output.pullRequest === undefined ? {} : { pullRequestNumber: output.pullRequest.number, pullRequestUrl: output.pullRequest.url }), message: output.message }, request.now); return output; }

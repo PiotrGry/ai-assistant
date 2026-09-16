@@ -168,3 +168,100 @@ test("maps cancellation, rate limit, stale CI and unknown mutation to explicit d
     const value = await fixture(); try { value.ci.resolvePullRequest = async () => result; const output = await new ShipmentCycleCoordinator(value.store, value.github, value.ci).run(request()); assert.notEqual(output.outcome, "recovery_success"); assert.equal(value.github.mergeCalls, 0); assert.equal(value.store.shipmentCycles.getByEvent("shipment-event-1").outcome, "success"); } finally { await dispose(value); }
   }
 });
+
+test("revalidates an immutable blocked retry after its transient blocker clears", async () => {
+  const value = await fixture();
+  try {
+    const task = value.store.tasks.get(taskId);
+    assert.equal(task.outcome, "success");
+    if (task.outcome !== "success") return;
+    const moved = value.store.tasks.update({ ...task.value, updatedAt: t2 }, { state: task.value.state, updatedAt: task.value.updatedAt });
+    assert.equal(moved.outcome, "success");
+
+    const coordinator = new ShipmentCycleCoordinator(value.store, value.github, value.ci);
+    const blocked = await coordinator.run(request());
+    assert.equal(blocked.outcome, "stale_or_conflicting_evidence");
+    assert.match(blocked.message, /cannot precede Task updatedAt/u);
+    const blockedHistory = value.store.attempts.listByTask(taskId);
+    assert.equal(blockedHistory.outcome, "success");
+    if (blockedHistory.outcome === "success") assert.equal(blockedHistory.value.length, 1);
+    const evidence = value.store.ciEvidence.getByTaskAttempt(taskId, attempt1);
+    assert.equal(evidence.outcome, "success");
+    if (evidence.outcome !== "success") return;
+    const blockedDecision = value.store.retryDecisions.getByIdentity(taskId, attempt1, "shipment-event-1", evidence.value.evidenceDigest, "blocked");
+    assert.equal(blockedDecision.outcome, "success");
+    const historicalCycle = value.store.shipmentCycles.getByEvent("shipment-event-1");
+    assert.equal(historicalCycle.outcome, "success");
+    if (historicalCycle.outcome !== "success") return;
+    assert.equal(historicalCycle.value.state, "blocked");
+    assert.equal(historicalCycle.value.outcome, "stale_or_conflicting_evidence");
+
+    const resumed = await coordinator.run({ ...request(), now: t2 });
+    assert.equal(resumed.outcome, "retry_created", JSON.stringify(resumed));
+    assert.ok(resumed.successorAttemptId);
+    const createdDecision = value.store.retryDecisions.getByIdentity(taskId, attempt1, "shipment-event-1", evidence.value.evidenceDigest, "created");
+    assert.equal(createdDecision.outcome, "success");
+    const history = value.store.attempts.listByTask(taskId);
+    assert.equal(history.outcome, "success");
+    if (history.outcome === "success") assert.equal(history.value.length, 2);
+
+    const replay = await coordinator.run({ ...request(), now: t2 });
+    assert.equal(replay.outcome, "retry_created");
+    assert.equal(replay.successorAttemptId, resumed.successorAttemptId);
+    const replayHistory = value.store.attempts.listByTask(taskId);
+    assert.equal(replayHistory.outcome, "success");
+    if (replayHistory.outcome === "success") assert.equal(replayHistory.value.length, 2);
+    assert.equal(value.github.createCalls, 1);
+    assert.equal(value.github.mergeCalls, 0);
+    assert.equal(value.ci.resolveCalls, 1);
+    assert.equal(value.ci.evidenceCalls, 1);
+  } finally { await dispose(value); }
+});
+
+test("keeps blocked retry fail-closed when the exact PR identity changes", async () => {
+  const value = await fixture();
+  try {
+    const task = value.store.tasks.get(taskId);
+    assert.equal(task.outcome, "success");
+    if (task.outcome !== "success") return;
+    assert.equal(value.store.tasks.update({ ...task.value, updatedAt: t2 }, { state: task.value.state, updatedAt: task.value.updatedAt }).outcome, "success");
+    const coordinator = new ShipmentCycleCoordinator(value.store, value.github, value.ci);
+    const blocked = await coordinator.run(request());
+    assert.equal(blocked.outcome, "stale_or_conflicting_evidence");
+    value.github.pull = { ...value.github.pull!, headSha: sha2 };
+    const mismatch = await coordinator.run({ ...request(), now: t2 });
+    assert.equal(mismatch.outcome, "stale_or_conflicting_evidence");
+    assert.match(mismatch.message, /exact|revision|head|provenance/u);
+    const history = value.store.attempts.listByTask(taskId);
+    assert.equal(history.outcome, "success");
+    if (history.outcome === "success") assert.equal(history.value.length, 1);
+    assert.equal(value.github.mergeCalls, 0);
+  } finally { await dispose(value); }
+});
+
+test("restarts between a blocked decision and retry recovery without duplicating effects", async () => {
+  const value = await fixture();
+  try {
+    const task = value.store.tasks.get(taskId);
+    assert.equal(task.outcome, "success");
+    if (task.outcome !== "success") return;
+    assert.equal(value.store.tasks.update({ ...task.value, updatedAt: t2 }, { state: task.value.state, updatedAt: task.value.updatedAt }).outcome, "success");
+    const first = await new ShipmentCycleCoordinator(value.store, value.github, value.ci).run(request());
+    assert.equal(first.outcome, "stale_or_conflicting_evidence");
+    const filename = value.store.filename;
+    value.store.close();
+    const reopened = RuntimeSqliteStore.open({ filename });
+    const resumed = await new ShipmentCycleCoordinator(reopened, value.github, value.ci).run({ ...request(), now: t2 });
+    assert.equal(resumed.outcome, "retry_created");
+    const replay = await new ShipmentCycleCoordinator(reopened, value.github, value.ci).run({ ...request(), now: t2 });
+    assert.equal(replay.outcome, "retry_created");
+    assert.equal(replay.successorAttemptId, resumed.successorAttemptId);
+    const history = reopened.attempts.listByTask(taskId);
+    assert.equal(history.outcome, "success");
+    if (history.outcome === "success") assert.equal(history.value.length, 2);
+    assert.equal(value.github.createCalls, 1);
+    assert.equal(value.ci.resolveCalls, 1);
+    assert.equal(value.ci.evidenceCalls, 1);
+    reopened.close();
+  } finally { await rm(value.directory, { recursive: true, force: true }); }
+});

@@ -12,6 +12,28 @@ export const CI_RETRY_LIMITS = Object.freeze({
   evidenceReference: 128,
   finding: 512,
 } as const);
+export const RETRY_BLOCKER_EVALUATION_BEFORE_TASK_UPDATE = "evaluation_before_task_update" as const;
+export const RETRY_BLOCKER_EVALUATION_BEFORE_TASK_UPDATE_MESSAGE = "Retry evaluation time cannot precede Task updatedAt." as const;
+
+export type RetryDecisionState = "blocked" | "created";
+export interface RetryDecisionRecord {
+  readonly schemaVersion: typeof CI_RETRY_SCHEMA_VERSION;
+  readonly decisionId: string;
+  readonly taskId: TaskId;
+  readonly attemptId: AttemptId;
+  readonly failureEventId: string;
+  readonly evidenceDigest: string;
+  readonly state: RetryDecisionState;
+  readonly blockerCode: string;
+  readonly successorAttemptId?: AttemptId;
+  readonly checkpointId?: Checkpoint["id"];
+  readonly message: string;
+  readonly createdAt: UtcTimestamp;
+  readonly updatedAt: UtcTimestamp;
+  readonly version: number;
+}
+
+export interface RetryDecisionInput extends RetryDecisionRecord {}
 
 export type CiRetryOutcome =
   | "created"
@@ -62,9 +84,9 @@ function validInput(request: CiRetryRequest): string | undefined {
   return undefined;
 }
 
-function stableIds(eventId: string): { readonly attemptId: AttemptId; readonly checkpointId: Checkpoint["id"] } {
+function stableIds(eventId: string): { readonly attemptId: AttemptId; readonly checkpointId: Checkpoint["id"]; readonly blockedDecisionId: string; readonly createdDecisionId: string } {
   const digest = createHash("sha256").update(eventId, "utf8").digest("hex").slice(0, 48);
-  return { attemptId: `ci-retry-${digest}` as AttemptId, checkpointId: `ci-retry-${digest}-checkpoint` as Checkpoint["id"] };
+  return { attemptId: `ci-retry-${digest}` as AttemptId, checkpointId: `ci-retry-${digest}-checkpoint` as Checkpoint["id"], blockedDecisionId: `retry-decision-${digest}-blocked`, createdDecisionId: `retry-decision-${digest}-created` };
 }
 
 function sameEvidenceCorrelation(evidence: CiFailureEvidenceRecord, correlation: CiCorrelationRecord): boolean {
@@ -158,7 +180,12 @@ export class CiRetryCoordinator {
     const history = this.#store.attempts.listByTask(request.taskId);
     if (history.outcome !== "success") return storageOutcome(request, history);
     if (history.value.some((entry) => entry.state === "running")) return result(request, "blocked", "The Task already has a running Attempt.");
-    const persisted = this.#store.transaction<{ readonly successorAttemptId: AttemptId; readonly checkpointId: Checkpoint["id"] }>(({ tasks, attempts, checkpoints }) => {
+    if (Date.parse(request.now) < Date.parse(task.value.updatedAt)) {
+      const saved = this.#store.retryDecisions.save({ schemaVersion: CI_RETRY_SCHEMA_VERSION, decisionId: ids.blockedDecisionId, taskId: request.taskId, attemptId: request.attemptId, failureEventId: request.failureEventId, evidenceDigest: request.evidenceDigest, state: "blocked", blockerCode: RETRY_BLOCKER_EVALUATION_BEFORE_TASK_UPDATE, message: RETRY_BLOCKER_EVALUATION_BEFORE_TASK_UPDATE_MESSAGE, createdAt: request.now, updatedAt: request.now, version: 1 });
+      if (saved.outcome !== "success") return result(request, "storage_failure", saved.message);
+      return result(request, "blocked", RETRY_BLOCKER_EVALUATION_BEFORE_TASK_UPDATE_MESSAGE);
+    }
+    const persisted = this.#store.transaction<{ readonly successorAttemptId: AttemptId; readonly checkpointId: Checkpoint["id"] }>(({ tasks, attempts, checkpoints, retryDecisions }) => {
       const currentTask = tasks.get(request.taskId);
       const currentHistory = attempts.listByTask(request.taskId);
       if (currentTask.outcome !== "success" || currentHistory.outcome !== "success") return { outcome: "storage_error", message: "Task or Attempt history could not be read inside the retry transaction." };
@@ -186,6 +213,8 @@ export class CiRetryCoordinator {
       if (savedTask.outcome !== "success") return savedTask;
       const savedAttempt = attempts.create(retried.value.attempt);
       if (savedAttempt.outcome !== "success") return savedAttempt;
+      const savedDecision = retryDecisions.save({ schemaVersion: CI_RETRY_SCHEMA_VERSION, decisionId: ids.createdDecisionId, taskId: request.taskId, attemptId: request.attemptId, failureEventId: request.failureEventId, evidenceDigest: request.evidenceDigest, state: "created", blockerCode: RETRY_BLOCKER_EVALUATION_BEFORE_TASK_UPDATE, successorAttemptId: savedAttempt.value.id, checkpointId: savedCheckpoint.value.id, message: "Created one successor Attempt from the exact failed-CI evidence.", createdAt: request.now, updatedAt: request.now, version: 1 });
+      if (savedDecision.outcome !== "success") return savedDecision;
       return { outcome: "success", value: { successorAttemptId: savedAttempt.value.id, checkpointId: savedCheckpoint.value.id } };
     });
     if (persisted.outcome !== "success") return result(request, persisted.outcome === "conflict" ? "conflict" : "storage_failure", persisted.message);

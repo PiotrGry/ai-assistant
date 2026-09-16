@@ -85,9 +85,12 @@ export {
 export {
   CI_RETRY_LIMITS,
   CI_RETRY_SCHEMA_VERSION,
+  RETRY_BLOCKER_EVALUATION_BEFORE_TASK_UPDATE,
+  RETRY_BLOCKER_EVALUATION_BEFORE_TASK_UPDATE_MESSAGE,
   CiRetryCoordinator,
   type CiRetryOutcome,
   type CiRetryRequest,
+  type RetryDecisionRecord,
   type CiRetryResult,
 } from "./runtime/ci-retry.js";
 export {
