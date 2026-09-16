@@ -82,7 +82,7 @@ async function fixture(): Promise<{ directory: string; store: RuntimeSqliteStore
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
   const task = createTask({ id: taskId, githubReference: issue, goal: "Retry the assigned task", scope: "controlled CI failure", acceptanceCriteria: ["one retry"], priority: 1, risk: "low", requiredCapabilities: ["repository.write"], createdAt: t0 });
   if (!task.ok || store.tasks.create(task.value).outcome !== "success") throw new Error("task fixture failed");
-  const started = startInitialAttempt(task.value, [], { id: attemptId, worker: "application-worker", provider: "github-actions", branch, worktree: "/tmp/pirx-retry", currentCommit: sha }, t0);
+  const started = startInitialAttempt(task.value, [], { id: attemptId, worker: "application-worker", provider: "application-worker", branch, worktree: "/tmp/pirx-retry", currentCommit: sha }, t0);
   if (!started.ok || store.tasks.update(started.value.task, { state: task.value.state, updatedAt: task.value.updatedAt }).outcome !== "success" || store.attempts.create(started.value.attempt).outcome !== "success") throw new Error("attempt fixture failed");
   const current = store.attempts.get(attemptId);
   if (current.outcome !== "success") throw new Error("attempt read failed");

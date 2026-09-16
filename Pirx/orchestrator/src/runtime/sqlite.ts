@@ -1940,7 +1940,8 @@ export class CiCorrelationRepository {
       if (provenance.outcome !== "success") return provenance.outcome === "not_found" ? conflict("CI correlation requires feature pull request provenance.") : provenance;
       const attempt = this.#store.attempts.get(input.attemptId);
       if (attempt.outcome !== "success") return attempt.outcome === "not_found" ? conflict("CI correlation requires a durable Attempt.") : attempt;
-      if (attempt.value.provider !== input.provider) return conflict("CI correlation provider does not match the Attempt provider.");
+      // Attempt.provider identifies the worker that produced the revision. The correlation
+      // provider identifies the CI system that observes it; they are intentionally independent.
       if (provenance.value.repository !== input.repository || provenance.value.issueNumber !== input.issueNumber || provenance.value.issueNodeId !== input.issueNodeId || provenance.value.issueUrl !== input.issueUrl || provenance.value.workerId !== input.workerId || provenance.value.headBranch !== input.headBranch || provenance.value.baseBranch !== input.baseBranch || provenance.value.observedHeadSha !== input.pushedCommit || JSON.stringify(provenance.value.pullRequest) !== JSON.stringify(input.featurePullRequest)) return conflict("CI correlation does not match feature pull request provenance.");
       const existing = this.getByTaskAttempt(input.taskId, input.attemptId);
       if (existing.outcome === "success") {

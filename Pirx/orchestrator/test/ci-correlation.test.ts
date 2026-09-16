@@ -47,12 +47,12 @@ class FakeCiGateway implements ProviderIndependentCiGateway {
   async getFailureEvidence() { return { outcome: "permanent" as const, message: "unused" }; }
 }
 
-async function fixture(): Promise<{ directory: string; store: RuntimeSqliteStore; task: TaskSnapshot }> {
+async function fixture(workerProvider = "claude-code"): Promise<{ directory: string; store: RuntimeSqliteStore; task: TaskSnapshot }> {
   const directory = await mkdtemp(join(tmpdir(), "pirx-ci-correlation-"));
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
   const created = createTask({ id: taskId, githubReference: issue, goal: "Correlate CI", scope: "CI correlation", acceptanceCriteria: ["exact run"], priority: 1, risk: "low", requiredCapabilities: ["repository.read"], createdAt: t0 });
   if (!created.ok || store.tasks.create(created.value).outcome !== "success") throw new Error("task fixture failed");
-  const started = startInitialAttempt(created.value, [], { id: attemptId, worker: "worker", provider: "github-actions", branch }, t0);
+  const started = startInitialAttempt(created.value, [], { id: attemptId, worker: "worker", provider: workerProvider, branch }, t0);
   if (!started.ok || store.attempts.create(started.value.attempt).outcome !== "success" || store.tasks.update(started.value.task, { state: created.value.state, updatedAt: created.value.updatedAt }).outcome !== "success") throw new Error("attempt fixture failed");
   const current = store.attempts.get(attemptId);
   if (current.outcome !== "success") throw new Error("attempt read failed");
@@ -88,6 +88,20 @@ test("creates pending correlation before observation, updates exact run, support
   } finally { value.store.close(); await rm(value.directory, { recursive: true, force: true }); }
 });
 
+test("allows independent worker providers to use the same CI provider", async () => {
+  for (const workerProvider of ["claude-code", "application-worker"]) {
+    const value = await fixture(workerProvider);
+    try {
+      const gateway = new FakeCiGateway(); gateway.results = [{ outcome: "success", run: run(), message: "green", polls: 1 }];
+      const observed = await new CiCorrelationService(value.store, gateway).observe(request());
+      assert.equal(observed.outcome, "observed"); assert.equal(observed.record.provider, "github-actions");
+      const attempt = value.store.attempts.get(attemptId);
+      assert.equal(attempt.outcome, "success");
+      if (attempt.outcome === "success") assert.equal(attempt.value.provider, workerProvider);
+    } finally { value.store.close(); await rm(value.directory, { recursive: true, force: true }); }
+  }
+});
+
 test("persists correlation and terminal observation across restart without re-reading terminal CI", async () => {
   const value = await fixture();
   const gateway = new FakeCiGateway();
@@ -102,6 +116,12 @@ test("persists correlation and terminal observation across restart without re-re
       const replay = await new CiCorrelationService(reopened, secondGateway).observe(request());
       assert.equal(replay.outcome, "replayed"); assert.equal(replay.record.state, "success"); assert.equal(secondGateway.calls, 0);
       assert.equal(reopened.ciCorrelations.getByTaskAttempt(taskId, attemptId).outcome, "success");
+      const changedProvider = await new CiCorrelationService(reopened, secondGateway).observe({ ...request(), provider: "other-ci" });
+      assert.equal(changedProvider.outcome, "conflict"); assert.equal(secondGateway.calls, 0);
+      const retainedAttempt = reopened.attempts.get(attemptId); assert.equal(retainedAttempt.outcome, "success");
+      if (retainedAttempt.outcome === "success") assert.equal(retainedAttempt.value.provider, "claude-code");
+      const retainedCorrelation = reopened.ciCorrelations.getByTaskAttempt(taskId, attemptId); assert.equal(retainedCorrelation.outcome, "success");
+      if (retainedCorrelation.outcome === "success") assert.equal(retainedCorrelation.value.provider, "github-actions");
     } finally { reopened.close(); }
   } finally { try { value.store.close(); } catch { /* closed for restart branch */ } await rm(value.directory, { recursive: true, force: true }); }
 });
@@ -113,6 +133,8 @@ test("rejects provenance mismatches and never calls CI", async () => {
     assert.equal((await service.observe(request({ expectedHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }))).outcome, "conflict");
     assert.equal((await service.observe(request({ featurePullRequestNumber: 999 }))).outcome, "conflict");
     assert.equal((await service.observe(request({ baseBranch: "main" }))).outcome, "conflict");
+    assert.equal((await service.observe({ ...request(), taskId: "wrong-task" as TaskId })).outcome, "conflict");
+    assert.equal((await service.observe({ ...request(), attemptId: "wrong-attempt" as AttemptId })).outcome, "conflict");
     assert.equal(gateway.calls, 0);
     assert.equal(value.store.ciCorrelations.getByTaskAttempt(taskId, attemptId).outcome, "not_found");
   } finally { value.store.close(); await rm(value.directory, { recursive: true, force: true }); }

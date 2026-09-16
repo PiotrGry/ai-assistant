@@ -18,6 +18,7 @@ export interface CiCorrelationInput {
   readonly headBranch: string;
   readonly baseBranch: string;
   readonly pushedCommit: string;
+  /** Provider of the CI system observing the pushed revision, not the worker provider on Attempt. */
   readonly provider: string;
   readonly requiredWorkflowName: string;
   readonly createdAt: UtcTimestamp;
@@ -87,6 +88,8 @@ function correlationInput(provenance: PullRequestProvenanceRecord, request: CiCo
 }
 
 function stateFromCi(result: CiRunResult, expected: CiCorrelationRecord): CiCorrelationObservation {
+  // CiCorrelation.provider is the CI provider. Attempt.provider identifies the code worker
+  // and is intentionally a separate identity domain.
   if (result.run !== undefined && (result.run.provider !== expected.provider || result.run.testedRevision !== expected.pushedCommit || result.run.headBranch !== expected.headBranch || result.run.name !== expected.requiredWorkflowName || !result.run.pullRequestNumbers.includes(expected.featurePullRequest.number))) return { state: "stale", observedAt: expected.updatedAt };
   return { state: result.outcome, ...(result.run === undefined ? {} : { run: result.run }), observedAt: expected.updatedAt };
 }

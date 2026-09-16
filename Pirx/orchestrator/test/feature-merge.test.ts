@@ -80,7 +80,7 @@ async function fixture(): Promise<{ directory: string; store: RuntimeSqliteStore
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
   const created = createTask({ id: taskId, githubReference: issue, goal: "Merge feature", scope: "exact CI merge", acceptanceCriteria: ["exact green"], priority: 1, risk: "low", requiredCapabilities: ["repository.write"], createdAt: t0 });
   if (!created.ok || store.tasks.create(created.value).outcome !== "success") throw new Error("task fixture failed");
-  const started = startInitialAttempt(created.value, [], { id: attemptId, worker: "worker", provider: "github-actions", branch }, t0);
+  const started = startInitialAttempt(created.value, [], { id: attemptId, worker: "worker", provider: "application-worker", branch }, t0);
   if (!started.ok || store.tasks.update(started.value.task, { state: created.value.state, updatedAt: created.value.updatedAt }).outcome !== "success" || store.attempts.create(started.value.attempt).outcome !== "success") throw new Error("attempt fixture failed");
   const current = store.attempts.get(attemptId);
   if (current.outcome !== "success") throw new Error("attempt read failed");
