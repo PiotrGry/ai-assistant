@@ -23,6 +23,7 @@ import {
 } from "./worker-profile.js";
 import { GitWorkerStateVerifier, type WorkerGitStateVerifier } from "./git-state.js";
 import { createWorkerFailureDiagnostic, WorkerFailureError } from "../runtime/worker-diagnostic.js";
+import { createHash } from "node:crypto";
 
 export interface ClaudeStructuredRunner {
   runStructured(request: { readonly requestId: string; readonly cwd: string; readonly prompt: string; readonly responseSchema: unknown; readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly maxStdoutBytes?: number; readonly maxStderrBytes?: number; readonly workerProfile?: import("./worker-profile.js").ClaudeCodeWorkerProfile }): Promise<ClaudeStructuredResult>;
@@ -63,9 +64,25 @@ const PROMPT_SECRET_PATTERNS: readonly RegExp[] = [
   /\b(?:password|passwd|pwd|secret|token|api[_-]?key|connection(?:[_ -]?string)?)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s;,]+)/iu,
   /\b(?:ghp_|github_pat_|xox[baprs]-|sk-[A-Za-z0-9_-])[A-Za-z0-9._-]+/u,
 ];
+const WORKER_RESULT_CONTRACT_INSTRUCTION = "FINAL RESPONSE: return exactly one JSON object matching the supplied WorkerResult schema. For CODE_PUSHED include branch and finalCommit, and omit reason and diagnostic. For every non-success outcome include reason, and omit branch and finalCommit. Do not wrap the JSON in Markdown or add commentary.";
 
 function containsPromptSecret(value: string): boolean {
   return PROMPT_SECRET_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+function contractDiagnostic(value: unknown, field: string | undefined, code: "worker_contract_mismatch" | "binding_mismatch"): ReturnType<typeof createWorkerFailureDiagnostic> {
+  let serialized = "";
+  let fieldNames: readonly string[] | undefined;
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) fieldNames = Object.keys(value as Record<string, unknown>).sort();
+  try { serialized = JSON.stringify(value) ?? ""; } catch { serialized = ""; }
+  return createWorkerFailureDiagnostic(code, {
+    stage: "worker_contract",
+    ...(field === undefined ? {} : { field }),
+    receivedType: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
+    ...(fieldNames === undefined ? {} : { fieldNames }),
+    payloadLength: Buffer.byteLength(serialized, "utf8"),
+    payloadDigest: createHash("sha256").update(serialized, "utf8").digest("hex"),
+  });
 }
 
 function failure(outcome: "invalid_request" | "invalid_input", requestId: string, text: string, code: "binding_mismatch" | "permission_denied" | "adapter_failure" = "binding_mismatch"): ClaudeCodeProcessResult {
@@ -107,8 +124,9 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     if (input.value.taskId !== value.taskId || input.value.attemptId !== value.attemptId || input.value.correlationId !== value.correlationId || input.value.workspace.worktree !== value.workspace.worktree || input.value.workspace.branch !== value.workspace.branch) return failure("invalid_input", value.correlationId, "Claude input is not bound to the assigned worker request.");
     let prompt: string;
     try { prompt = this.#promptRenderer.render(input.value); } catch { return failure("invalid_input", value.correlationId, "Claude prompt rendering failed before process invocation."); }
-    if (prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > 64 * 1024 || containsPromptSecret(prompt)) return failure("invalid_input", value.correlationId, "Claude prompt is invalid or contains forbidden sensitive material.", "permission_denied");
-    const result = await this.#runner.runStructured({ requestId: value.correlationId, cwd: value.workspace.worktree, prompt, responseSchema: this.#repositoryPolicy === undefined ? this.#responseSchema : buildWorkerResultSchema(value), ...(workerProfile === undefined ? {} : { workerProfile }), signal, timeoutMs: value.limits.timeoutMs, maxStdoutBytes: value.limits.maxOutputBytes, maxStderrBytes: value.limits.maxErrorBytes });
+    const contractPrompt = `${prompt}\n\n${WORKER_RESULT_CONTRACT_INSTRUCTION}`;
+    if (contractPrompt.length === 0 || Buffer.byteLength(contractPrompt, "utf8") > 64 * 1024 || containsPromptSecret(contractPrompt)) return failure("invalid_input", value.correlationId, "Claude prompt is invalid or contains forbidden sensitive material.", "permission_denied");
+    const result = await this.#runner.runStructured({ requestId: value.correlationId, cwd: value.workspace.worktree, prompt: contractPrompt, responseSchema: this.#repositoryPolicy === undefined ? this.#responseSchema : buildWorkerResultSchema(value), ...(workerProfile === undefined ? {} : { workerProfile }), signal, timeoutMs: value.limits.timeoutMs, maxStdoutBytes: value.limits.maxOutputBytes, maxStderrBytes: value.limits.maxErrorBytes });
     if (result.outcome !== "success") return result;
     return { outcome: "success", requestId: result.requestId, structuredOutput: result.structuredOutput, durationMs: Math.max(0, Date.now() - startedAt), exitCode: 0 };
   }
@@ -117,7 +135,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     const processResult = await this.run(request, signal);
     if (processResult.outcome !== "success") throw new WorkerFailureError(processResult.diagnostic);
     const result = validateWorkerResult(processResult.structuredOutput, request);
-    if (!result.ok) throw new WorkerFailureError(createWorkerFailureDiagnostic(result.violations.some((item) => item.code === "binding_mismatch") ? "binding_mismatch" : "worker_contract_mismatch"));
+    if (!result.ok) throw new WorkerFailureError(contractDiagnostic(processResult.structuredOutput, result.violations[0]?.field, result.violations.some((item) => item.code === "binding_mismatch") ? "binding_mismatch" : "worker_contract_mismatch"));
     if (SECRET_PATTERN.test(JSON.stringify(result.value))) throw new WorkerFailureError(createWorkerFailureDiagnostic("worker_contract_mismatch"));
     if (result.ok && result.value.outcome === "CODE_PUSHED" && this.#repositoryPolicy !== undefined && this.#gitStateVerifier !== undefined) {
       const verified = await this.#gitStateVerifier.verify(request, result.value, this.#repositoryPolicy);

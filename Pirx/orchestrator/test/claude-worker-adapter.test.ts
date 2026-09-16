@@ -39,7 +39,7 @@ class AdapterFactory implements WorkerAdapterContractFactory {
     const runner: ClaudeStructuredRunner = {
       runStructured: async (request) => {
         this.#calls += 1;
-        const input = JSON.parse(request.prompt) as ClaudeCodeInput;
+        const input = JSON.parse(request.prompt.split("\n\nFINAL RESPONSE:")[0] ?? request.prompt) as ClaudeCodeInput;
         if (scenario === "throw") throw new Error("provider token=hidden");
         const value = validResult({ taskId: input.taskId, attemptId: input.attemptId, correlationId: input.correlationId, workspace: input.workspace } as never, scenario);
         return { outcome: "success", requestId: request.requestId, structuredOutput: value, durationMs: 0, exitCode: 0 } satisfies ClaudeStructuredResult;

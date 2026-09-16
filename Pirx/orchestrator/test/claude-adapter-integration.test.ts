@@ -42,7 +42,8 @@ const fakeClaude = `#!/usr/bin/env node
 const fs = require("node:fs");
 const mode = process.env.PIRX_FAKE_MODE || "success";
 const args = process.argv.slice(2);
-const input = JSON.parse(args.at(-1));
+const prompt = args.find((value) => value.includes('"kind":"claude_code_input"')) || "{}";
+const input = JSON.parse(prompt.split("\\n\\nFINAL RESPONSE:")[0]);
 if (process.env.PIRX_CAPTURE_FILE) fs.writeFileSync(process.env.PIRX_CAPTURE_FILE, JSON.stringify({ cwd: process.cwd(), args, input }));
 if (mode === "auth") { process.stderr.write("CLAUDE_AUTH_REQUIRED token=fixture-secret"); process.exit(1); }
 if (mode === "quota") { process.stderr.write("CLAUDE_QUOTA_EXHAUSTED"); process.exit(1); }
@@ -50,6 +51,7 @@ if (mode === "malformed") { process.stdout.write("{not-json"); process.exit(0); 
 if (mode === "missing") { process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false })); process.exit(0); }
 if (mode === "envelope") { process.stdout.write(JSON.stringify({ type: "message", subtype: "success", is_error: false, structured_output: {} })); process.exit(0); }
 if (mode === "invalid") { process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: "not-a-worker-result" })); process.exit(0); }
+if (mode === "minimal-code-pushed") { process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: { kind: "worker_result", schemaVersion: 1, taskId: input.taskId, attemptId: input.attemptId, correlationId: input.correlationId, outcome: "CODE_PUSHED" } })); process.exit(0); }
 if (mode === "overflow") { process.stdout.write("x".repeat(100000)); setInterval(() => {}, 1000); }
 if (mode === "hang") { process.on("SIGTERM", () => {}); setInterval(() => {}, 1000); }
 if (mode === "delay") { setTimeout(() => process.exit(0), 1000); }
@@ -229,6 +231,40 @@ test("allows sanitized repair policy prose and redacted evidence while blocking 
     assert.equal(rejected.outcome, "invalid_input");
     assert.equal(calls, 1);
     assert.equal(JSON.stringify(rejected).includes("fixture-secret"), false);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("keeps the CLI schema and WorkerResult contract aligned with bounded diagnostics", async () => {
+  const value = await fixture();
+  try {
+    const minimal = await adapter(value, "new", "minimal-code-pushed");
+    await assert.rejects(() => minimal.execute(request("new", value.worktree), new AbortController().signal), (error: unknown) => {
+      assert.equal(error instanceof Error, true);
+      const diagnostic = (error as { readonly diagnostic?: { readonly code?: string; readonly stage?: string; readonly field?: string; readonly fieldNames?: readonly string[]; readonly payloadDigest?: string } }).diagnostic;
+      assert.equal(diagnostic?.code, "worker_contract_mismatch");
+      assert.equal(diagnostic?.stage, "worker_contract");
+      assert.equal(diagnostic?.field, "branch");
+      assert.deepEqual(diagnostic?.fieldNames, ["attemptId", "correlationId", "kind", "outcome", "schemaVersion", "taskId"]);
+      assert.match(diagnostic?.payloadDigest ?? "", /^[0-9a-f]{64}$/u);
+      assert.equal(JSON.stringify(error).includes("not-a-worker-result"), false);
+      return true;
+    });
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("appends the exact terminal variant requirements to the worker prompt", async () => {
+  const value = await fixture();
+  try {
+    let prompt = "";
+    const runner: ClaudeStructuredRunner = { runStructured: async (input) => {
+      prompt = input.prompt;
+      return { outcome: "success", requestId: input.requestId, structuredOutput: { kind: "worker_result", schemaVersion: 1, taskId, attemptId: attemptOne, correlationId: "claude-integration-new", outcome: "BLOCKED", reason: "bounded" }, durationMs: 1, exitCode: 0 };
+    } };
+    const processAdapter = new ClaudeCodeProcessAdapter({ runner, inputSource: { create: (input) => inputFor(input, "new") }, promptRenderer: { render: () => "Inspect and perform the assigned bounded repair." } });
+    await processAdapter.execute(request("new", value.worktree), new AbortController().signal);
+    assert.match(prompt, /CODE_PUSHED include branch and finalCommit/u);
+    assert.match(prompt, /non-success outcome include reason/u);
+    assert.match(prompt, /Do not wrap the JSON in Markdown/u);
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
 
