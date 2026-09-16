@@ -61,6 +61,9 @@ test("maps the complete code-worker grant to a bounded Claude profile", () => {
   assert.equal(args.includes("bypassPermissions"), false);
   assert.equal(args.includes("--max-turns"), true);
   assert.equal(args[args.indexOf("--max-turns") + 1], "16");
+  assert.equal(args.filter((value) => value === "--allowedTools").length, 1);
+  assert.equal(args.filter((value) => value === "--disallowedTools").length, 1);
+  assert.match(args[args.indexOf("--allowedTools") + 1] ?? "", /Bash\(git status:\*\),Bash\(git diff:\*\)/u);
 });
 
 test("allows an explicitly configured uv test command", () => {

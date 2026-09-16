@@ -176,8 +176,8 @@ export function buildClaudeWorkerArguments(requestId: string, prompt: string, re
   // permission mode and deny-by-default prompt target keep every other tool
   // unavailable without relying on an unsupported legacy --restricted flag.
   const arguments_: string[] = ["-p", "--tools", profile.tools.join(",")];
-  for (const tool of profile.allowedTools) arguments_.push("--allowedTools", tool);
-  for (const tool of profile.disallowedTools) arguments_.push("--disallowedTools", tool);
+  if (profile.allowedTools.length > 0) arguments_.push("--allowedTools", profile.allowedTools.join(","));
+  if (profile.disallowedTools.length > 0) arguments_.push("--disallowedTools", profile.disallowedTools.join(","));
   arguments_.push("--permission-mode", profile.permissionMode, "--disable-slash-commands", "--no-session-persistence", "--max-turns", String(profile.maxTurns), "--output-format", "json", "--json-schema", schema, prompt);
   return Object.freeze(arguments_);
 }
