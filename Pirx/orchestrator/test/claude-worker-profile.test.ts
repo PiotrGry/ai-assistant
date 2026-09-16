@@ -93,10 +93,12 @@ test("fails before process construction for unknown capabilities and unsafe poli
   assert.equal(buildClaudeCodeWorkerProfile({ ...request(), workspace: { branch: "pirx/other;push", worktree } }, policy).ok, false);
 });
 
-test("keeps receipt arguments unchanged and separates them from the worker profile", async () => {
+test("keeps receipt tools disabled and uses the supported non-interactive permission mode", async () => {
   const { buildClaudeArguments } = await import("../src/index.js");
   const args = buildClaudeArguments("receipt");
   assert.equal(args[args.indexOf("--tools") + 1], "");
   assert.equal(args[args.indexOf("--max-turns") + 1], "1");
-  assert.equal(args.includes("--permission-mode"), false);
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
+  assert.equal(args.includes("--restricted"), false);
+  assert.equal(args.includes("--permission-prompts"), false);
 });

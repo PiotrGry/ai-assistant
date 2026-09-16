@@ -138,8 +138,8 @@ function roundTripSchema(requestId: string): ClaudeJsonSchema {
 }
 export function buildClaudeArguments(requestId: string): readonly string[] {
   return [
-    "--restricted", "-p", "--tools", "", "--disallowedTools", "mcp__*",
-    "--permission-prompts", "none", "--disable-slash-commands",
+    "-p", "--tools", "", "--disallowedTools", "mcp__*",
+    "--permission-mode", "dontAsk", "--disable-slash-commands",
     "--no-session-persistence", "--max-turns", "1", "--output-format", "json",
     "--json-schema", JSON.stringify(roundTripSchema(requestId)),
     `Acknowledge the literal payload "hello world". Use requestId "${requestId}" exactly. Return only the structured response required by the JSON schema.`,
@@ -152,8 +152,8 @@ export function buildClaudeHandoffArguments(handoffId: string, envelope: unknown
     throw new RangeError("Claude handoff envelope is too large or not JSON serializable.");
   }
   return [
-    "--restricted", "-p", "--tools", "", "--disallowedTools", "mcp__*",
-    "--permission-prompts", "none", "--disable-slash-commands",
+    "-p", "--tools", "", "--disallowedTools", "mcp__*",
+    "--permission-mode", "dontAsk", "--disable-slash-commands",
     "--no-session-persistence", "--max-turns", "1", "--output-format", "json",
     "--json-schema", JSON.stringify(roundTripSchema(handoffId)),
     `Acknowledge receipt of this structured failure handoff. Use handoff ID "${handoffId}" exactly. Return only the structured response required by the JSON schema. Payload: ${serialized}`,
@@ -163,8 +163,8 @@ export function buildClaudeStructuredArguments(requestId: string, prompt: string
   const schema = JSON.stringify(responseSchema);
   if (schema === undefined || Buffer.byteLength(schema, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > MAX_CLAUDE_OUTPUT_BYTES) throw new RangeError("Claude structured request is too large or invalid.");
   return [
-    "--restricted", "-p", "--tools", "", "--disallowedTools", "mcp__*",
-    "--permission-prompts", "none", "--disable-slash-commands",
+    "-p", "--tools", "", "--disallowedTools", "mcp__*",
+    "--permission-mode", "dontAsk", "--disable-slash-commands",
     "--no-session-persistence", "--max-turns", "1", "--output-format", "json",
     "--json-schema", schema, prompt,
   ];
@@ -178,7 +178,7 @@ export function buildClaudeWorkerArguments(requestId: string, prompt: string, re
   const arguments_: string[] = ["-p", "--tools", profile.tools.join(",")];
   for (const tool of profile.allowedTools) arguments_.push("--allowedTools", tool);
   for (const tool of profile.disallowedTools) arguments_.push("--disallowedTools", tool);
-  arguments_.push("--permission-mode", profile.permissionMode, "--permission-prompts", "none", "--disable-slash-commands", "--no-session-persistence", "--max-turns", String(profile.maxTurns), "--output-format", "json", "--json-schema", schema, prompt);
+  arguments_.push("--permission-mode", profile.permissionMode, "--disable-slash-commands", "--no-session-persistence", "--max-turns", String(profile.maxTurns), "--output-format", "json", "--json-schema", schema, prompt);
   return Object.freeze(arguments_);
 }
 function buildEnvironment(source: NodeJS.ProcessEnv, additional: Readonly<Record<string, string | undefined>> | undefined): NodeJS.ProcessEnv {

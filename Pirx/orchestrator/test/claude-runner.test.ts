@@ -95,16 +95,16 @@ function runner(fixtureValue: Fixture, mode: string, captureFile?: string, extra
   });
 }
 
-test("builds the restricted no-tools JSON-schema invocation", () => {
+test("builds the no-tools dontAsk JSON-schema invocation", () => {
   const args = buildClaudeArguments("request-id");
-  assert.deepEqual(args.slice(0, 14), [
-    "--restricted", "-p", "--tools", "", "--disallowedTools", "mcp__*",
-    "--permission-prompts", "none", "--disable-slash-commands",
+  assert.deepEqual(args.slice(0, 13), [
+    "-p", "--tools", "", "--disallowedTools", "mcp__*",
+    "--permission-mode", "dontAsk", "--disable-slash-commands",
     "--no-session-persistence", "--max-turns", "1", "--output-format", "json",
   ]);
   assert.equal(args.at(-1)?.includes('"hello world"'), true);
   assert.equal(args.at(-1)?.includes("request-id"), true);
-  const schema = JSON.parse(args[15] ?? "{}");
+  const schema = JSON.parse(args[14] ?? "{}");
   assert.equal(schema.additionalProperties, false);
   assert.equal(schema.properties.requestId.const, "request-id");
 });
