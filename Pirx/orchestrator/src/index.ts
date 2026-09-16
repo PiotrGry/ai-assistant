@@ -292,6 +292,21 @@ export {
   type ClaudeStructuredRunner,
 } from "./claude/worker-adapter.js";
 export {
+  WORKER_RESULT_ALLOWED_FIELDS,
+  WORKER_RESULT_COMMON_FIELDS,
+  WORKER_RESULT_CONTRACT_SCHEMA_VERSION,
+  WORKER_RESULT_VARIANTS,
+  buildWorkerResultSchema as buildCanonicalWorkerResultSchema,
+  workerResultContractInstruction,
+  workerResultVariant,
+} from "./runtime/worker-result-contract.js";
+export type {
+  WorkerResultBase,
+  WorkerResultVariantContract,
+  WorkerResultSchemaRequest,
+  WorkerResultContractSchemaVersion,
+} from "./runtime/worker-result-contract.js";
+export {
   ATTEMPT_RESULTS,
   TASK_DOMAIN_SCHEMA_VERSION,
   TASK_TRANSITIONS,
@@ -624,6 +639,7 @@ export {
 export {
   WORKER_DIAGNOSTIC_SCHEMA_VERSION,
   WORKER_FAILURE_CODES,
+  buildWorkerFailureDiagnosticSchema,
   createWorkerFailureDiagnostic,
   isWorkerFailureError,
   validateWorkerFailureDiagnostic,

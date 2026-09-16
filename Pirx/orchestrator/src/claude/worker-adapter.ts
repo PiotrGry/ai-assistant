@@ -24,6 +24,7 @@ import {
 import { GitWorkerStateVerifier, type WorkerGitStateVerifier } from "./git-state.js";
 import { createWorkerFailureDiagnostic, WorkerFailureError } from "../runtime/worker-diagnostic.js";
 import { createHash } from "node:crypto";
+import { workerResultContractInstruction } from "../runtime/worker-result-contract.js";
 
 export interface ClaudeStructuredRunner {
   runStructured(request: { readonly requestId: string; readonly cwd: string; readonly prompt: string; readonly responseSchema: unknown; readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly maxStdoutBytes?: number; readonly maxStderrBytes?: number; readonly workerProfile?: import("./worker-profile.js").ClaudeCodeWorkerProfile }): Promise<ClaudeStructuredResult>;
@@ -64,8 +65,6 @@ const PROMPT_SECRET_PATTERNS: readonly RegExp[] = [
   /\b(?:password|passwd|pwd|secret|token|api[_-]?key|connection(?:[_ -]?string)?)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s;,]+)/iu,
   /\b(?:ghp_|github_pat_|xox[baprs]-|sk-[A-Za-z0-9_-])[A-Za-z0-9._-]+/u,
 ];
-const WORKER_RESULT_CONTRACT_INSTRUCTION = "FINAL RESPONSE: return exactly one JSON object matching the supplied WorkerResult schema. For CODE_PUSHED include branch and finalCommit, and omit reason and diagnostic. For every non-success outcome include reason, and omit branch and finalCommit. Do not wrap the JSON in Markdown or add commentary.";
-
 function containsPromptSecret(value: string): boolean {
   return PROMPT_SECRET_PATTERNS.some((pattern) => pattern.test(value));
 }
@@ -124,7 +123,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     if (input.value.taskId !== value.taskId || input.value.attemptId !== value.attemptId || input.value.correlationId !== value.correlationId || input.value.workspace.worktree !== value.workspace.worktree || input.value.workspace.branch !== value.workspace.branch) return failure("invalid_input", value.correlationId, "Claude input is not bound to the assigned worker request.");
     let prompt: string;
     try { prompt = this.#promptRenderer.render(input.value); } catch { return failure("invalid_input", value.correlationId, "Claude prompt rendering failed before process invocation."); }
-    const contractPrompt = `${prompt}\n\n${WORKER_RESULT_CONTRACT_INSTRUCTION}`;
+    const contractPrompt = `${prompt}\n\n${workerResultContractInstruction()}`;
     if (contractPrompt.length === 0 || Buffer.byteLength(contractPrompt, "utf8") > 64 * 1024 || containsPromptSecret(contractPrompt)) return failure("invalid_input", value.correlationId, "Claude prompt is invalid or contains forbidden sensitive material.", "permission_denied");
     const result = await this.#runner.runStructured({ requestId: value.correlationId, cwd: value.workspace.worktree, prompt: contractPrompt, responseSchema: this.#repositoryPolicy === undefined ? this.#responseSchema : buildWorkerResultSchema(value), ...(workerProfile === undefined ? {} : { workerProfile }), signal, timeoutMs: value.limits.timeoutMs, maxStdoutBytes: value.limits.maxOutputBytes, maxStderrBytes: value.limits.maxErrorBytes });
     if (result.outcome !== "success") return result;

@@ -8,8 +8,12 @@ import {
 } from "./task-domain.js";
 import type { CapabilityResourceScope } from "./capabilities.js";
 import { createWorkerFailureDiagnostic, isWorkerFailureError, validateWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
+import { WORKER_RESULT_ALLOWED_FIELDS, WORKER_RESULT_CONTRACT_SCHEMA_VERSION, workerResultVariant } from "./worker-result-contract.js";
+import type { WorkerNonSuccessOutcome, WorkerResult } from "./worker-result-contract.js";
 
-export const WORKER_CONTRACT_SCHEMA_VERSION = 1 as const;
+export { WORKER_RESULT_OUTCOMES, type WorkerNonSuccessOutcome, type WorkerResult, type WorkerResultOutcome } from "./worker-result-contract.js";
+
+export const WORKER_CONTRACT_SCHEMA_VERSION = WORKER_RESULT_CONTRACT_SCHEMA_VERSION;
 export type WorkerContractSchemaVersion = typeof WORKER_CONTRACT_SCHEMA_VERSION;
 
 export const WORKER_CONTRACT_LIMITS = Object.freeze({
@@ -79,22 +83,6 @@ export interface WorkerRequestInput {
   readonly limits: WorkerExecutionLimits;
   readonly resumeContextReference?: string;
 }
-
-export const WORKER_RESULT_OUTCOMES = Object.freeze(["CODE_PUSHED", "BLOCKED", "FAILED", "QUOTA_EXHAUSTED", "CANCELLED", "UNKNOWN"] as const);
-export type WorkerResultOutcome = (typeof WORKER_RESULT_OUTCOMES)[number];
-export type WorkerNonSuccessOutcome = Exclude<WorkerResultOutcome, "CODE_PUSHED">;
-
-interface WorkerResultBase {
-  readonly kind: "worker_result";
-  readonly schemaVersion: typeof WORKER_CONTRACT_SCHEMA_VERSION;
-  readonly taskId: TaskId;
-  readonly attemptId: AttemptId;
-  readonly correlationId: string;
-}
-
-export type WorkerResult =
-  | (WorkerResultBase & { readonly outcome: "CODE_PUSHED"; readonly branch: string; readonly finalCommit: string })
-  | (WorkerResultBase & { readonly outcome: WorkerNonSuccessOutcome; readonly reason: string; readonly diagnostic?: WorkerFailureDiagnostic });
 
 export interface WorkerPort {
   execute(request: WorkerRequest, signal: AbortSignal): Promise<WorkerResult>;
@@ -232,22 +220,23 @@ export function validateWorkerRequest(value: unknown): WorkerValidationResult<Wo
 
 export function validateWorkerResult(value: unknown, request?: Pick<WorkerRequest, "taskId" | "attemptId" | "correlationId" | "workspace">): WorkerValidationResult<WorkerResult> {
   if (!isRecord(value)) return failure(violation("invalid_result", "result", "Worker result must be an object."));
-  const keys = exactKeys(value, ["kind", "schemaVersion", "taskId", "attemptId", "correlationId", "outcome", "branch", "finalCommit", "reason", "diagnostic"], "result"); if (keys !== undefined) return failure(keys);
+  const keys = exactKeys(value, WORKER_RESULT_ALLOWED_FIELDS, "result"); if (keys !== undefined) return failure(keys);
   if (value.kind !== "worker_result") return failure(violation("invalid_result", "kind", "Worker result kind is unsupported."));
   if (value.schemaVersion !== WORKER_CONTRACT_SCHEMA_VERSION) return failure(violation("unsupported_version", "schemaVersion", "Worker result schema version is unsupported."));
   const taskId = validId(value.taskId, "taskId"); const attemptId = validId(value.attemptId, "attemptId"); const correlationId = boundedText(value.correlationId, "correlationId", WORKER_CONTRACT_LIMITS.correlationId);
   if (typeof taskId !== "string") return failure(taskId); if (typeof attemptId !== "string") return failure(attemptId); if (typeof correlationId !== "string") return failure(correlationId);
   if (request !== undefined && (taskId !== request.taskId || attemptId !== request.attemptId || correlationId !== request.correlationId)) return failure(violation("binding_mismatch", "result", "Worker result identity does not match its request."));
-  if (!WORKER_RESULT_OUTCOMES.includes(value.outcome as WorkerResultOutcome)) return failure(violation("invalid_result", "outcome", "Worker result outcome is unsupported."));
+  const variant = workerResultVariant(value.outcome);
+  if (variant === undefined) return failure(violation("invalid_result", "outcome", "Worker result outcome is unsupported."));
   const base = { kind: "worker_result" as const, schemaVersion: WORKER_CONTRACT_SCHEMA_VERSION, taskId: taskId as TaskId, attemptId: attemptId as AttemptId, correlationId };
-  if (value.outcome === "CODE_PUSHED") {
-    if (value.reason !== undefined || value.diagnostic !== undefined) return failure(violation("invalid_result", "result", "CODE_PUSHED cannot contain failure evidence."));
+  if (variant.outcome === "CODE_PUSHED") {
+    if (variant.forbidden.some((field) => value[field] !== undefined)) return failure(violation("invalid_result", "result", "CODE_PUSHED cannot contain failure evidence."));
     const branch = boundedText(value.branch, "branch", WORKER_CONTRACT_LIMITS.branch); const finalCommit = boundedText(value.finalCommit, "finalCommit", WORKER_CONTRACT_LIMITS.commit);
     if (typeof branch !== "string") return failure(branch); if (typeof finalCommit !== "string") return failure(finalCommit);
     if (request !== undefined && branch !== request.workspace.branch) return failure(violation("binding_mismatch", "branch", "CODE_PUSHED branch does not match the assigned workspace."));
     return success(Object.freeze({ ...base, outcome: "CODE_PUSHED", branch, finalCommit }));
   }
-  if (value.branch !== undefined || value.finalCommit !== undefined) return failure(violation("invalid_result", "result", "Non-success results cannot contain CODE_PUSHED evidence."));
+  if (variant.forbidden.some((field) => value[field] !== undefined)) return failure(violation("invalid_result", "result", "Non-success results cannot contain CODE_PUSHED evidence."));
   const reason = boundedText(value.reason, "reason", WORKER_CONTRACT_LIMITS.reason);
   if (typeof reason !== "string") return failure(reason);
   if (value.diagnostic !== undefined) {

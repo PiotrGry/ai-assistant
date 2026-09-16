@@ -2,6 +2,7 @@ import { isAbsolute, resolve } from "node:path";
 
 import { CAPABILITY_VOCABULARY, type Capability } from "../runtime/capabilities.js";
 import type { WorkerRequest } from "../runtime/worker-contract.js";
+import { buildWorkerResultSchema as buildCanonicalWorkerResultSchema } from "../runtime/worker-result-contract.js";
 
 export const CLAUDE_CODE_WORKER_PROFILE_SCHEMA_VERSION = 1 as const;
 export const CLAUDE_CODE_WORKER_PROFILE_LIMITS = Object.freeze({
@@ -128,18 +129,5 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
 }
 
 export function buildWorkerResultSchema(request: WorkerRequest): unknown {
-  const baseProperties = {
-    kind: { type: "string", const: "worker_result" },
-    schemaVersion: { type: "integer", const: 1 },
-    taskId: { type: "string", const: request.taskId },
-    attemptId: { type: "string", const: request.attemptId },
-    correlationId: { type: "string", const: request.correlationId },
-  } as const;
-  const diagnostic = { type: "object", additionalProperties: false, required: ["schemaVersion", "code", "message"], properties: { schemaVersion: { type: "integer", const: 1 }, code: { enum: ["spawn_failure", "process_failure", "timeout", "cancellation", "authentication", "quota_exhausted", "malformed_cli_envelope", "missing_structured_output", "invalid_structured_output", "worker_contract_mismatch", "binding_mismatch", "capability_denied", "permission_denied", "git_state_mismatch", "adapter_failure"] }, message: { type: "string", minLength: 1, maxLength: 256 }, exitCode: { type: "integer", minimum: 0, maximum: 255 }, durationMs: { type: "integer", minimum: 0, maximum: 300000 }, stage: { enum: ["process", "cli_envelope", "structured_output", "worker_contract", "git_state"] }, field: { type: "string", maxLength: 128 }, receivedType: { type: "string", maxLength: 64 }, fieldNames: { type: "array", maxItems: 32, items: { type: "string", maxLength: 128 } }, payloadLength: { type: "integer", minimum: 0, maximum: 1048576 }, payloadDigest: { type: "string", pattern: "^[0-9a-f]{64}$" } } } as const;
-  return Object.freeze({
-    type: "object",
-    additionalProperties: false,
-    required: ["kind", "schemaVersion", "taskId", "attemptId", "correlationId", "outcome"],
-    properties: { ...baseProperties, outcome: { enum: ["CODE_PUSHED", "BLOCKED", "FAILED", "QUOTA_EXHAUSTED", "CANCELLED", "UNKNOWN"] }, branch: { type: "string", const: request.workspace.branch }, finalCommit: { type: "string", pattern: "^[0-9a-fA-F]{4,64}$" }, reason: { type: "string", minLength: 1, maxLength: 1_000 }, diagnostic },
-  });
+  return buildCanonicalWorkerResultSchema(request);
 }

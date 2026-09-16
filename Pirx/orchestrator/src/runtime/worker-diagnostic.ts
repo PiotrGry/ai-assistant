@@ -20,6 +20,27 @@ export const WORKER_FAILURE_CODES = Object.freeze([
 
 export type WorkerFailureCode = (typeof WORKER_FAILURE_CODES)[number];
 
+export function buildWorkerFailureDiagnosticSchema(): unknown {
+  return Object.freeze({
+    type: "object",
+    additionalProperties: false,
+    required: ["schemaVersion", "code", "message"],
+    properties: {
+      schemaVersion: { type: "integer", const: WORKER_DIAGNOSTIC_SCHEMA_VERSION },
+      code: { enum: [...WORKER_FAILURE_CODES] },
+      message: { type: "string", minLength: 1, maxLength: 256 },
+      exitCode: { type: "integer", minimum: 0, maximum: 255 },
+      durationMs: { type: "integer", minimum: 0, maximum: 300_000 },
+      stage: { enum: ["process", "cli_envelope", "structured_output", "worker_contract", "git_state"] },
+      field: { type: "string", maxLength: 128 },
+      receivedType: { type: "string", maxLength: 64 },
+      fieldNames: { type: "array", maxItems: 32, items: { type: "string", maxLength: 128 } },
+      payloadLength: { type: "integer", minimum: 0, maximum: 1_048_576 },
+      payloadDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    },
+  });
+}
+
 export interface WorkerFailureDiagnostic {
   readonly schemaVersion: typeof WORKER_DIAGNOSTIC_SCHEMA_VERSION;
   readonly code: WorkerFailureCode;
