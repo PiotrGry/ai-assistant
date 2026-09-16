@@ -28,7 +28,7 @@ function resultFromAttempt(attempt: AttemptSnapshot): WorkerResult | undefined {
   const base = { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: attempt.taskId, attemptId: attempt.id, correlationId: "attempt:" + attempt.id };
   return attempt.result === "CODE_PUSHED"
     ? { ...base, outcome: "CODE_PUSHED" as const, branch: attempt.branch!, finalCommit: attempt.finalCommit! }
-    : { ...base, outcome: attempt.result, reason: attempt.blockingReason ?? SAFE_REASON };
+    : { ...base, outcome: attempt.result, reason: attempt.blockingReason ?? SAFE_REASON, ...(attempt.diagnostic === undefined ? {} : { diagnostic: attempt.diagnostic }) };
 }
 function safeWorkerResult(result: WorkerResult): WorkerResult {
   if (!SECRET_PATTERN.test(JSON.stringify(result))) return result;
@@ -49,6 +49,7 @@ function buildCheckpoint(task: TaskSnapshot, attempt: AttemptSnapshot, result: W
     ...workspace,
     completedWork: [], remainingWork: ["resume the assigned Task after human or scheduler review"], changedFiles: [], findings: [], hypotheses: [], tests: [],
     evidence: [{ reference: "attempt:" + attempt.id, summary: "Worker terminal outcome was durably recorded." }],
+    ...(result.diagnostic === undefined ? {} : { diagnostic: result.diagnostic }),
     blockingReason: result.outcome === "CANCELLED" ? "Worker execution was cancelled." : result.reason,
     lastAction: "recorded worker terminal outcome", resumeInstruction: "Resume only after the durable checkpoint and workspace are validated.",
   });
@@ -113,7 +114,7 @@ export class WorkerLifecycleCoordinator {
       const identity = requestIdentity(value, attempt.value);
       if (identity !== undefined) return { outcome: "conflict" as const, message: identity };
       const at = this.#now();
-      const nextAttempt = transitionAttempt(attempt.value, "running", result.outcome === "CODE_PUSHED" ? { type: "finish", result: "CODE_PUSHED", branch: result.branch, finalCommit: result.finalCommit, currentCommit: result.finalCommit, progress: "worker invocation completed" } : { type: "finish", result: result.outcome, blockingReason: result.reason, progress: "worker invocation completed" }, at);
+      const nextAttempt = transitionAttempt(attempt.value, "running", result.outcome === "CODE_PUSHED" ? { type: "finish", result: "CODE_PUSHED", branch: result.branch, finalCommit: result.finalCommit, currentCommit: result.finalCommit, progress: "worker invocation completed" } : { type: "finish", result: result.outcome, blockingReason: result.reason, ...(result.diagnostic === undefined ? {} : { diagnostic: result.diagnostic }), progress: "worker invocation completed" }, at);
       if (!nextAttempt.ok) return { outcome: "conflict" as const, message: nextAttempt.error.message };
       const storedAttempt = attempts.update(nextAttempt.value, "running");
       if (storedAttempt.outcome !== "success") return storedAttempt;

@@ -50,7 +50,7 @@ class AdapterFactory implements WorkerAdapterContractFactory {
   invocationCount(): number { return this.#calls; }
 }
 
-registerWorkerAdapterContractSuite({ name: "Claude Code process adapter", factory: () => new AdapterFactory() });
+registerWorkerAdapterContractSuite({ name: "Claude Code process adapter", factory: () => new AdapterFactory(), normalizesInvalidResults: true });
 
 test("runs the same process boundary in the exact assigned worktree with shell disabled", async () => {
   const root = await mkdtemp(join(tmpdir(), "pirx-claude-adapter-process-test-"));

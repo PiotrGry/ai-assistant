@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   RuntimeSqliteStore,
   WorkerLifecycleCoordinator,
+  createWorkerFailureDiagnostic,
   createTask,
   createWorkerRequest,
   startInitialAttempt,
@@ -184,4 +185,38 @@ test("survives restart with a durable terminal Attempt and never creates a secon
       if (history.outcome === "success") assert.equal(history.value.length, 1);
     } finally { reopened.close(); }
   } finally { if (!value.store) { /* store was closed for the restart branch */ } else { try { value.store.close(); } catch { /* already closed */ } } await rm(value.directory, { recursive: true, force: true }); }
+});
+
+test("persists bounded worker diagnostics and replays them after restart", async () => {
+  const value = await storeFixture();
+  try {
+    const input = request(value.store);
+    const diagnostic = createWorkerFailureDiagnostic("timeout", { durationMs: 30_000 });
+    const worker: WorkerPort = {
+      execute: async () => ({
+        ...result(input, "FAILED"),
+        diagnostic,
+      }),
+    };
+    const first = await new WorkerLifecycleCoordinator(value.store, worker, { now: () => t1 }).execute(input, new AbortController().signal);
+    assert.equal(first.outcome, "terminal_recorded");
+    if (first.outcome === "terminal_recorded") {
+      assert.equal(first.result.outcome, "FAILED");
+      assert.deepEqual("diagnostic" in first.result ? first.result.diagnostic : undefined, diagnostic);
+      if (first.attempt.state === "terminal") assert.deepEqual(first.attempt.diagnostic, diagnostic);
+      const checkpoint = value.store.checkpoints.latestByTask(taskId);
+      assert.equal(checkpoint.outcome, "success");
+      if (checkpoint.outcome === "success") assert.deepEqual(checkpoint.value.diagnostic, diagnostic);
+    }
+    value.store.close();
+    const reopened = RuntimeSqliteStore.open({ filename: join(value.directory, "runtime.sqlite") });
+    try {
+      const replay = await new WorkerLifecycleCoordinator(reopened, worker, { now: () => t1 }).execute(input, new AbortController().signal);
+      assert.equal(replay.outcome, "replayed");
+      if (replay.outcome === "replayed") assert.deepEqual("diagnostic" in replay.result ? replay.result.diagnostic : undefined, diagnostic);
+      const attempt = reopened.attempts.get(attemptId);
+      assert.equal(attempt.outcome, "success");
+      if (attempt.outcome === "success" && attempt.value.state === "terminal") assert.deepEqual(attempt.value.diagnostic, diagnostic);
+    } finally { reopened.close(); }
+  } finally { try { value.store.close(); } catch { /* already closed */ } await rm(value.directory, { recursive: true, force: true }); }
 });

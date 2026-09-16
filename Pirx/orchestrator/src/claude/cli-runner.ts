@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 import type { ClaudeCodeWorkerProfile } from "./worker-profile.js";
+import { createWorkerFailureDiagnostic, type WorkerFailureCode } from "../runtime/worker-diagnostic.js";
 
 export const CLAUDE_ROUND_TRIP_OUTCOMES = [
   "success",
@@ -64,6 +65,7 @@ export interface ClaudeRoundTripFailure {
   readonly durationMs: number;
   readonly exitCode: number | null;
   readonly message: string;
+  readonly diagnostic: ReturnType<typeof createWorkerFailureDiagnostic>;
 }
 export type ClaudeRoundTripResult = ClaudeRoundTripSuccess | ClaudeRoundTripFailure;
 export type ClaudeHandoffResult = ClaudeRoundTripResult;
@@ -197,8 +199,19 @@ function explicitFailureCode(parsed: unknown, stderr: string): "authentication_r
   const marker = stderr.match(/\b(CLAUDE_AUTH_REQUIRED|CLAUDE_QUOTA_EXHAUSTED)\b/u)?.[1];
   return marker === "CLAUDE_AUTH_REQUIRED" ? "authentication_required" : marker === "CLAUDE_QUOTA_EXHAUSTED" ? "quota_exhausted" : undefined;
 }
-function failure(outcome: Exclude<ClaudeRoundTripOutcome, "success">, requestId: string, startedAt: number, exitCode: number | null): ClaudeRoundTripFailure {
-  return { outcome, requestId, durationMs: Math.max(0, Date.now() - startedAt), exitCode, message: FAILURE_MESSAGES[outcome] };
+function diagnosticCode(outcome: Exclude<ClaudeRoundTripOutcome, "success">): WorkerFailureCode {
+  if (outcome === "claude_not_installed") return "spawn_failure";
+  if (outcome === "authentication_required") return "authentication";
+  if (outcome === "quota_exhausted") return "quota_exhausted";
+  if (outcome === "timeout") return "timeout";
+  if (outcome === "cancelled") return "cancellation";
+  if (outcome === "invalid_output") return "invalid_structured_output";
+  if (outcome === "process_error") return "process_failure";
+  return "adapter_failure";
+}
+function failure(outcome: Exclude<ClaudeRoundTripOutcome, "success">, requestId: string, startedAt: number, exitCode: number | null, code = diagnosticCode(outcome)): ClaudeRoundTripFailure {
+  const durationMs = Math.max(0, Date.now() - startedAt);
+  return { outcome, requestId, durationMs, exitCode, message: FAILURE_MESSAGES[outcome], diagnostic: createWorkerFailureDiagnostic(code, { exitCode, durationMs }) };
 }
 function validateStructuredOutput(value: unknown, requestId: string): value is { requestId: string; acknowledgement: string } {
   if (!isRecord(value) || Object.keys(value).length !== 2 || !Object.keys(value).every((key) => key === "requestId" || key === "acknowledgement")) return false;
@@ -366,13 +379,14 @@ export class ClaudeCodeCliRunner {
     const stderr = Buffer.concat(stderrChunks).toString("utf8");
     let parsed: unknown;
     try { parsed = JSON.parse(stdout); }
-    catch { return failure(explicitFailureCode(undefined, stderr) ?? (exitCode !== 0 ? "process_error" : "invalid_output"), input.requestId, input.startedAt, exitCode); }
+    catch { return failure(explicitFailureCode(undefined, stderr) ?? (exitCode !== 0 ? "process_error" : "invalid_output"), input.requestId, input.startedAt, exitCode, exitCode !== 0 ? undefined : "malformed_cli_envelope"); }
     const explicit = explicitFailureCode(parsed, stderr);
     if (explicit !== undefined) return failure(explicit, input.requestId, input.startedAt, exitCode);
     if (exitCode !== 0) return failure("process_error", input.requestId, input.startedAt, exitCode);
-    if (!isRecord(parsed) || parsed.type !== "result" || parsed.subtype !== "success" || parsed.is_error !== false) return failure("invalid_output", input.requestId, input.startedAt, exitCode);
+    if (!isRecord(parsed) || parsed.type !== "result" || parsed.subtype !== "success" || parsed.is_error !== false) return failure("invalid_output", input.requestId, input.startedAt, exitCode, "malformed_cli_envelope");
     if (input.structuredOutput === true) {
-      if (!isRecord(parsed.structured_output)) return failure("invalid_output", input.requestId, input.startedAt, exitCode);
+      if (parsed.structured_output === undefined) return failure("invalid_output", input.requestId, input.startedAt, exitCode, "missing_structured_output");
+      if (!isRecord(parsed.structured_output)) return failure("invalid_output", input.requestId, input.startedAt, exitCode, "invalid_structured_output");
       return { outcome: "success", requestId: input.requestId, structuredOutput: parsed.structured_output, durationMs: Math.max(0, Date.now() - input.startedAt), exitCode: 0 } as unknown as ClaudeRoundTripResult;
     }
     if (!validateStructuredOutput(parsed.structured_output, input.requestId)) return failure("invalid_output", input.requestId, input.startedAt, exitCode);

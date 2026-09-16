@@ -135,16 +135,11 @@ export function buildWorkerResultSchema(request: WorkerRequest): unknown {
     attemptId: { type: "string", const: request.attemptId },
     correlationId: { type: "string", const: request.correlationId },
   } as const;
+  const diagnostic = { type: "object", additionalProperties: false, required: ["schemaVersion", "code", "message"], properties: { schemaVersion: { type: "integer", const: 1 }, code: { enum: ["spawn_failure", "process_failure", "timeout", "cancellation", "authentication", "quota_exhausted", "malformed_cli_envelope", "missing_structured_output", "invalid_structured_output", "worker_contract_mismatch", "binding_mismatch", "capability_denied", "permission_denied", "git_state_mismatch", "adapter_failure"] }, message: { type: "string", minLength: 1, maxLength: 256 }, exitCode: { type: "integer", minimum: 0, maximum: 255 }, durationMs: { type: "integer", minimum: 0, maximum: 300000 } } } as const;
   return Object.freeze({
     type: "object",
     additionalProperties: false,
     required: ["kind", "schemaVersion", "taskId", "attemptId", "correlationId", "outcome"],
-    properties: {
-      ...baseProperties,
-      outcome: { enum: ["CODE_PUSHED", "BLOCKED", "FAILED", "QUOTA_EXHAUSTED", "CANCELLED", "UNKNOWN"] },
-      branch: { type: "string", const: request.workspace.branch },
-      finalCommit: { type: "string", pattern: "^[0-9a-fA-F]{4,64}$" },
-      reason: { type: "string", minLength: 1, maxLength: 1_000 },
-    },
+    properties: { ...baseProperties, outcome: { enum: ["CODE_PUSHED", "BLOCKED", "FAILED", "QUOTA_EXHAUSTED", "CANCELLED", "UNKNOWN"] }, branch: { type: "string", const: request.workspace.branch }, finalCommit: { type: "string", pattern: "^[0-9a-fA-F]{4,64}$" }, reason: { type: "string", minLength: 1, maxLength: 1_000 }, diagnostic },
   });
 }

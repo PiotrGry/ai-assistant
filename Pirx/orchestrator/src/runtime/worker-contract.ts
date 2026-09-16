@@ -7,6 +7,7 @@ import {
   type AttemptId,
 } from "./task-domain.js";
 import type { CapabilityResourceScope } from "./capabilities.js";
+import { createWorkerFailureDiagnostic, isWorkerFailureError, validateWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
 
 export const WORKER_CONTRACT_SCHEMA_VERSION = 1 as const;
 export type WorkerContractSchemaVersion = typeof WORKER_CONTRACT_SCHEMA_VERSION;
@@ -93,7 +94,7 @@ interface WorkerResultBase {
 
 export type WorkerResult =
   | (WorkerResultBase & { readonly outcome: "CODE_PUSHED"; readonly branch: string; readonly finalCommit: string })
-  | (WorkerResultBase & { readonly outcome: WorkerNonSuccessOutcome; readonly reason: string });
+  | (WorkerResultBase & { readonly outcome: WorkerNonSuccessOutcome; readonly reason: string; readonly diagnostic?: WorkerFailureDiagnostic });
 
 export interface WorkerPort {
   execute(request: WorkerRequest, signal: AbortSignal): Promise<WorkerResult>;
@@ -231,7 +232,7 @@ export function validateWorkerRequest(value: unknown): WorkerValidationResult<Wo
 
 export function validateWorkerResult(value: unknown, request?: Pick<WorkerRequest, "taskId" | "attemptId" | "correlationId" | "workspace">): WorkerValidationResult<WorkerResult> {
   if (!isRecord(value)) return failure(violation("invalid_result", "result", "Worker result must be an object."));
-  const keys = exactKeys(value, ["kind", "schemaVersion", "taskId", "attemptId", "correlationId", "outcome", "branch", "finalCommit", "reason"], "result"); if (keys !== undefined) return failure(keys);
+  const keys = exactKeys(value, ["kind", "schemaVersion", "taskId", "attemptId", "correlationId", "outcome", "branch", "finalCommit", "reason", "diagnostic"], "result"); if (keys !== undefined) return failure(keys);
   if (value.kind !== "worker_result") return failure(violation("invalid_result", "kind", "Worker result kind is unsupported."));
   if (value.schemaVersion !== WORKER_CONTRACT_SCHEMA_VERSION) return failure(violation("unsupported_version", "schemaVersion", "Worker result schema version is unsupported."));
   const taskId = validId(value.taskId, "taskId"); const attemptId = validId(value.attemptId, "attemptId"); const correlationId = boundedText(value.correlationId, "correlationId", WORKER_CONTRACT_LIMITS.correlationId);
@@ -240,7 +241,7 @@ export function validateWorkerResult(value: unknown, request?: Pick<WorkerReques
   if (!WORKER_RESULT_OUTCOMES.includes(value.outcome as WorkerResultOutcome)) return failure(violation("invalid_result", "outcome", "Worker result outcome is unsupported."));
   const base = { kind: "worker_result" as const, schemaVersion: WORKER_CONTRACT_SCHEMA_VERSION, taskId: taskId as TaskId, attemptId: attemptId as AttemptId, correlationId };
   if (value.outcome === "CODE_PUSHED") {
-    if (value.reason !== undefined) return failure(violation("invalid_result", "reason", "CODE_PUSHED cannot contain non-success evidence."));
+    if (value.reason !== undefined || value.diagnostic !== undefined) return failure(violation("invalid_result", "result", "CODE_PUSHED cannot contain failure evidence."));
     const branch = boundedText(value.branch, "branch", WORKER_CONTRACT_LIMITS.branch); const finalCommit = boundedText(value.finalCommit, "finalCommit", WORKER_CONTRACT_LIMITS.commit);
     if (typeof branch !== "string") return failure(branch); if (typeof finalCommit !== "string") return failure(finalCommit);
     if (request !== undefined && branch !== request.workspace.branch) return failure(violation("binding_mismatch", "branch", "CODE_PUSHED branch does not match the assigned workspace."));
@@ -248,7 +249,24 @@ export function validateWorkerResult(value: unknown, request?: Pick<WorkerReques
   }
   if (value.branch !== undefined || value.finalCommit !== undefined) return failure(violation("invalid_result", "result", "Non-success results cannot contain CODE_PUSHED evidence."));
   const reason = boundedText(value.reason, "reason", WORKER_CONTRACT_LIMITS.reason);
-  return typeof reason === "string" ? success(Object.freeze({ ...base, outcome: value.outcome as WorkerNonSuccessOutcome, reason })) : failure(reason);
+  if (typeof reason !== "string") return failure(reason);
+  if (value.diagnostic !== undefined) {
+    const diagnostic = validateWorkerFailureDiagnostic(value.diagnostic);
+    if (diagnostic === undefined) return failure(violation("invalid_result", "diagnostic", "Worker diagnostic is malformed or unsafe."));
+    return success(Object.freeze({ ...base, outcome: value.outcome as WorkerNonSuccessOutcome, reason, diagnostic }));
+  }
+  return success(Object.freeze({ ...base, outcome: value.outcome as WorkerNonSuccessOutcome, reason }));
+}
+
+function resultOutcome(code: WorkerFailureDiagnostic["code"]): WorkerNonSuccessOutcome {
+  if (code === "quota_exhausted") return "QUOTA_EXHAUSTED";
+  if (code === "cancellation") return "CANCELLED";
+  if (code === "capability_denied" || code === "permission_denied" || code === "authentication" || code === "binding_mismatch") return "BLOCKED";
+  return "FAILED";
+}
+
+function failureResult(request: WorkerRequest, diagnostic: WorkerFailureDiagnostic): WorkerResult {
+  return { kind: "worker_result", schemaVersion: WORKER_CONTRACT_SCHEMA_VERSION, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: resultOutcome(diagnostic.code), reason: diagnostic.message, diagnostic };
 }
 
 export async function invokeWorker(port: WorkerPort, request: WorkerRequest, signal: AbortSignal): Promise<WorkerValidationResult<WorkerResult>> {
@@ -258,7 +276,8 @@ export async function invokeWorker(port: WorkerPort, request: WorkerRequest, sig
   try {
     const result = await port.execute(validRequest.value, signal);
     return validateWorkerResult(result, validRequest.value);
-  } catch {
-    return failure(violation("invalid_result", "result", "Worker adapter did not return a normalized result."));
+  } catch (error: unknown) {
+    const diagnostic = isWorkerFailureError(error) ? error.diagnostic : createWorkerFailureDiagnostic("adapter_failure");
+    return validateWorkerResult(failureResult(validRequest.value, diagnostic), validRequest.value);
   }
 }

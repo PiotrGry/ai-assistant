@@ -1,3 +1,5 @@
+import { validateWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
+
 export const TASK_DOMAIN_SCHEMA_VERSION = 1 as const;
 
 export type TaskId = string & { readonly __brand: "TaskId" };
@@ -74,6 +76,7 @@ export interface TerminalAttemptSnapshot extends Omit<RunningAttemptSnapshot, "s
   readonly endedAt: UtcTimestamp;
   readonly finalCommit?: string;
   readonly blockingReason?: string;
+  readonly diagnostic?: WorkerFailureDiagnostic;
 }
 
 export type AttemptSnapshot = RunningAttemptSnapshot | TerminalAttemptSnapshot;
@@ -134,6 +137,7 @@ export type AttemptTransition =
       readonly checkpointReference?: string;
       readonly progress?: string;
       readonly testSummary?: string;
+      readonly diagnostic?: WorkerFailureDiagnostic;
     };
 
 export interface AttemptProgressUpdate {
@@ -378,9 +382,11 @@ function validateAttemptSnapshot(value: unknown): DomainResult<AttemptSnapshot> 
   const blocking = safeOptionalText(value.blockingReason, "blockingReason");
   if (!finalCommit.ok) return finalCommit;
   if (!blocking.ok) return blocking;
+  const diagnostic = value.diagnostic === undefined ? undefined : validateWorkerFailureDiagnostic(value.diagnostic);
+  if (value.diagnostic !== undefined && diagnostic === undefined) return error("serialization_error", "Attempt diagnostic is malformed or unsafe.", "diagnostic");
   if (value.result === "CODE_PUSHED" && (value.branch === undefined || finalCommit.value === undefined)) return error("invariant_violation", "CODE_PUSHED requires branch and finalCommit.", "finalCommit");
   if (value.result !== "CODE_PUSHED" && blocking.value === undefined) return error("invariant_violation", `${value.result} requires blockingReason.`, "blockingReason");
-  return ok(freezeAttempt({ ...common, state: "terminal", result: value.result, endedAt, ...(finalCommit.value === undefined ? {} : { finalCommit: finalCommit.value }), ...(blocking.value === undefined ? {} : { blockingReason: blocking.value }) }));
+  return ok(freezeAttempt({ ...common, state: "terminal", result: value.result, endedAt, ...(finalCommit.value === undefined ? {} : { finalCommit: finalCommit.value }), ...(blocking.value === undefined ? {} : { blockingReason: blocking.value }), ...(diagnostic === undefined ? {} : { diagnostic }) }));
 }
 
 function validateAttemptSet(task: TaskSnapshot, attempts: readonly AttemptSnapshot[]): DomainResult<void> {
@@ -497,6 +503,8 @@ export function transitionAttempt(attempt: AttemptSnapshot, expectedState: Attem
   const testSummary = safeOptionalText(transition.testSummary, "testSummary", 2_000);
   if (!finalCommit.ok) return finalCommit;
   if (!blocking.ok) return blocking;
+  const diagnostic = transition.diagnostic === undefined ? undefined : validateWorkerFailureDiagnostic(transition.diagnostic);
+  if (transition.diagnostic !== undefined && diagnostic === undefined) return error("invalid_input", "Attempt diagnostic is malformed or unsafe.", "diagnostic");
   if (!currentCommit.ok) return currentCommit;
   if (!checkpoint.ok) return checkpoint;
   if (!progress.ok) return progress;
@@ -504,7 +512,7 @@ export function transitionAttempt(attempt: AttemptSnapshot, expectedState: Attem
   const branch = transition.branch ?? attempt.branch;
   if (transition.result === "CODE_PUSHED" && (branch === undefined || finalCommit.value === undefined)) return error("invariant_violation", "CODE_PUSHED requires branch and finalCommit.", "finalCommit");
   if (transition.result !== "CODE_PUSHED" && blocking.value === undefined) return error("invariant_violation", `${transition.result} requires blockingReason.`, "blockingReason");
-  return ok(freezeAttempt({ ...attempt, state: "terminal", result: transition.result, endedAt: evaluatedAt, ...(branch === undefined ? {} : { branch }), ...(finalCommit.value === undefined ? {} : { finalCommit: finalCommit.value }), ...(blocking.value === undefined ? {} : { blockingReason: blocking.value }), ...(currentCommit.value === undefined ? {} : { currentCommit: currentCommit.value }), ...(checkpoint.value === undefined ? {} : { checkpointReference: checkpoint.value }), ...(progress.value === undefined ? {} : { progress: progress.value }), ...(testSummary.value === undefined ? {} : { testSummary: testSummary.value }) }));
+  return ok(freezeAttempt({ ...attempt, state: "terminal", result: transition.result, endedAt: evaluatedAt, ...(branch === undefined ? {} : { branch }), ...(finalCommit.value === undefined ? {} : { finalCommit: finalCommit.value }), ...(blocking.value === undefined ? {} : { blockingReason: blocking.value }), ...(diagnostic === undefined ? {} : { diagnostic }), ...(currentCommit.value === undefined ? {} : { currentCommit: currentCommit.value }), ...(checkpoint.value === undefined ? {} : { checkpointReference: checkpoint.value }), ...(progress.value === undefined ? {} : { progress: progress.value }), ...(testSummary.value === undefined ? {} : { testSummary: testSummary.value }) }));
 }
 
 export function recordAttemptProgress(attempt: RunningAttemptSnapshot, expectedState: AttemptState, update: AttemptProgressUpdate, evaluatedAt: UtcTimestamp): DomainResult<RunningAttemptSnapshot> {

@@ -3,8 +3,9 @@ import { resolve } from "node:path";
 import type { LeaseAcquireInput, LeaseId, LeaseRecord } from "./lease.js";
 import { CapabilityEnforcementGate, type CapabilityAuditSink } from "./capability-gate.js";
 import { SingleWorkerScheduler, type SchedulerCycleResult, type SchedulerOptions, type SchedulerPortResult } from "./scheduler.js";
-import { createWorkerRequest, type WorkerPort, type WorkerRequest, type WorkerRequestInput } from "./worker-contract.js";
+import { createWorkerRequest, type WorkerPort, type WorkerRequest, type WorkerRequestInput, type WorkerResult } from "./worker-contract.js";
 import { CapabilityAwareWorkerExecutionPort, type WorkerAdapterRegistry } from "./worker-execution.js";
+import type { WorkerFailureDiagnostic } from "./worker-diagnostic.js";
 import { WorkerLifecycleCoordinator } from "./worker-lifecycle.js";
 import { WorkspaceProvisioner, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
 import type { RunnableTaskCandidate } from "./task-selection.js";
@@ -107,6 +108,17 @@ function workerExecutionResult(value: Awaited<ReturnType<WorkerLifecycleCoordina
   if (value.outcome === "terminal_recorded" || value.outcome === "projection_pending" || value.outcome === "replayed") return value.result.outcome === "CODE_PUSHED" ? { outcome: "success", summary: "Worker lifecycle recorded CODE_PUSHED." } : value.result.outcome === "CANCELLED" ? { outcome: "cancelled", reason: value.result.reason } : { outcome: "failed", reason: value.result.reason };
   return value.outcome === "cancelled" ? { outcome: "cancelled", reason: value.message } : value.outcome === "reconciliation_required" || value.outcome === "invalid_request" || value.outcome === "conflict" || value.outcome === "storage_error" ? { outcome: "unknown", reason: value.message } : { outcome: "unknown", reason: "Worker lifecycle returned an unsupported outcome." };
 }
+function failureOutcome(diagnostic: WorkerFailureDiagnostic): "BLOCKED" | "FAILED" | "QUOTA_EXHAUSTED" | "CANCELLED" {
+  if (diagnostic.code === "quota_exhausted") return "QUOTA_EXHAUSTED";
+  if (diagnostic.code === "cancellation") return "CANCELLED";
+  if (["capability_denied", "permission_denied", "authentication", "binding_mismatch"].includes(diagnostic.code)) return "BLOCKED";
+  return "FAILED";
+}
+function capabilityFailureResult(request: WorkerRequest, execution: Awaited<ReturnType<CapabilityAwareWorkerExecutionPort["execute"]>>): WorkerResult {
+  if (execution.outcome === "allowed") return execution.value;
+  const diagnostic = execution.diagnostic;
+  return { kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: failureOutcome(diagnostic), reason: diagnostic.message, diagnostic };
+}
 
 export class ProductionRuntime {
   readonly #store: RuntimeSqliteStoreType;
@@ -130,7 +142,7 @@ export class ProductionRuntime {
     const worker: WorkerPort = { execute: async (request, signal) => {
       const value = await capabilityWorker.execute(request, signal);
       if (value.outcome === "allowed") return value.value;
-      throw new Error(`Worker execution was ${value.outcome}.`);
+      return capabilityFailureResult(request, value);
     } };
     this.#lifecycle = new WorkerLifecycleCoordinator(store, worker, { now: () => this.#clock.now() });
     const schedulerOptions: SchedulerOptions = {

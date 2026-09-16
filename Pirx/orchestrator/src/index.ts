@@ -619,6 +619,16 @@ export {
   type WorkerWorkspaceScope,
 } from "./runtime/worker-contract.js";
 export {
+  WORKER_DIAGNOSTIC_SCHEMA_VERSION,
+  WORKER_FAILURE_CODES,
+  createWorkerFailureDiagnostic,
+  isWorkerFailureError,
+  validateWorkerFailureDiagnostic,
+  WorkerFailureError,
+  type WorkerFailureCode,
+  type WorkerFailureDiagnostic,
+} from "./runtime/worker-diagnostic.js";
+export {
   CapabilityAwareWorkerExecutionPort,
   executeWorkerWithCapabilities,
   type CapabilityWorkerExecutionOutcome,

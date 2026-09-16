@@ -46,6 +46,9 @@ const input = JSON.parse(args.at(-1));
 if (process.env.PIRX_CAPTURE_FILE) fs.writeFileSync(process.env.PIRX_CAPTURE_FILE, JSON.stringify({ cwd: process.cwd(), args, input }));
 if (mode === "auth") { process.stderr.write("CLAUDE_AUTH_REQUIRED token=fixture-secret"); process.exit(1); }
 if (mode === "quota") { process.stderr.write("CLAUDE_QUOTA_EXHAUSTED"); process.exit(1); }
+if (mode === "malformed") { process.stdout.write("{not-json"); process.exit(0); }
+if (mode === "missing") { process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false })); process.exit(0); }
+if (mode === "envelope") { process.stdout.write(JSON.stringify({ type: "message", subtype: "success", is_error: false, structured_output: {} })); process.exit(0); }
 if (mode === "invalid") { process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: "not-a-worker-result" })); process.exit(0); }
 if (mode === "overflow") { process.stdout.write("x".repeat(100000)); setInterval(() => {}, 1000); }
 if (mode === "hang") { process.on("SIGTERM", () => {}); setInterval(() => {}, 1000); }
@@ -157,10 +160,11 @@ test("executes new and resumed input end to end through the capability-aware por
 test("passes bounded process failures through the adapter without provider data", async () => {
   const value = await fixture();
   try {
-    for (const [fakeMode, expected] of [["auth", "authentication_required"], ["quota", "quota_exhausted"], ["invalid", "invalid_output"]] as const) {
+    for (const [fakeMode, expected, code] of [["auth", "authentication_required", "authentication"], ["quota", "quota_exhausted", "quota_exhausted"], ["malformed", "invalid_output", "malformed_cli_envelope"], ["missing", "invalid_output", "missing_structured_output"], ["envelope", "invalid_output", "malformed_cli_envelope"], ["invalid", "invalid_output", "invalid_structured_output"]] as const) {
       const processAdapter = await adapter(value, "new", fakeMode);
       const result = await processAdapter.run(request("new", value.worktree), new AbortController().signal);
       assert.equal(result.outcome, expected);
+      assert.equal("diagnostic" in result ? result.diagnostic.code : undefined, code);
       assert.equal(JSON.stringify(result).includes("fixture-secret"), false);
     }
   } finally { await rm(value.root, { recursive: true, force: true }); }
@@ -171,15 +175,21 @@ test("bounds timeout, cancellation, and output overflow using request limits", a
   try {
     const timeoutAdapter = await adapter(value, "new", "hang");
     const timeoutRequest = { ...request("new", value.worktree), limits: { timeoutMs: 40, maxOutputBytes: 1_024, maxErrorBytes: 1_024 } };
-    assert.equal((await timeoutAdapter.run(timeoutRequest, new AbortController().signal)).outcome, "timeout");
+    const timeout = await timeoutAdapter.run(timeoutRequest, new AbortController().signal);
+    assert.equal(timeout.outcome, "timeout");
+    assert.equal("diagnostic" in timeout ? timeout.diagnostic.code : undefined, "timeout");
     const cancelAdapter = await adapter(value, "new", "delay");
     const controller = new AbortController();
     const pending = cancelAdapter.run(request("new", value.worktree), controller.signal);
     controller.abort();
-    assert.equal((await pending).outcome, "cancelled");
+    const cancelled = await pending;
+    assert.equal(cancelled.outcome, "cancelled");
+    assert.equal("diagnostic" in cancelled ? cancelled.diagnostic.code : undefined, "cancellation");
     const overflowAdapter = await adapter(value, "new", "overflow");
     const overflowRequest = { ...request("new", value.worktree), limits: { timeoutMs: 2_000, maxOutputBytes: 1_024, maxErrorBytes: 1_024 } };
-    assert.equal((await overflowAdapter.run(overflowRequest, new AbortController().signal)).outcome, "invalid_output");
+    const overflow = await overflowAdapter.run(overflowRequest, new AbortController().signal);
+    assert.equal(overflow.outcome, "invalid_output");
+    assert.equal("diagnostic" in overflow ? overflow.diagnostic.code : undefined, "invalid_structured_output");
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
 

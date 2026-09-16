@@ -1,4 +1,5 @@
 import type { AttemptId, TaskId, UtcTimestamp } from "./task-domain.js";
+import { validateWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
 
 export const CHECKPOINT_SCHEMA_VERSION = 1 as const;
 
@@ -57,6 +58,7 @@ export interface Checkpoint {
   readonly tests: readonly CheckpointTestResult[];
   readonly evidence: readonly CheckpointEvidence[];
   readonly blockingReason?: string;
+  readonly diagnostic?: WorkerFailureDiagnostic;
   readonly lastAction: string;
   readonly resumeInstruction: string;
 }
@@ -280,6 +282,8 @@ export function validateCheckpoint(value: unknown): CheckpointResult<Checkpoint>
   if (remainingWork.value.length === 0) return failure(violation("invalid_input", "remainingWork", "remainingWork must contain at least one item."));
   const blockingReason = optionalText(value.blockingReason, "blockingReason", CHECKPOINT_LIMITS.longText);
   if (blockingReason !== undefined && typeof blockingReason !== "string") return failure(blockingReason);
+  const diagnostic = value.diagnostic === undefined ? undefined : validateWorkerFailureDiagnostic(value.diagnostic);
+  if (value.diagnostic !== undefined && diagnostic === undefined) return failure(violation("invalid_input", "diagnostic", "diagnostic is malformed or unsafe."));
   const checkpoint: Checkpoint = {
     kind: "checkpoint",
     schemaVersion: CHECKPOINT_SCHEMA_VERSION,
@@ -299,6 +303,7 @@ export function validateCheckpoint(value: unknown): CheckpointResult<Checkpoint>
     tests: tests.value,
     evidence: evidenceEntries.value,
     ...(blockingReason === undefined ? {} : { blockingReason: blockingReason as string }),
+    ...(diagnostic === undefined ? {} : { diagnostic }),
     lastAction: lastAction as string,
     resumeInstruction: resumeInstruction as string,
   };

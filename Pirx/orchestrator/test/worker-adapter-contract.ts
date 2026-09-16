@@ -27,6 +27,7 @@ export interface WorkerAdapterContractFactory {
 export interface WorkerAdapterContractSuiteOptions {
   readonly name: string;
   readonly factory: () => WorkerAdapterContractFactory;
+  readonly normalizesInvalidResults?: boolean;
 }
 
 const taskId = "adapter-contract-task" as TaskId;
@@ -85,7 +86,8 @@ export function registerWorkerAdapterContractSuite(options: WorkerAdapterContrac
     const factory = options.factory();
     for (const scenario of ["wrong_identity", "wrong_branch", "malformed", "oversized"] as const) {
       const result = await invokeWorker(factory.create(scenario), value, new AbortController().signal);
-      assert.equal(result.ok, false, scenario);
+      assert.equal(result.ok, options.normalizesInvalidResults === true, scenario);
+      if (options.normalizesInvalidResults === true && result.ok) assert.equal(result.value.outcome, scenario === "wrong_identity" || scenario === "wrong_branch" ? "BLOCKED" : "FAILED", scenario);
     }
     assert.equal(JSON.stringify(await invokeWorker(factory.create("malformed"), value, new AbortController().signal)).includes("provider payload"), false);
     assert.equal(factory.invocationCount(), 5);
@@ -95,7 +97,8 @@ export function registerWorkerAdapterContractSuite(options: WorkerAdapterContrac
     const value = request();
     const factory = options.factory();
     const thrown = await invokeWorker(factory.create("throw"), value, new AbortController().signal);
-    assert.equal(thrown.ok, false);
+    assert.equal(thrown.ok, true);
+    if (thrown.ok) assert.equal("diagnostic" in thrown.value ? thrown.value.diagnostic.code : undefined, "adapter_failure");
     const controller = new AbortController(); controller.abort();
     const cancelled = await invokeWorker(factory.create("CODE_PUSHED"), value, controller.signal);
     assert.equal(cancelled.ok, false);

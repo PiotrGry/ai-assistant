@@ -57,6 +57,14 @@ test("maps the complete code-worker grant to a bounded Claude profile", () => {
   assert.equal(args[args.indexOf("--max-turns") + 1], "16");
 });
 
+test("keeps the Claude response schema within the CLI-supported object subset", () => {
+  const schema = buildWorkerResultSchema(request()) as { readonly required: readonly string[]; readonly properties: Record<string, unknown> };
+  assert.equal(schema.required.includes("outcome"), true);
+  assert.equal("branch" in schema.properties, true);
+  assert.equal("finalCommit" in schema.properties, true);
+  assert.equal("diagnostic" in schema.properties, true);
+});
+
 test("removing one capability removes only its corresponding authority", () => {
   const all = ["repository.read", "repository.write", "tests.run", "git.commit", "git.push_assigned_branch"] as const;
   for (const missing of all) {
