@@ -54,7 +54,7 @@ const KNOWN_CAPABILITY_SET = new Set<string>(CAPABILITY_VOCABULARY);
 const SHELL_META = /[\u0000-\u001f\u007f;&|<>`$(){}[\]\\!#*?~'"\n\r]/u;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$/u;
 const REMOTE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-const SAFE_COMMAND = /^(?:pnpm|npm|yarn|bun|node|npx|python|python3|pytest|cargo|go|make)(?: [A-Za-z0-9_./:@=+,-]+)*$/u;
+const SAFE_COMMAND = /^(?:pnpm|npm|yarn|bun|node|npx|python|python3|pytest|uv|cargo|go|make)(?: [A-Za-z0-9_./:@=+,-]+)*$/u;
 
 function failure(message: string): ClaudeCodeWorkerProfileResult { return { ok: false, message: message.slice(0, 256) }; }
 function boundedPath(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value.length <= CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxPathCharacters && isAbsolute(value) && !SHELL_META.test(value); }

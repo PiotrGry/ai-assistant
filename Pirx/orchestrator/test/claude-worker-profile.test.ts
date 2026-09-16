@@ -57,6 +57,12 @@ test("maps the complete code-worker grant to a bounded Claude profile", () => {
   assert.equal(args[args.indexOf("--max-turns") + 1], "16");
 });
 
+test("allows an explicitly configured uv test command", () => {
+  const result = buildClaudeCodeWorkerProfile(request(), { repositoryRoot: policy.repositoryRoot, assignedWorktree: worktree, remoteName: "origin", testCommands: ["uv run pytest tests/test_controlled.py -q"] });
+  assert.equal(result.ok, true);
+  if (result.ok) assert.ok(result.value.allowedTools.includes("Bash(uv run pytest tests/test_controlled.py -q)"));
+});
+
 test("keeps the Claude response schema within the CLI-supported object subset", () => {
   const schema = buildWorkerResultSchema(request()) as { readonly required: readonly string[]; readonly properties: Record<string, unknown> };
   assert.equal(schema.required.includes("outcome"), true);
