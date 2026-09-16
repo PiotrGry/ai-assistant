@@ -107,10 +107,13 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
     tools.push("Bash");
     if (parsedCapabilities.includes("tests.run")) for (const command of policy.testCommands) allow(`Bash(${command})`, allowed);
     if (parsedCapabilities.includes("git.commit")) {
-      for (const command of ["git status --short --branch", "git diff --stat", "git diff", "git add -A"]) allow(`Bash(${command})`, allowed);
-      allow(`Bash(git commit -m \"${commitMessage}\")`, allowed);
+      for (const rule of ["Bash(git status:*)", "Bash(git diff:*)", "Bash(git add:*)", "Bash(git commit -m:*)"]) allow(rule, allowed);
+      for (const rule of [`Bash(git -C ${assignedWorktree} status:*)`, `Bash(git -C ${assignedWorktree} diff:*)`, `Bash(git -C ${assignedWorktree} add:*)`, `Bash(git -C ${assignedWorktree} commit -m:*)`]) allow(rule, allowed);
     }
-    if (parsedCapabilities.includes("git.push_assigned_branch")) allow(`Bash(git push ${policy.remoteName} HEAD:refs/heads/${request.workspace.branch})`, allowed);
+    if (parsedCapabilities.includes("git.push_assigned_branch")) {
+      allow(`Bash(git push ${policy.remoteName} HEAD:refs/heads/${request.workspace.branch})`, allowed);
+      allow(`Bash(git -C ${assignedWorktree} push ${policy.remoteName} HEAD:refs/heads/${request.workspace.branch})`, allowed);
+    }
   }
   for (const tool of ["Read", "Write", "Edit", "Glob", "Grep"]) if (!tools.includes(tool)) denied.push(tool);
   if (!bashNeeded) denied.push("Bash");
