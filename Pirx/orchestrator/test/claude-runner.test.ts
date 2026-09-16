@@ -100,7 +100,7 @@ test("builds the no-tools dontAsk JSON-schema invocation", () => {
   assert.deepEqual(args.slice(0, 13), [
     "-p", "--tools", "", "--disallowedTools", "mcp__*",
     "--permission-mode", "dontAsk", "--disable-slash-commands",
-    "--no-session-persistence", "--max-turns", "1", "--output-format", "json",
+    "--no-session-persistence", "--max-turns", "2", "--output-format", "json",
   ]);
   assert.equal(args.at(-1)?.includes('"hello world"'), true);
   assert.equal(args.at(-1)?.includes("request-id"), true);

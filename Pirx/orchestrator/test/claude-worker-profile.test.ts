@@ -97,7 +97,7 @@ test("keeps receipt tools disabled and uses the supported non-interactive permis
   const { buildClaudeArguments } = await import("../src/index.js");
   const args = buildClaudeArguments("receipt");
   assert.equal(args[args.indexOf("--tools") + 1], "");
-  assert.equal(args[args.indexOf("--max-turns") + 1], "1");
+  assert.equal(args[args.indexOf("--max-turns") + 1], "2");
   assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
   assert.equal(args.includes("--restricted"), false);
   assert.equal(args.includes("--permission-prompts"), false);

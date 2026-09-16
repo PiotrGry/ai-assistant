@@ -140,7 +140,7 @@ export function buildClaudeArguments(requestId: string): readonly string[] {
   return [
     "-p", "--tools", "", "--disallowedTools", "mcp__*",
     "--permission-mode", "dontAsk", "--disable-slash-commands",
-    "--no-session-persistence", "--max-turns", "1", "--output-format", "json",
+    "--no-session-persistence", "--max-turns", "2", "--output-format", "json",
     "--json-schema", JSON.stringify(roundTripSchema(requestId)),
     `Acknowledge the literal payload "hello world". Use requestId "${requestId}" exactly. Return only the structured response required by the JSON schema.`,
   ];
@@ -154,7 +154,7 @@ export function buildClaudeHandoffArguments(handoffId: string, envelope: unknown
   return [
     "-p", "--tools", "", "--disallowedTools", "mcp__*",
     "--permission-mode", "dontAsk", "--disable-slash-commands",
-    "--no-session-persistence", "--max-turns", "1", "--output-format", "json",
+    "--no-session-persistence", "--max-turns", "2", "--output-format", "json",
     "--json-schema", JSON.stringify(roundTripSchema(handoffId)),
     `Acknowledge receipt of this structured failure handoff. Use handoff ID "${handoffId}" exactly. Return only the structured response required by the JSON schema. Payload: ${serialized}`,
   ];
@@ -165,7 +165,7 @@ export function buildClaudeStructuredArguments(requestId: string, prompt: string
   return [
     "-p", "--tools", "", "--disallowedTools", "mcp__*",
     "--permission-mode", "dontAsk", "--disable-slash-commands",
-    "--no-session-persistence", "--max-turns", "1", "--output-format", "json",
+    "--no-session-persistence", "--max-turns", "2", "--output-format", "json",
     "--json-schema", schema, prompt,
   ];
 }
