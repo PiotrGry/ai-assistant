@@ -107,8 +107,8 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
     tools.push("Bash");
     if (parsedCapabilities.includes("tests.run")) for (const command of policy.testCommands) allow(`Bash(${command})`, allowed);
     if (parsedCapabilities.includes("git.commit")) {
-      for (const rule of ["Bash(git status:*)", "Bash(git diff:*)", "Bash(git add:*)", "Bash(git commit -m:*)"]) allow(rule, allowed);
-      for (const rule of [`Bash(git -C ${assignedWorktree} status:*)`, `Bash(git -C ${assignedWorktree} diff:*)`, `Bash(git -C ${assignedWorktree} add:*)`, `Bash(git -C ${assignedWorktree} commit -m:*)`]) allow(rule, allowed);
+      for (const rule of ["Bash(git status:*)", "Bash(git diff:*)", "Bash(git add:*)", "Bash(git commit -m:*)", "Bash(git rev-parse HEAD)"]) allow(rule, allowed);
+      for (const rule of [`Bash(git -C ${assignedWorktree} status:*)`, `Bash(git -C ${assignedWorktree} diff:*)`, `Bash(git -C ${assignedWorktree} add:*)`, `Bash(git -C ${assignedWorktree} commit -m:*)`, `Bash(git -C ${assignedWorktree} rev-parse HEAD)`]) allow(rule, allowed);
     }
     if (parsedCapabilities.includes("git.push_assigned_branch")) {
       allow(`Bash(git push ${policy.remoteName} HEAD:refs/heads/${request.workspace.branch})`, allowed);
