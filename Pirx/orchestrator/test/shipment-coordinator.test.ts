@@ -6,6 +6,9 @@ import test from "node:test";
 
 import {
   ShipmentCycleCoordinator,
+  CiCorrelationService,
+  CiFailureEvidenceService,
+  GitHubFeaturePullRequestService,
   RuntimeSqliteStore,
   createTask,
   success,
@@ -75,6 +78,27 @@ async function fixture(): Promise<{ directory: string; store: RuntimeSqliteStore
 async function dispose(value: { directory: string; store: RuntimeSqliteStore }): Promise<void> { try { value.store.close(); } finally { await rm(value.directory, { recursive: true, force: true }); } }
 function request(attemptId: AttemptId = attempt1, expectedHeadSha = sha1, eventId = "shipment-event-1") { return { taskId, attemptId, eventId, correlationId: "shipment-correlation-" + eventId, repository: { owner: "PiotrGry", repository: "ai-assistant" }, headBranch: branch, baseBranch: "develop", expectedHeadSha, provider: "github-actions", workflowName: "Required gate", mergePolicy: policy, now: attemptId === attempt1 ? t1 : t2 }; }
 
+async function seedPartialCycle(value: Awaited<ReturnType<typeof fixture>>, state: "started" | "pr_correlated" | "ci_failed" | "evidence_collected", eventId: string): Promise<void> {
+  const current = request(attempt1, sha1, eventId);
+  const started = value.store.shipmentCycles.start({ schemaVersion: 1, taskId, attemptId: attempt1, eventId, correlationId: current.correlationId, repository, headBranch: branch, baseBranch: "develop", expectedHeadSha: sha1, provider: "github-actions", workflowName: "Required gate", state: "started", message: "Shipment cycle started.", createdAt: t1, updatedAt: t1, version: 1 });
+  if (started.outcome !== "success") throw new Error(started.message);
+  if (state === "started") return;
+  const pr = await new GitHubFeaturePullRequestService(value.store, value.github).createOrReuse({ taskId, attemptId: attempt1, repository: current.repository, baseBranch: "develop", expectedHeadSha: sha1, correlationId: current.correlationId });
+  if (pr.pullRequest === undefined) throw new Error("partial-cycle PR fixture failed");
+  const correlated = value.store.shipmentCycles.advance(taskId, attempt1, { state: "pr_correlated", pullRequestNumber: pr.pullRequest.number, pullRequestUrl: pr.pullRequest.url, message: "Feature PR is durably correlated." }, t1);
+  if (correlated.outcome !== "success") throw new Error(correlated.message);
+  if (state === "pr_correlated") return;
+  const ci = await new CiCorrelationService(value.store, value.ci).observe({ taskId, attemptId: attempt1, repository, headBranch: branch, baseBranch: "develop", featurePullRequestNumber: pr.pullRequest.number, expectedHeadSha: sha1, provider: "github-actions", requiredWorkflowName: "Required gate", correlationId: current.correlationId, now: t1 });
+  if (ci.outcome !== "observed" || ci.state !== "failed") throw new Error("partial-cycle CI fixture failed");
+  const failed = value.store.shipmentCycles.advance(taskId, attempt1, { state: "ci_failed", ...(ci.record.providerRunId === undefined ? {} : { providerRunId: ci.record.providerRunId }), message: "Exact CI failure was durably correlated." }, t1);
+  if (failed.outcome !== "success") throw new Error(failed.message);
+  if (state === "ci_failed") return;
+  const evidence = await new CiFailureEvidenceService(value.store, value.ci).collect({ taskId, attemptId: attempt1, correlationId: current.correlationId, now: t1 });
+  if ((evidence.outcome !== "collected" && evidence.outcome !== "partial") || evidence.record === undefined) throw new Error("partial-cycle evidence fixture failed");
+  const collected = value.store.shipmentCycles.advance(taskId, attempt1, { state: "evidence_collected", evidenceDigest: evidence.record.evidenceDigest, message: "Bounded CI evidence was durably collected." }, t1);
+  if (collected.outcome !== "success") throw new Error(collected.message);
+}
+
 test("runs failure branch through PR, exact CI, bounded evidence and exactly one successor Attempt", async () => {
   const value = await fixture();
   try {
@@ -90,6 +114,39 @@ test("replays failure event without another PR, CI read, evidence collection or 
   try {
     const coordinator = new ShipmentCycleCoordinator(value.store, value.github, value.ci); const first = await coordinator.run(request()); assert.equal(first.outcome, "retry_created");
     const replay = await coordinator.run(request()); assert.equal(replay.outcome, "retry_created"); assert.equal(replay.successorAttemptId, first.successorAttemptId); assert.equal(value.github.createCalls, 1); assert.equal(value.ci.resolveCalls, 1); assert.equal(value.ci.evidenceCalls, 1);
+  } finally { await dispose(value); }
+});
+
+for (const state of ["started", "pr_correlated", "ci_failed", "evidence_collected"] as const) {
+  test(`resumes a durable ${state} cycle after restart without duplicating effects`, async () => {
+    const value = await fixture();
+    try {
+      await seedPartialCycle(value, state, "shipment-restart-" + state);
+      const beforeCreate = value.github.createCalls; const beforeResolve = value.ci.resolveCalls; const beforeEvidence = value.ci.evidenceCalls;
+      const output = await new ShipmentCycleCoordinator(value.store, value.github, value.ci).run(request(attempt1, sha1, "shipment-restart-" + state));
+      assert.equal(output.outcome, "retry_created", JSON.stringify(output));
+      assert.equal(value.github.createCalls, beforeCreate + (state === "started" ? 1 : 0));
+      assert.equal(value.ci.resolveCalls, beforeResolve + (state === "started" || state === "pr_correlated" ? 1 : 0));
+      assert.equal(value.ci.evidenceCalls, beforeEvidence + (state === "started" || state === "pr_correlated" || state === "ci_failed" ? 1 : 0));
+      const history = value.store.attempts.listByTask(taskId); assert.equal(history.outcome, "success"); if (history.outcome === "success") assert.equal(history.value.length, 2);
+      const replay = await new ShipmentCycleCoordinator(value.store, value.github, value.ci).run(request(attempt1, sha1, "shipment-restart-" + state));
+      assert.equal(replay.outcome, "retry_created"); assert.equal(replay.successorAttemptId, output.successorAttemptId);
+      assert.equal(value.github.createCalls, beforeCreate + (state === "started" ? 1 : 0)); assert.equal(value.ci.resolveCalls, beforeResolve + (state === "started" || state === "pr_correlated" ? 1 : 0)); assert.equal(value.ci.evidenceCalls, beforeEvidence + (state === "started" || state === "pr_correlated" || state === "ci_failed" ? 1 : 0));
+    } finally { await dispose(value); }
+  });
+}
+
+test("fails closed for an incomplete or conflicting durable partial cycle", async () => {
+  const value = await fixture();
+  try {
+    await seedPartialCycle(value, "started", "shipment-incomplete");
+    const incomplete = value.store.shipmentCycles.advance(taskId, attempt1, { state: "pr_correlated", message: "Feature PR is durably correlated." }, t1);
+    assert.equal(incomplete.outcome, "success");
+    const output = await new ShipmentCycleCoordinator(value.store, value.github, value.ci).run(request(attempt1, sha1, "shipment-incomplete"));
+    assert.equal(output.outcome, "reconciliation_required"); assert.equal(value.github.createCalls, 0); assert.equal(value.ci.resolveCalls, 0); assert.equal(value.ci.evidenceCalls, 0);
+
+    const conflict = await new ShipmentCycleCoordinator(value.store, value.github, value.ci).run({ ...request(attempt1, sha1, "shipment-incomplete"), correlationId: "different-correlation" });
+    assert.equal(conflict.outcome, "reconciliation_required"); assert.equal(value.github.createCalls, 0); assert.equal(value.ci.resolveCalls, 0);
   } finally { await dispose(value); }
 });
 

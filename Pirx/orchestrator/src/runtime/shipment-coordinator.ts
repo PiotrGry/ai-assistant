@@ -92,31 +92,59 @@ export class ShipmentCycleCoordinator {
     const task = this.#store.tasks.get(request.taskId); const attempt = this.#store.attempts.get(request.attemptId);
     if (task.outcome !== "success" || attempt.outcome !== "success" || attempt.value.state !== "terminal" || attempt.value.taskId !== request.taskId || attempt.value.branch !== request.headBranch || attempt.value.finalCommit !== request.expectedHeadSha || attempt.value.result !== "CODE_PUSHED") return result(request, "stale_or_conflicting_evidence", "Shipment requires the exact terminal CODE_PUSHED Attempt.");
     const existing = this.#store.shipmentCycles.getByEvent(request.eventId);
-    if (existing.outcome === "success") return this.#fromRecord(existing.value);
-    if (existing.outcome !== "not_found") return result(request, "reconciliation_required", existing.message);
-    const started = this.#store.shipmentCycles.start({ schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, eventId: request.eventId, correlationId: request.correlationId, repository: `${request.repository.owner}/${request.repository.repository}`, headBranch: request.headBranch, baseBranch: request.baseBranch, expectedHeadSha: request.expectedHeadSha, provider: request.provider, workflowName: request.workflowName, state: "started", message: "Shipment cycle started.", createdAt: request.now, updatedAt: request.now, version: 1 });
-    if (started.outcome !== "success") return result(request, "reconciliation_required", started.message);
+    let cycle: ShipmentCycleRecord;
+    if (existing.outcome === "success") {
+      if (existing.value.outcome !== undefined) return this.#fromRecord(existing.value);
+      if (!this.#sameIdentity(existing.value, request)) return result(request, "reconciliation_required", "Stored shipment cycle identity conflicts with the resumed request.");
+      cycle = existing.value;
+    } else if (existing.outcome === "not_found") {
+      const started = this.#store.shipmentCycles.start({ schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, eventId: request.eventId, correlationId: request.correlationId, repository: `${request.repository.owner}/${request.repository.repository}`, headBranch: request.headBranch, baseBranch: request.baseBranch, expectedHeadSha: request.expectedHeadSha, provider: request.provider, workflowName: request.workflowName, state: "started", message: "Shipment cycle started.", createdAt: request.now, updatedAt: request.now, version: 1 });
+      if (started.outcome !== "success") return result(request, "reconciliation_required", started.message);
+      cycle = started.value;
+    } else return result(request, "reconciliation_required", existing.message);
+
+    if (!["started", "pr_correlated", "ci_failed", "evidence_collected", "ci_succeeded"].includes(cycle.state)) return result(request, "reconciliation_required", "Stored shipment cycle is not safely resumable.");
+    if (cycle.state !== "started" && (cycle.pullRequestNumber === undefined || cycle.pullRequestUrl === undefined)) return result(request, "reconciliation_required", "Stored shipment cycle is missing its feature pull request identity.");
     const pr = await this.#pullRequests.createOrReuse({ taskId: request.taskId, attemptId: request.attemptId, repository: request.repository, baseBranch: request.baseBranch, expectedHeadSha: request.expectedHeadSha, correlationId: request.correlationId, ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }), ...(request.signal === undefined ? {} : { signal: request.signal }) });
     if (!['created', 'reused', 'replayed', 'reconciled'].includes(pr.outcome) || pr.pullRequest === undefined) return this.#finish(request, remoteResult(request, pr), "blocked");
-    this.#store.shipmentCycles.advance(request.taskId, request.attemptId, { state: "pr_correlated", pullRequestNumber: pr.pullRequest.number, pullRequestUrl: pr.pullRequest.url, message: "Feature PR is durably correlated." }, request.now);
+    if (cycle.state === "started") {
+      const correlated = this.#store.shipmentCycles.advance(request.taskId, request.attemptId, { state: "pr_correlated", pullRequestNumber: pr.pullRequest.number, pullRequestUrl: pr.pullRequest.url, message: "Feature PR is durably correlated." }, request.now);
+      if (correlated.outcome !== "success") return result(request, "reconciliation_required", correlated.message);
+      cycle = correlated.value;
+    } else if (cycle.pullRequestNumber !== pr.pullRequest.number || cycle.pullRequestUrl !== pr.pullRequest.url) return result(request, "reconciliation_required", "Stored shipment cycle PR identity no longer matches durable PR provenance.");
     const ci = await this.#ci.observe({ taskId: request.taskId, attemptId: request.attemptId, repository: `${request.repository.owner}/${request.repository.repository}`, headBranch: request.headBranch, baseBranch: request.baseBranch, featurePullRequestNumber: pr.pullRequest.number, expectedHeadSha: request.expectedHeadSha, provider: request.provider, requiredWorkflowName: request.workflowName, correlationId: request.correlationId, now: request.now, ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }), ...(request.signal === undefined ? {} : { signal: request.signal }) });
     if (ci.outcome !== "observed" && ci.outcome !== "replayed") return this.#finish(request, ciOutcome(request, ci), "reconciliation_required");
     if (ci.state !== "success" && ci.state !== "failed") return this.#finish(request, ciOutcome(request, ci), "blocked");
     if (ci.state === "failed") {
-      this.#store.shipmentCycles.advance(request.taskId, request.attemptId, { state: "ci_failed", ...(ci.record.providerRunId === undefined ? {} : { providerRunId: ci.record.providerRunId }), message: "Exact CI failure was durably correlated." }, request.now);
+      if (cycle.state !== "ci_failed" && cycle.state !== "evidence_collected") {
+        const failed = this.#store.shipmentCycles.advance(request.taskId, request.attemptId, { state: "ci_failed", ...(ci.record.providerRunId === undefined ? {} : { providerRunId: ci.record.providerRunId }), message: "Exact CI failure was durably correlated." }, request.now);
+        if (failed.outcome !== "success") return result(request, "reconciliation_required", failed.message);
+        cycle = failed.value;
+      }
       const evidence = await this.#evidence.collect({ taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, now: request.now, ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }), ...(request.signal === undefined ? {} : { signal: request.signal }) });
       if (evidence.outcome !== "collected" && evidence.outcome !== "partial" && evidence.outcome !== "replayed") return this.#finish(request, result(request, evidence.outcome === "rate_limited" ? "rate_limited" : evidence.outcome === "stale" || evidence.outcome === "conflict" ? "stale_or_conflicting_evidence" : "reconciliation_required", evidence.message), "blocked");
-      this.#store.shipmentCycles.advance(request.taskId, request.attemptId, { state: "evidence_collected", evidenceDigest: evidence.record.evidenceDigest, message: "Bounded CI evidence was durably collected." }, request.now);
+      if (cycle.state !== "evidence_collected") {
+        const collected = this.#store.shipmentCycles.advance(request.taskId, request.attemptId, { state: "evidence_collected", evidenceDigest: evidence.record.evidenceDigest, message: "Bounded CI evidence was durably collected." }, request.now);
+        if (collected.outcome !== "success") return result(request, "reconciliation_required", collected.message);
+        cycle = collected.value;
+      } else if (cycle.evidenceDigest !== evidence.record.evidenceDigest) return result(request, "reconciliation_required", "Stored shipment cycle evidence does not match durable CI evidence.");
       const history = this.#store.attempts.listByTask(request.taskId); if (history.outcome !== "success") return this.#finish(request, result(request, "reconciliation_required", history.message), "reconciliation_required");
       if ((history.value.find((item) => item.id === request.attemptId)?.ordinal ?? 1) > 1) return this.#finish(request, result(request, "retry_ci_failed", "A retry Attempt failed CI; automatic third Attempt creation is disabled."), "blocked");
       const retry = this.#retry.create({ taskId: request.taskId, attemptId: request.attemptId, failureEventId: request.failureEventId ?? request.eventId, evidenceDigest: evidence.record.evidenceDigest, now: request.now });
       if (retry.outcome !== "created" && retry.outcome !== "already_retried") return this.#finish(request, result(request, retry.outcome === "reconciliation_required" ? "reconciliation_required" : "stale_or_conflicting_evidence", retry.message), "blocked");
       return this.#finish(request, result(request, "retry_created", retry.message, { evidenceDigest: evidence.record.evidenceDigest, ...(retry.successorAttemptId === undefined ? {} : { successorAttemptId: retry.successorAttemptId }) }), "retry_created");
     }
-    this.#store.shipmentCycles.advance(request.taskId, request.attemptId, { state: "ci_succeeded", ...(ci.record.providerRunId === undefined ? {} : { providerRunId: ci.record.providerRunId }), message: "Exact CI success was durably correlated." }, request.now);
+    if (cycle.state !== "ci_succeeded") {
+      const succeeded = this.#store.shipmentCycles.advance(request.taskId, request.attemptId, { state: "ci_succeeded", ...(ci.record.providerRunId === undefined ? {} : { providerRunId: ci.record.providerRunId }), message: "Exact CI success was durably correlated." }, request.now);
+      if (succeeded.outcome !== "success") return result(request, "reconciliation_required", succeeded.message);
+    }
     const merged = await this.#merge.merge({ taskId: request.taskId, attemptId: request.attemptId, policy: request.mergePolicy, correlationId: request.correlationId, now: request.now, ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }), ...(request.signal === undefined ? {} : { signal: request.signal }) });
     if (merged.outcome !== "merged" && merged.outcome !== "replayed") return this.#finish(request, result(request, merged.outcome === "rate_limited" ? "rate_limited" : merged.outcome === "reconciliation_required" ? "reconciliation_required" : merged.outcome === "stale" ? "stale_or_conflicting_evidence" : merged.outcome === "authorization_required" ? "worker_authentication_required" : "policy_blocked", merged.message, merged.pullRequest === undefined ? {} : { pullRequest: merged.pullRequest }), "blocked");
     return this.#finish(request, result(request, "recovery_success", merged.message, { ...(merged.mergeSha === undefined ? {} : { mergeSha: merged.mergeSha }), ...(merged.pullRequest === undefined ? {} : { pullRequest: merged.pullRequest }), ...(ci.record.providerRunId === undefined ? {} : { providerRunId: ci.record.providerRunId }) }), "recovery_success");
+  }
+
+  #sameIdentity(record: ShipmentCycleRecord, request: ShipmentCycleRequest): boolean {
+    return record.taskId === request.taskId && record.attemptId === request.attemptId && record.eventId === request.eventId && record.correlationId === request.correlationId && record.repository === `${request.repository.owner}/${request.repository.repository}` && record.headBranch === request.headBranch && record.baseBranch === request.baseBranch && record.expectedHeadSha === request.expectedHeadSha && record.provider === request.provider && record.workflowName === request.workflowName;
   }
 
   #finish(request: ShipmentCycleRequest, output: ShipmentCycleResult, state: ShipmentCycleState): ShipmentCycleResult { this.#store.shipmentCycles.advance(request.taskId, request.attemptId, { state, outcome: output.outcome, ...(output.successorAttemptId === undefined ? {} : { successorAttemptId: output.successorAttemptId }), ...(output.evidenceDigest === undefined ? {} : { evidenceDigest: output.evidenceDigest }), ...(output.mergeSha === undefined ? {} : { mergeSha: output.mergeSha }), ...(output.providerRunId === undefined ? {} : { providerRunId: output.providerRunId }), ...(output.pullRequest === undefined ? {} : { pullRequestNumber: output.pullRequest.number, pullRequestUrl: output.pullRequest.url }), message: output.message }, request.now); return output; }
