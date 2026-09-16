@@ -11,7 +11,11 @@ const SECRET_PATTERN = /(?:bearer\s+|authorization\s*:|password\s*=|token\s*=|se
 export type WorkerLifecycleOutcome = "terminal_recorded" | "replayed" | "projection_pending" | "reconciliation_required" | "invalid_request" | "conflict" | "cancelled" | "storage_error";
 export interface WorkerLifecycleEvent { readonly eventId: string; readonly taskId: string; readonly attemptId: string; readonly sequence: number; readonly eventType: "attempt_started" | "attempt_result"; readonly timestamp: UtcTimestamp; readonly summary: string; readonly branch?: string; readonly commit?: string; }
 export interface WorkerLifecycleProjectionPort { publish(event: WorkerLifecycleEvent): Promise<{ readonly outcome: string }> | { readonly outcome: string }; }
-export interface WorkerLifecycleOptions { readonly now?: () => UtcTimestamp; readonly projection?: WorkerLifecycleProjectionPort; }
+export interface WorkerLifecycleOptions {
+  readonly now?: () => UtcTimestamp;
+  readonly projection?: WorkerLifecycleProjectionPort;
+  readonly requireWorkspaceOwnership?: boolean;
+}
 export type WorkerLifecycleResult =
   | { readonly outcome: "terminal_recorded" | "replayed" | "projection_pending"; readonly taskId: string; readonly attemptId: string; readonly task: TaskSnapshot; readonly attempt: AttemptSnapshot; readonly result: WorkerResult; readonly checkpointId?: string }
   | { readonly outcome: "reconciliation_required" | "invalid_request" | "conflict" | "cancelled" | "storage_error"; readonly taskId: string; readonly attemptId: string; readonly message: string };
@@ -67,9 +71,10 @@ export class WorkerLifecycleCoordinator {
   readonly #worker: WorkerPort;
   readonly #now: () => UtcTimestamp;
   readonly #projection: WorkerLifecycleProjectionPort | undefined;
+  readonly #requireWorkspaceOwnership: boolean;
 
   public constructor(store: RuntimeSqliteStore, worker: WorkerPort, options: WorkerLifecycleOptions = {}) {
-    this.#store = store; this.#worker = worker; this.#now = options.now ?? nowUtc; this.#projection = options.projection;
+    this.#store = store; this.#worker = worker; this.#now = options.now ?? nowUtc; this.#projection = options.projection; this.#requireWorkspaceOwnership = options.requireWorkspaceOwnership ?? false;
   }
 
   public async execute(request: unknown, signal: AbortSignal): Promise<WorkerLifecycleResult> {
@@ -107,13 +112,25 @@ export class WorkerLifecycleCoordinator {
   }
 
   #recordTerminal(value: WorkerRequest, result: WorkerResult) {
-    return this.#store.transaction(({ tasks, attempts, checkpoints }) => {
+    return this.#store.transaction(({ tasks, attempts, checkpoints, workspaces }) => {
       const task = tasks.get(value.taskId); const attempt = attempts.get(value.attemptId);
       if (task.outcome !== "success" || attempt.outcome !== "success") return { outcome: "storage_error" as const, message: "Assigned Task or Attempt could not be read while recording the result." };
       if (attempt.value.state !== "running") return { outcome: "conflict" as const, message: "Attempt changed before its terminal result was persisted." };
       const identity = requestIdentity(value, attempt.value);
       if (identity !== undefined) return { outcome: "conflict" as const, message: identity };
       const at = this.#now();
+      if (result.outcome === "CODE_PUSHED") {
+        const ownership = workspaces.getByTaskAttempt(task.value.id, attempt.value.id);
+        if (ownership.outcome === "success") {
+          if (ownership.value.repository !== value.capabilityGrant.resourceScope.repository || ownership.value.assignedBranch !== result.branch || ownership.value.worktreePath !== value.workspace.worktree) return { outcome: "conflict" as const, message: "Workspace ownership does not match the verified CODE_PUSHED result." };
+          if (ownership.value.currentRevision !== result.finalCommit) {
+            const updatedOwnership = workspaces.updateCurrentRevision(attempt.value.id, ownership.value.ownershipToken, ownership.value.version, result.finalCommit, at);
+            if (updatedOwnership.outcome !== "success") return updatedOwnership;
+          }
+        } else if (this.#requireWorkspaceOwnership || ownership.outcome !== "not_found") {
+          return { outcome: ownership.outcome === "conflict" ? "conflict" as const : "storage_error" as const, message: "Verified CODE_PUSHED result has no matching active workspace ownership." };
+        }
+      }
       const nextAttempt = transitionAttempt(attempt.value, "running", result.outcome === "CODE_PUSHED" ? { type: "finish", result: "CODE_PUSHED", branch: result.branch, finalCommit: result.finalCommit, currentCommit: result.finalCommit, progress: "worker invocation completed" } : { type: "finish", result: result.outcome, blockingReason: result.reason, ...(result.diagnostic === undefined ? {} : { diagnostic: result.diagnostic }), progress: "worker invocation completed" }, at);
       if (!nextAttempt.ok) return { outcome: "conflict" as const, message: nextAttempt.error.message };
       const storedAttempt = attempts.update(nextAttempt.value, "running");

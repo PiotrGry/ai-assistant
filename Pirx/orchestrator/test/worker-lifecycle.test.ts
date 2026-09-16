@@ -62,6 +62,8 @@ test("records CODE_PUSHED once, keeps the Task incomplete, and replays the same 
   let calls = 0;
   try {
     const input = request(value.store);
+    const ownership = value.store.workspaces.claim({ taskId, attemptId, repository: "PiotrGry/ai-assistant", repositoryRoot: "/repo", assignedBranch: branch, worktreePath: worktree, expectedBaseRevision: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", acquiredAt: t0 });
+    assert.equal(ownership.outcome, "success");
     const worker: WorkerPort = { execute: async () => { calls += 1; return result(input, "CODE_PUSHED"); } };
     const coordinator = new WorkerLifecycleCoordinator(value.store, worker, { now: () => t1 });
     const first = await coordinator.execute(input, new AbortController().signal);
@@ -74,12 +76,33 @@ test("records CODE_PUSHED once, keeps the Task incomplete, and replays the same 
       assert.equal(first.attempt.finalCommit, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
       assert.equal(first.task.state, "in_progress");
     }
+    const updatedOwnership = value.store.workspaces.getByAttempt(attemptId);
+    assert.equal(updatedOwnership.outcome, "success");
+    if (updatedOwnership.outcome === "success") {
+      assert.equal(updatedOwnership.value.currentRevision, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+      assert.equal(updatedOwnership.value.version, 2);
+    }
     const replay = await coordinator.execute(input, new AbortController().signal);
     assert.equal(replay.outcome, "replayed");
     assert.equal(calls, 1);
     assert.deepEqual(value.store.attempts.listByTask(taskId).outcome, "success");
     const current = value.store.attempts.currentByTask(taskId);
     assert.equal(current.outcome, "not_found");
+  } finally { value.store.close(); await rm(value.directory, { recursive: true, force: true }); }
+});
+
+test("rolls back CODE_PUSHED when production requires missing workspace ownership", async () => {
+  const value = await storeFixture();
+  try {
+    const input = request(value.store);
+    const coordinator = new WorkerLifecycleCoordinator(value.store, { execute: async () => result(input, "CODE_PUSHED") }, { now: () => t1, requireWorkspaceOwnership: true });
+    const recorded = await coordinator.execute(input, new AbortController().signal);
+    assert.equal(recorded.outcome, "storage_error");
+    const attempt = value.store.attempts.get(attemptId);
+    assert.equal(attempt.outcome, "success");
+    if (attempt.outcome === "success") {
+      assert.equal(attempt.value.state, "running");
+    }
   } finally { value.store.close(); await rm(value.directory, { recursive: true, force: true }); }
 });
 

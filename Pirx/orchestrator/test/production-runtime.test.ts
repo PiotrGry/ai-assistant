@@ -50,7 +50,12 @@ test("composes selection, Lease, Attempt, workspace, capability, worker lifecycl
     const attempts = value.store.attempts.listByTask(taskId); assert.equal(attempts.outcome, "success");
     assert.equal(attempts.value.length, 1); assert.equal(attempts.value[0]?.state, "terminal"); assert.equal(attempts.value[0]?.result, "CODE_PUSHED");
     assert.equal(value.store.leases.getActiveByWorker("pirx-worker").outcome, "not_found");
-    assert.equal(value.store.workspaces.getByAttempt(attempts.value[0]!.id).outcome, "success");
+    const ownership = value.store.workspaces.getByAttempt(attempts.value[0]!.id);
+    assert.equal(ownership.outcome, "success");
+    if (ownership.outcome === "success") {
+      assert.equal(ownership.value.currentRevision, "b".repeat(40));
+      assert.equal(ownership.value.version, 2);
+    }
   } finally { await dispose(value); }
 });
 

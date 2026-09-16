@@ -144,7 +144,7 @@ export class ProductionRuntime {
       if (value.outcome === "allowed") return value.value;
       return capabilityFailureResult(request, value);
     } };
-    this.#lifecycle = new WorkerLifecycleCoordinator(store, worker, { now: () => this.#clock.now() });
+    this.#lifecycle = new WorkerLifecycleCoordinator(store, worker, { now: () => this.#clock.now(), requireWorkspaceOwnership: true });
     const schedulerOptions: SchedulerOptions = {
       workerId: options.workerId,
       workerCapabilities: options.workerCapabilities,
