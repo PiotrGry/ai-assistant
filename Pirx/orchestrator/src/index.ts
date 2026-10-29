@@ -621,6 +621,24 @@ export {
   type ReleaseMergeResult,
 } from "./runtime/release-merge.js";
 export {
+  DEPLOYMENT_OBSERVATION_LIMITS,
+  DEPLOYMENT_OBSERVATION_SCHEMA_VERSION,
+  DeploymentObservationRepository,
+  ReleaseDeploymentObserver,
+  validateDeploymentObservation,
+  type DeploymentFailureReference,
+  type DeploymentGatewayResult,
+  type DeploymentObservation,
+  type DeploymentObservationContext,
+  type DeploymentObservationQuery,
+  type DeploymentObservationRecord,
+  type DeploymentResolutionOutcome,
+  type DeploymentTerminalOutcome,
+  type ObserveReleaseDeploymentRequest,
+  type ObserveReleaseDeploymentResult,
+  type ReleaseDeploymentGateway,
+} from "./runtime/deployment-observation.js";
+export {
   SingleWorkerScheduler,
   type SchedulerAttemptPort,
   type SchedulerAuthorizationRequest,

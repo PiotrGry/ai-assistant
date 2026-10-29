@@ -101,7 +101,7 @@ import {
   type ReleaseCorrelationState,
 } from "./release-correlation.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 23 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 24 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -659,6 +659,33 @@ const MIGRATIONS: readonly string[] = [
       ON runtime_release_correlations (workflow_provider, workflow_run_id);
     CREATE INDEX IF NOT EXISTS runtime_release_correlations_deployment
       ON runtime_release_correlations (deployment_provider, deployment_provider_id);
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_release_deployment_observations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      release_id TEXT NOT NULL REFERENCES runtime_releases(id) ON DELETE CASCADE,
+      observation_key TEXT NOT NULL UNIQUE CHECK (length(observation_key) = 64),
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      repository TEXT NOT NULL,
+      workflow_name TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      revision TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      provider_run_id TEXT NOT NULL,
+      run_url TEXT NOT NULL,
+      provider_deployment_id TEXT NOT NULL,
+      deployment_url TEXT NOT NULL,
+      outcome TEXT NOT NULL CHECK (outcome IN ('pending', 'running', 'succeeded', 'failed', 'cancelled', 'superseded')),
+      status TEXT,
+      conclusion TEXT,
+      failure_references_json TEXT NOT NULL CHECK (json_valid(failure_references_json)),
+      observed_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS runtime_release_deployment_observations_release
+      ON runtime_release_deployment_observations (release_id, observed_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS runtime_release_deployment_observations_provider
+      ON runtime_release_deployment_observations (provider, provider_deployment_id);
   `,
 ];
 
