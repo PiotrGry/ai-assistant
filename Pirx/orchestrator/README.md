@@ -360,6 +360,21 @@ replay, and out-of-order operations return explicit storage outcomes. The
 aggregate is deliberately limited to durable state: pull request, Actions,
 deployment, and production side effects remain outside this boundary.
 
+SQLite schema version 23 adds the delivery correlation projection for a
+validated Release. `ReleaseCorrelationService` verifies that every selected
+Task/Attempt revision has matching feature-PR provenance and exact successful
+CI before accepting a release PR. The projection then records the immutable
+release PR and head revision, exact member revisions, workflow run, merge
+revision, deployment identity, and production version as those facts become
+available.
+
+Correlation writes are idempotent and monotonic. Replays return the existing
+record, while missing, stale, conflicting, or ambiguous evidence is rejected
+explicitly. Reverse lookups by Release, release PR, workflow run, deployment,
+and production version let later delivery components recover the exact chain
+after restart without parsing GitHub comments. This boundary records evidence
+only; it does not create or merge pull requests or trigger deployments.
+
 ## Runtime capability policy
 
 `runtime/capabilities.ts` is the closed, provider-independent capability

@@ -93,8 +93,15 @@ import type { CiFailureEvidenceRecord } from "./ci-evidence.js";
 import type { FeatureMergeRecord } from "./feature-merge.js";
 import type { ShipmentCycleRecord, ShipmentCycleState, ShipmentOutcome } from "./shipment-coordinator.js";
 import type { RetryDecisionInput, RetryDecisionRecord } from "./ci-retry.js";
+import {
+  releaseCorrelationState,
+  validateReleaseCorrelationInput,
+  type ReleaseCorrelationInput,
+  type ReleaseCorrelationRecord,
+  type ReleaseCorrelationState,
+} from "./release-correlation.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 22 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 23 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -192,6 +199,7 @@ export interface RuntimeTransaction {
   readonly leases: LeaseRepository;
   readonly selection: TaskSelectionRepository;
   readonly releases: ReleaseRepository;
+  readonly releaseCorrelations: ReleaseCorrelationRepository;
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
   readonly workspaces: WorkspaceOwnershipRepository;
@@ -607,6 +615,51 @@ const MIGRATIONS: readonly string[] = [
     CREATE INDEX IF NOT EXISTS runtime_retry_decisions_event ON runtime_retry_decisions (failure_event_id, evidence_digest);
   `,
   `ALTER TABLE runtime_shipment_cycles ADD COLUMN completion_mode TEXT NOT NULL DEFAULT 'merge' CHECK (completion_mode IN ('merge', 'exact_green'));`,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_release_correlations (
+      release_id TEXT PRIMARY KEY REFERENCES runtime_releases(id) ON DELETE CASCADE,
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      repository TEXT NOT NULL CHECK (length(trim(repository)) > 0),
+      source_branch TEXT NOT NULL CHECK (length(trim(source_branch)) > 0),
+      base_branch TEXT NOT NULL CHECK (length(trim(base_branch)) > 0),
+      release_pr_node_id TEXT NOT NULL UNIQUE CHECK (length(trim(release_pr_node_id)) > 0),
+      release_pr_number INTEGER NOT NULL CHECK (release_pr_number > 0),
+      release_pr_url TEXT NOT NULL CHECK (length(trim(release_pr_url)) > 0),
+      release_head_revision TEXT NOT NULL CHECK (length(trim(release_head_revision)) > 0),
+      member_revisions_json TEXT NOT NULL CHECK (json_valid(member_revisions_json)),
+      workflow_provider TEXT,
+      workflow_run_id TEXT,
+      workflow_run_url TEXT,
+      workflow_name TEXT,
+      workflow_tested_revision TEXT,
+      merge_revision TEXT,
+      deployment_provider TEXT,
+      deployment_provider_id TEXT,
+      deployment_environment TEXT,
+      deployed_revision TEXT,
+      production_version TEXT,
+      state TEXT NOT NULL CHECK (state IN ('release_pr_correlated', 'workflow_correlated', 'merged', 'deployed', 'production_observed')),
+      observed_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      version INTEGER NOT NULL CHECK (version > 0),
+      UNIQUE (repository, release_pr_number),
+      UNIQUE (workflow_provider, workflow_run_id),
+      UNIQUE (deployment_provider, deployment_provider_id),
+      UNIQUE (repository, production_version),
+      CHECK ((workflow_provider IS NULL AND workflow_run_id IS NULL AND workflow_run_url IS NULL AND workflow_name IS NULL AND workflow_tested_revision IS NULL) OR (workflow_provider IS NOT NULL AND workflow_run_id IS NOT NULL AND workflow_run_url IS NOT NULL AND workflow_name IS NOT NULL AND workflow_tested_revision IS NOT NULL)),
+      CHECK ((deployment_provider IS NULL AND deployment_provider_id IS NULL AND deployment_environment IS NULL AND deployed_revision IS NULL) OR (deployment_provider IS NOT NULL AND deployment_provider_id IS NOT NULL AND deployment_environment IS NOT NULL AND deployed_revision IS NOT NULL)),
+      CHECK (merge_revision IS NULL OR workflow_run_id IS NOT NULL),
+      CHECK (deployment_provider_id IS NULL OR merge_revision IS NOT NULL),
+      CHECK (production_version IS NULL OR deployment_provider_id IS NOT NULL)
+    );
+    CREATE INDEX IF NOT EXISTS runtime_release_correlations_release_pr
+      ON runtime_release_correlations (repository, release_pr_number);
+    CREATE INDEX IF NOT EXISTS runtime_release_correlations_workflow
+      ON runtime_release_correlations (workflow_provider, workflow_run_id);
+    CREATE INDEX IF NOT EXISTS runtime_release_correlations_deployment
+      ON runtime_release_correlations (deployment_provider, deployment_provider_id);
+  `,
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -1490,6 +1543,108 @@ export class ReleaseRepository {
   }
 }
 
+function releaseCorrelationFromRow(row: Record<string, unknown>): StorageResult<ReleaseCorrelationRecord> {
+  try {
+    const required = ["release_id", "repository", "source_branch", "base_branch", "release_pr_node_id", "release_pr_url", "release_head_revision", "member_revisions_json", "state", "observed_at", "created_at", "updated_at"];
+    if (required.some((key) => typeof row[key] !== "string" || (row[key] as string).trim().length === 0) || row.schema_version !== 1 || typeof row.release_pr_number !== "number" || typeof row.version !== "number" || !Number.isSafeInteger(row.release_pr_number) || row.release_pr_number <= 0 || !Number.isSafeInteger(row.version) || row.version <= 0) return invalidRecord();
+    const memberRevisions = jsonParse(row.member_revisions_json);
+    if (!Array.isArray(memberRevisions) || memberRevisions.some((value) => typeof value !== "string")) return invalidRecord();
+    const workflowValues = [row.workflow_provider, row.workflow_run_id, row.workflow_run_url, row.workflow_name, row.workflow_tested_revision];
+    const deploymentValues = [row.deployment_provider, row.deployment_provider_id, row.deployment_environment, row.deployed_revision];
+    const workflowPresent = workflowValues.every((value) => typeof value === "string" && value.trim().length > 0);
+    const deploymentPresent = deploymentValues.every((value) => typeof value === "string" && value.trim().length > 0);
+    if (workflowValues.some((value) => value !== null) && !workflowPresent) return invalidRecord();
+    if (deploymentValues.some((value) => value !== null) && !deploymentPresent) return invalidRecord();
+    const input = validateReleaseCorrelationInput({
+      releaseId: releaseId(row.release_id as string),
+      repository: row.repository as string,
+      sourceBranch: row.source_branch as string,
+      baseBranch: row.base_branch as string,
+      releasePullRequest: { nodeId: row.release_pr_node_id as string, number: row.release_pr_number, url: row.release_pr_url as string },
+      releaseHeadRevision: row.release_head_revision as string,
+      memberRevisions: memberRevisions as string[],
+      ...(workflowPresent ? { workflow: { provider: row.workflow_provider as string, providerRunId: row.workflow_run_id as string, url: row.workflow_run_url as string, name: row.workflow_name as string, testedRevision: row.workflow_tested_revision as string } } : {}),
+      ...(row.merge_revision === null ? {} : { mergeRevision: String(row.merge_revision) }),
+      ...(deploymentPresent ? { deployment: { provider: row.deployment_provider as string, providerDeploymentId: row.deployment_provider_id as string, environment: row.deployment_environment as string, deployedRevision: row.deployed_revision as string } } : {}),
+      ...(row.production_version === null ? {} : { productionVersion: String(row.production_version) }),
+      observedAt: releaseTimestamp(row.observed_at as string),
+    });
+    const state = row.state as ReleaseCorrelationState;
+    if (releaseCorrelationState(input) !== state) return invalidRecord();
+    return success({ ...input, schemaVersion: 1, state, createdAt: releaseTimestamp(row.created_at as string), updatedAt: releaseTimestamp(row.updated_at as string), version: row.version });
+  } catch { return invalidRecord(); }
+}
+
+function sameReleaseCorrelationIdentity(left: ReleaseCorrelationRecord, right: ReleaseCorrelationInput): boolean {
+  return left.releaseId === right.releaseId && left.repository === right.repository && left.sourceBranch === right.sourceBranch && left.baseBranch === right.baseBranch && left.releasePullRequest.nodeId === right.releasePullRequest.nodeId && left.releasePullRequest.number === right.releasePullRequest.number && left.releasePullRequest.url === right.releasePullRequest.url && left.releaseHeadRevision === right.releaseHeadRevision && JSON.stringify(left.memberRevisions) === JSON.stringify(right.memberRevisions);
+}
+
+function mergeCorrelationEvidence<T>(current: T | undefined, incoming: T | undefined): { readonly ok: true; readonly value: T | undefined } | { readonly ok: false } {
+  if (current !== undefined && incoming !== undefined && JSON.stringify(current) !== JSON.stringify(incoming)) return { ok: false };
+  return { ok: true, value: incoming ?? current };
+}
+
+export class ReleaseCorrelationRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public getByRelease(releaseIdValue: string): StorageResult<ReleaseCorrelationRecord> { return this.#get("release_id = ?", releaseIdValue); }
+  public getByPullRequest(repository: string, number: number): StorageResult<ReleaseCorrelationRecord> { return this.#get("repository = ? AND release_pr_number = ?", repository, number); }
+  public getByWorkflowRun(provider: string, providerRunId: string): StorageResult<ReleaseCorrelationRecord> { return this.#get("workflow_provider = ? AND workflow_run_id = ?", provider, providerRunId); }
+  public getByDeployment(provider: string, providerDeploymentId: string): StorageResult<ReleaseCorrelationRecord> { return this.#get("deployment_provider = ? AND deployment_provider_id = ?", provider, providerDeploymentId); }
+  public getByProductionVersion(repository: string, productionVersion: string): StorageResult<ReleaseCorrelationRecord> { return this.#get("repository = ? AND production_version = ?", repository, productionVersion); }
+
+  public upsert(value: ReleaseCorrelationInput): StorageResult<ReleaseCorrelationRecord> {
+    let input: ReleaseCorrelationInput;
+    try { input = validateReleaseCorrelationInput(value); } catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Release correlation input is invalid." }; }
+    return this.#store.execute(() => {
+      const release = this.#store.releases.get(input.releaseId);
+      if (release.outcome !== "success") return release.outcome === "not_found" ? conflict("Release correlation requires a durable Release.") : release;
+      if (release.value.repository !== input.repository || release.value.sourceBranch !== input.sourceBranch || release.value.baseBranch !== input.baseBranch || release.value.state === "collecting") return conflict("Release correlation does not match an immutable durable Release.");
+      const existing = this.getByRelease(input.releaseId);
+      if (existing.outcome === "not_found") {
+        const workflow = input.workflow; const deployment = input.deployment;
+        try {
+          this.#store.database.prepare("INSERT INTO runtime_release_correlations (release_id, schema_version, repository, source_branch, base_branch, release_pr_node_id, release_pr_number, release_pr_url, release_head_revision, member_revisions_json, workflow_provider, workflow_run_id, workflow_run_url, workflow_name, workflow_tested_revision, merge_revision, deployment_provider, deployment_provider_id, deployment_environment, deployed_revision, production_version, state, observed_at, created_at, updated_at, version) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)").run(input.releaseId, input.repository, input.sourceBranch, input.baseBranch, input.releasePullRequest.nodeId, input.releasePullRequest.number, input.releasePullRequest.url, input.releaseHeadRevision, JSON.stringify(input.memberRevisions), workflow?.provider ?? null, workflow?.providerRunId ?? null, workflow?.url ?? null, workflow?.name ?? null, workflow?.testedRevision ?? null, input.mergeRevision ?? null, deployment?.provider ?? null, deployment?.providerDeploymentId ?? null, deployment?.environment ?? null, deployment?.deployedRevision ?? null, input.productionVersion ?? null, releaseCorrelationState(input), input.observedAt, input.observedAt, input.observedAt);
+          return this.getByRelease(input.releaseId);
+        } catch (error: unknown) { return classifyStorageError(error); }
+      }
+      if (existing.outcome !== "success") return existing;
+      const current = existing.value;
+      if (!sameReleaseCorrelationIdentity(current, input)) return conflict("Release correlation conflicts with immutable stored identity.");
+      const workflow = mergeCorrelationEvidence(current.workflow, input.workflow);
+      const mergeRevision = mergeCorrelationEvidence(current.mergeRevision, input.mergeRevision);
+      const deployment = mergeCorrelationEvidence(current.deployment, input.deployment);
+      const productionVersion = mergeCorrelationEvidence(current.productionVersion, input.productionVersion);
+      if (!workflow.ok || !mergeRevision.ok || !deployment.ok || !productionVersion.ok) return conflict("Release correlation evidence conflicts with durable evidence.");
+      let merged: ReleaseCorrelationInput;
+      try { merged = validateReleaseCorrelationInput({ ...input, ...(workflow.value === undefined ? {} : { workflow: workflow.value }), ...(mergeRevision.value === undefined ? {} : { mergeRevision: mergeRevision.value }), ...(deployment.value === undefined ? {} : { deployment: deployment.value }), ...(productionVersion.value === undefined ? {} : { productionVersion: productionVersion.value }) }); }
+      catch (error: unknown) { return { outcome: "invalid_record", message: error instanceof Error ? error.message : "Release correlation evidence is invalid." }; }
+      const sameEvidence = JSON.stringify({ workflow: current.workflow, mergeRevision: current.mergeRevision, deployment: current.deployment, productionVersion: current.productionVersion }) === JSON.stringify({ workflow: merged.workflow, mergeRevision: merged.mergeRevision, deployment: merged.deployment, productionVersion: merged.productionVersion });
+      if (sameEvidence) return existing;
+      if (Date.parse(merged.observedAt) < Date.parse(current.updatedAt)) return { outcome: "invalid_record", message: "Release correlation time cannot move backwards." };
+      const nextWorkflow = merged.workflow; const nextDeployment = merged.deployment;
+      try {
+        const changed = this.#store.database.prepare("UPDATE runtime_release_correlations SET workflow_provider = ?, workflow_run_id = ?, workflow_run_url = ?, workflow_name = ?, workflow_tested_revision = ?, merge_revision = ?, deployment_provider = ?, deployment_provider_id = ?, deployment_environment = ?, deployed_revision = ?, production_version = ?, state = ?, observed_at = ?, updated_at = ?, version = version + 1 WHERE release_id = ? AND version = ?").run(nextWorkflow?.provider ?? null, nextWorkflow?.providerRunId ?? null, nextWorkflow?.url ?? null, nextWorkflow?.name ?? null, nextWorkflow?.testedRevision ?? null, merged.mergeRevision ?? null, nextDeployment?.provider ?? null, nextDeployment?.providerDeploymentId ?? null, nextDeployment?.environment ?? null, nextDeployment?.deployedRevision ?? null, merged.productionVersion ?? null, releaseCorrelationState(merged), merged.observedAt, merged.observedAt, merged.releaseId, current.version);
+        if (changed.changes !== 1) return conflict("Release correlation compare-and-set failed.");
+        return this.getByRelease(merged.releaseId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  #get(where: string, ...parameters: readonly (string | number)[]): StorageResult<ReleaseCorrelationRecord> {
+    if (parameters.some((value) => typeof value === "string" && value.trim().length === 0)) return { outcome: "invalid_record", message: "Release correlation lookup value is invalid." };
+    return this.#store.execute(() => {
+      try {
+        const rows = this.#store.database.prepare(`SELECT * FROM runtime_release_correlations WHERE ${where} LIMIT 2`).all(...parameters) as Record<string, unknown>[];
+        if (rows.length === 0) return notFound("Release correlation was not found.");
+        if (rows.length > 1) return conflict("Release correlation lookup is ambiguous.");
+        return releaseCorrelationFromRow(rows[0]!);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+}
+
 export class ProjectionRepository {
   readonly #store: RuntimeSqliteStore;
   public constructor(store: RuntimeSqliteStore) { this.#store = store; }
@@ -2243,6 +2398,7 @@ export class RuntimeSqliteStore {
   readonly leases: LeaseRepository;
   readonly selection: TaskSelectionRepository;
   readonly releases: ReleaseRepository;
+  readonly releaseCorrelations: ReleaseCorrelationRepository;
   readonly projections: ProjectionRepository;
   readonly webhooks: WebhookRepository;
   readonly workspaces: WorkspaceOwnershipRepository;
@@ -2262,6 +2418,7 @@ export class RuntimeSqliteStore {
     this.leases = new LeaseRepository(this);
     this.selection = new TaskSelectionRepository(this);
     this.releases = new ReleaseRepository(this);
+    this.releaseCorrelations = new ReleaseCorrelationRepository(this);
     this.projections = new ProjectionRepository(this);
     this.webhooks = new WebhookRepository(this);
     this.workspaces = new WorkspaceOwnershipRepository(this);
@@ -2320,14 +2477,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;

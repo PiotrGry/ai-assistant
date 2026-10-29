@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import {
+  RUNTIME_STORAGE_SCHEMA_VERSION,
   RuntimeSqliteStore,
   createTask,
   type AttemptId,
@@ -48,7 +49,7 @@ test("persists ownership, both lookup directions, revision CAS, release, and res
   let store = RuntimeSqliteStore.open({ filename: value.filename });
   try {
     const schema = store.database.prepare("SELECT MAX(version) AS version FROM runtime_schema_migrations").get() as { version: number };
-    assert.equal(schema.version, 22);
+    assert.equal(schema.version, RUNTIME_STORAGE_SCHEMA_VERSION);
     start(store, "workspace-task", "workspace-attempt");
     const claimed = store.workspaces.claim(input("workspace-task", "workspace-attempt"));
     assert.equal(claimed.outcome, "success");

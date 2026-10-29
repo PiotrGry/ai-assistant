@@ -440,6 +440,7 @@ export {
   LeaseRepository,
   PullRequestProvenanceRepository,
   ProjectionRepository,
+  ReleaseCorrelationRepository,
   ReleaseRepository,
   TaskSelectionRepository,
   RuntimeSqliteStore,
@@ -595,6 +596,21 @@ export {
   type ReleaseTaskRecord,
   type ReleaseTransitionInput,
 } from "./runtime/release.js";
+export {
+  RELEASE_CORRELATION_LIMITS,
+  RELEASE_CORRELATION_SCHEMA_VERSION,
+  ReleaseCorrelationService,
+  normalizeReleaseMemberRevisions,
+  releaseCorrelationState,
+  validateReleaseCorrelationInput,
+  type ReleaseCorrelationInput,
+  type ReleaseCorrelationRecord,
+  type ReleaseCorrelationRequest,
+  type ReleaseCorrelationResult,
+  type ReleaseCorrelationState,
+  type ReleaseDeploymentIdentity,
+  type ReleaseWorkflowIdentity,
+} from "./runtime/release-correlation.js";
 export {
   SingleWorkerScheduler,
   type SchedulerAttemptPort,
