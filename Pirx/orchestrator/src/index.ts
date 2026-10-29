@@ -612,6 +612,15 @@ export {
   type ReleaseWorkflowIdentity,
 } from "./runtime/release-correlation.js";
 export {
+  RELEASE_MERGE_LIMITS,
+  ReleaseMergeCoordinator,
+  type ReleaseMergeMethod,
+  type ReleaseMergeOutcome,
+  type ReleaseMergePolicy,
+  type ReleaseMergeRequest,
+  type ReleaseMergeResult,
+} from "./runtime/release-merge.js";
+export {
   SingleWorkerScheduler,
   type SchedulerAttemptPort,
   type SchedulerAuthorizationRequest,

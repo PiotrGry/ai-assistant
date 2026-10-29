@@ -33,6 +33,7 @@ export interface GitHubPullRequestGatewayPort {
   getBranchHead(branch: string, context: GitHubRequestContext): Promise<GitHubOperationResult<GitHubBranchHead>>;
   listPullRequests(headBranch: string, baseBranch: string, context: GitHubRequestContext): Promise<GitHubOperationResult<readonly GitHubPullRequest[]>>;
   getPullRequest(number: number, context: GitHubRequestContext): Promise<GitHubOperationResult<GitHubPullRequest>>;
+  listPullRequestCommitShas?(number: number, context: GitHubRequestContext): Promise<GitHubOperationResult<readonly string[]>>;
   createPullRequest(input: GitHubPullRequestCreateInput): Promise<GitHubOperationResult<GitHubPullRequest>>;
   mergePullRequest?(number: number, expectedHeadSha: string, input: { readonly idempotencyKey: string; readonly correlationId: string; readonly timeoutMs?: number; readonly mergeMethod?: "squash" | "merge" | "rebase" }): Promise<GitHubOperationResult<GitHubPullRequestMergeResult>>;
   getApprovedReviewCount?(number: number, context: GitHubRequestContext): Promise<GitHubOperationResult<number>>;
@@ -45,6 +46,7 @@ export interface GitHubPullRequestTransport {
 
 interface RefPayload { readonly object?: unknown; }
 interface PullPayload { readonly number?: unknown; readonly html_url?: unknown; readonly state?: unknown; readonly title?: unknown; readonly body?: unknown; readonly head?: unknown; readonly base?: unknown; readonly merged?: unknown; readonly mergeable?: unknown; readonly merge_commit_sha?: unknown; }
+interface PullCommitPayload { readonly sha?: unknown; }
 interface MergePayload { readonly merged?: unknown; readonly sha?: unknown; readonly message?: unknown; }
 const DEFAULT_RETRY: GitHubRetryPolicyOptions = { maxAttempts: 2, maxTotalDelayMs: 5_000, baseDelayMs: 250, maxDelayMs: 2_000, jitterRatio: 0 };
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
@@ -94,10 +96,17 @@ export class GitHubPullRequestGateway implements GitHubPullRequestGatewayPort {
     const pull = mapPull(result.value);
     return pull === undefined ? malformed(result.correlationId) : { ...result, value: pull };
   }
+  public async listPullRequestCommitShas(number: number, context: GitHubRequestContext): Promise<GitHubOperationResult<readonly string[]>> {
+    const result = await this.#read<PullCommitPayload[]>({ method: "GET", path: repoPath(this.#config) + "/pulls/" + String(number) + "/commits", query: { per_page: 100 } }, context);
+    if (result.outcome !== "success") return result;
+    if (!Array.isArray(result.value)) return malformed(result.correlationId);
+    const revisions = result.value.map((commit) => isRecord(commit) ? sha(commit.sha) : undefined);
+    return revisions.some((revision) => revision === undefined) ? malformed(result.correlationId) : { ...result, value: Object.freeze(revisions as string[]) };
+  }
   public async createPullRequest(input: GitHubPullRequestCreateInput): Promise<GitHubOperationResult<GitHubPullRequest>> {
     const payload = { title: input.title, head: input.headBranch, base: input.baseBranch, body: input.body };
     const result = await this.#queue.submit<PullPayload>({
-      operationKind: "create_feature_pull_request", idempotencyKey: input.idempotencyKey, target: "repository:" + this.#config.owner + "/" + this.#config.repository,
+      operationKind: "create_pull_request", idempotencyKey: input.idempotencyKey, target: "repository:" + this.#config.owner + "/" + this.#config.repository,
       correlationId: input.correlationId, payloadIdentity: digest(JSON.stringify(payload)), timeoutMs: input.timeoutMs ?? this.#config.timeoutMs, idempotent: true,
       execute: (context) => this.#transport.restWrite<PullPayload>({ method: "POST", path: repoPath(this.#config) + "/pulls", body: payload }, context),
     });
@@ -107,7 +116,7 @@ export class GitHubPullRequestGateway implements GitHubPullRequestGatewayPort {
   }
   public async mergePullRequest(number: number, expectedHeadSha: string, input: { readonly idempotencyKey: string; readonly correlationId: string; readonly timeoutMs?: number; readonly mergeMethod?: "squash" | "merge" | "rebase" }): Promise<GitHubOperationResult<GitHubPullRequestMergeResult>> {
     const result = await this.#queue.submit<MergePayload>({
-      operationKind: "merge_feature_pull_request", idempotencyKey: input.idempotencyKey, target: "pull:" + this.#config.owner + "/" + this.#config.repository + "#" + number,
+      operationKind: "merge_pull_request", idempotencyKey: input.idempotencyKey, target: "pull:" + this.#config.owner + "/" + this.#config.repository + "#" + number,
       correlationId: input.correlationId, payloadIdentity: expectedHeadSha, timeoutMs: input.timeoutMs ?? this.#config.timeoutMs, idempotent: true,
       execute: (context) => this.#transport.restWrite<MergePayload>({ method: "PUT", path: repoPath(this.#config) + "/pulls/" + String(number) + "/merge", body: { sha: expectedHeadSha, merge_method: input.mergeMethod ?? "squash" } }, context),
     });

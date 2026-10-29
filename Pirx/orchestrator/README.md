@@ -375,6 +375,20 @@ and production version let later delivery components recover the exact chain
 after restart without parsing GitHub comments. This boundary records evidence
 only; it does not create or merge pull requests or trigger deployments.
 
+`ReleaseMergeCoordinator` owns the following delivery boundary. It creates or
+reuses one source-to-base release pull request, proves that every selected
+`ReleaseTask` revision is present, resolves each configured required check for
+the exact current release head, enforces mergeability and review policy, and
+then uses the centralized GitHub write queue for one idempotent merge. It never
+uses a bypass operation or changes repository policy.
+
+The Release state is also the durable mutation ledger. An uncertain PR create
+is held as `human_action_required` and reconciled by read before any retry; a
+planned merge moves to `merging`, where restart recovery observes the remote PR
+without issuing another merge. Only an exact observed merge revision advances
+the aggregate to `deploying` and extends the Release correlation. Deployment
+observation and production verification remain separate later boundaries.
+
 ## Runtime capability policy
 
 `runtime/capabilities.ts` is the closed, provider-independent capability

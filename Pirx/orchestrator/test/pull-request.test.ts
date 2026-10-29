@@ -25,3 +25,18 @@ test("preserves multiline PR provenance bodies returned by GitHub", async () => 
     if (result.outcome === "success") assert.equal(result.value[0]?.body, body);
   } finally { await gateway.close(); }
 });
+
+test("returns only validated commit revisions for exact Release membership checks", async () => {
+  const requests: GitHubRestReadRequest[] = [];
+  const transport = {
+    restRead: async <T>(request: GitHubRestReadRequest, context: GitHubRequestContext): Promise<GitHubOperationResult<T>> => { requests.push(request); return success([{ sha: "a".repeat(40) }, { sha: "b".repeat(40) }] as T, context.correlationId); },
+    restWrite: async <T>(_request: GitHubRestWriteRequest, context: GitHubRequestContext): Promise<GitHubOperationResult<T>> => success(payload as T, context.correlationId),
+  };
+  const gateway = new GitHubPullRequestGateway(transport, { token: "token", owner: "PiotrGry", repository: "repo", apiUrl: "https://api.github.com", timeoutMs: 1000 });
+  try {
+    const result = await gateway.listPullRequestCommitShas(431, { correlationId: "release-membership" });
+    assert.equal(result.outcome, "success");
+    if (result.outcome === "success") assert.deepEqual(result.value, ["a".repeat(40), "b".repeat(40)]);
+    assert.equal(requests[0]?.path, "/repos/PiotrGry/repo/pulls/431/commits");
+  } finally { await gateway.close(); }
+});
