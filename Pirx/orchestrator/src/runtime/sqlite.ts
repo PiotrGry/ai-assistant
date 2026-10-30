@@ -101,7 +101,7 @@ import {
   type ReleaseCorrelationState,
 } from "./release-correlation.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 24 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 25 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -686,6 +686,26 @@ const MIGRATIONS: readonly string[] = [
       ON runtime_release_deployment_observations (release_id, observed_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS runtime_release_deployment_observations_provider
       ON runtime_release_deployment_observations (provider, provider_deployment_id);
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_release_production_verifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      release_id TEXT NOT NULL REFERENCES runtime_releases(id) ON DELETE CASCADE,
+      observation_key TEXT NOT NULL UNIQUE CHECK (length(observation_key) = 64),
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      repository TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      deployed_revision TEXT NOT NULL,
+      production_version TEXT,
+      policy_digest TEXT NOT NULL CHECK (length(policy_digest) = 64),
+      outcome TEXT NOT NULL CHECK (outcome IN ('verified', 'pending', 'failed', 'degraded', 'unavailable', 'stale', 'ambiguous', 'policy_blocked', 'unknown')),
+      evidence_digest TEXT NOT NULL CHECK (length(evidence_digest) = 64),
+      signals_json TEXT NOT NULL CHECK (json_valid(signals_json)),
+      observed_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS runtime_release_production_verifications_release
+      ON runtime_release_production_verifications (release_id, observed_at DESC, id DESC);
   `,
 ];
 
