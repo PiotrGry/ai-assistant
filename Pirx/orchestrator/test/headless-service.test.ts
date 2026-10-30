@@ -34,7 +34,10 @@ function validConfig(directory = "/tmp/pirx-headless"): Record<string, unknown> 
     workerId: "pirx-worker",
     provider: "claude-code",
     workerCapabilities: ["repository.read", "repository.write", "tests.run", "git.commit", "git.push_assigned_branch"],
-    repositories: [{ repository: "PiotrGry/ai-assistant", repositoryRoot: "/tmp/pirx-repository", baseBranch: "main", baseRevision: "a".repeat(40), remoteName: "origin", testCommands: ["npm run check"] }],
+    repositories: [{
+      repository: "PiotrGry/ai-assistant", repositoryRoot: "/tmp/pirx-repository", baseBranch: "develop", baseRevision: "a".repeat(40), remoteName: "origin", testCommands: ["npm run check"],
+      delivery: { releaseBranch: "main", featureWorkflowName: "CI", releaseRequiredChecks: ["CI"], featureRequiredApprovals: 0, releaseRequiredApprovals: 0, featureMergeMethod: "merge", releaseMergeMethod: "merge", requireMergeable: true },
+    }],
     worktreeParent: `${directory}/worktrees`,
     leaseDurationMs: 60_000,
     shutdownTimeoutMs: 5_000,
@@ -88,6 +91,30 @@ test("does not execute stale runtime Queue data when GitHub reconciliation fails
   assert.deepEqual(port.calls, ["recover", "shutdown"]);
 });
 
+test("runs the leased worker only when delivery reconciliation permits it", async () => {
+  const port = runtime();
+  let service: HeadlessOrchestratorService;
+  service = new HeadlessOrchestratorService(port, {
+    cycleIntervalMs: 100,
+    delivery: { reconcile: async () => ({ outcome: "retry_ready", allowWorkerCycle: true, message: "retry is durable" }) },
+    sleep: async () => { await service.stop("fixture"); },
+  });
+  assert.equal((await service.run()).outcome, "stopped");
+  assert.deepEqual(port.calls, ["recover", "cycle", "shutdown"]);
+});
+
+test("does not start worker execution while delivery is pending", async () => {
+  const port = runtime();
+  let service: HeadlessOrchestratorService;
+  service = new HeadlessOrchestratorService(port, {
+    cycleIntervalMs: 100,
+    delivery: { reconcile: async () => ({ outcome: "waiting", allowWorkerCycle: false, message: "CI is pending" }) },
+    sleep: async () => { await service.stop("fixture"); },
+  });
+  assert.equal((await service.run()).outcome, "stopped");
+  assert.deepEqual(port.calls, ["recover", "shutdown"]);
+});
+
 test("closes storage once when startup recovery fails and reports a bounded outcome", async () => {
   const port = runtime({ recover: async () => { port.calls.push("recover"); return { outcome: "reconciliation_required", reason: "recovery:durable_state_conflict" }; } });
   const service = new HeadlessOrchestratorService(port, { cycleIntervalMs: 100 });
@@ -106,11 +133,18 @@ test("strict config accepts bounded operational fields and rejects unknown or se
   const parsed = parseHeadlessOrchestratorConfig(validConfig());
   assert.equal(parsed.schemaVersion, 1);
   assert.equal(parsed.repositories[0]?.testCommands[0], "npm run check");
+  assert.equal(parsed.repositories[0]?.delivery.releaseBranch, "main");
   assert.throws(() => parseHeadlessOrchestratorConfig({ ...validConfig(), token: "fixture" }), (error: unknown) => error instanceof HeadlessConfigurationError && error.code === "sensitive_configuration");
   assert.throws(() => parseHeadlessOrchestratorConfig({ ...validConfig(), unexpected: true }), (error: unknown) => error instanceof HeadlessConfigurationError && error.code === "invalid_configuration");
   assert.throws(() => parseHeadlessOrchestratorConfig({ ...validConfig(), cycleIntervalMs: 1 }), HeadlessConfigurationError);
   assert.throws(() => parseHeadlessOrchestratorConfig({ ...validConfig(), provider: "pretends-to-be-claude" }), HeadlessConfigurationError);
   assert.throws(() => parseHeadlessOrchestratorConfig({ ...validConfig(), workerCapabilities: ["production.mutate"] }), HeadlessConfigurationError);
+  const invalidMerge = structuredClone(validConfig()) as { repositories: Array<{ delivery: { featureMergeMethod: string } }> };
+  invalidMerge.repositories[0]!.delivery.featureMergeMethod = "squash";
+  assert.throws(() => parseHeadlessOrchestratorConfig(invalidMerge), HeadlessConfigurationError);
+  const sameBranches = structuredClone(validConfig()) as { repositories: Array<{ baseBranch: string; delivery: { releaseBranch: string } }> };
+  sameBranches.repositories[0]!.delivery.releaseBranch = sameBranches.repositories[0]!.baseBranch;
+  assert.throws(() => parseHeadlessOrchestratorConfig(sameBranches), HeadlessConfigurationError);
 });
 
 class FixtureHost extends EventEmitter implements HeadlessCliProcess {
@@ -130,7 +164,7 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) test(`CLI drains gracefully
     const filename = join(directory, "config.json");
     await writeFile(filename, JSON.stringify(validConfig(directory)), { mode: 0o600 });
     const host = new FixtureHost(filename, signal);
-    assert.equal(await runHeadlessCli(host, { queue: { reconcile: async () => ({ outcome: "synchronized" }) }, githubConfigLoader: () => ({ token: "test-only", owner: "PiotrGry", repository: "ai-assistant", projectOwner: "PiotrGry", projectNumber: 3, apiUrl: "https://api.github.com", timeoutMs: 10_000 }) }), 0);
+    assert.equal(await runHeadlessCli(host, { queue: { reconcile: async () => ({ outcome: "synchronized" }) }, delivery: { reconcile: async () => ({ outcome: "idle", allowWorkerCycle: true }) }, githubConfigLoader: () => ({ token: "test-only", owner: "PiotrGry", repository: "ai-assistant", projectOwner: "PiotrGry", projectNumber: 3, apiUrl: "https://api.github.com", timeoutMs: 10_000 }) }), 0);
     assert.equal(host.exitCode, 0);
     assert.equal(host.errors.length, 0);
     assert.equal(host.output.some((line) => line.includes('"event":"stopped"')), true);

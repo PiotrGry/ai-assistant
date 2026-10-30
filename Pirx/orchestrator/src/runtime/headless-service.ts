@@ -19,9 +19,13 @@ export interface HeadlessQueueReconciliationPort {
   reconcile(): Promise<{ readonly outcome: string; readonly message?: string }>;
 }
 
+export interface HeadlessDeliveryReconciliationPort {
+  reconcile(): Promise<{ readonly outcome: string; readonly allowWorkerCycle: boolean; readonly message?: string }>;
+}
+
 export interface HeadlessServiceEvent {
   readonly schemaVersion: typeof HEADLESS_SERVICE_SCHEMA_VERSION;
-  readonly event: "starting" | "recovered" | "queue" | "cycle" | "cycle_error" | "stopping" | "stopped";
+  readonly event: "starting" | "recovered" | "queue" | "delivery" | "cycle" | "cycle_error" | "stopping" | "stopped";
   readonly outcome: string;
   readonly reason?: string;
 }
@@ -32,6 +36,7 @@ export interface HeadlessServiceOptions {
   readonly emit?: (event: HeadlessServiceEvent) => void;
   readonly sleep?: (durationMs: number, signal: AbortSignal) => Promise<void>;
   readonly queue?: HeadlessQueueReconciliationPort;
+  readonly delivery?: HeadlessDeliveryReconciliationPort;
 }
 
 export type HeadlessServiceResult =
@@ -68,6 +73,7 @@ export class HeadlessOrchestratorService {
   readonly #emit: (event: HeadlessServiceEvent) => void;
   readonly #sleep: (durationMs: number, signal: AbortSignal) => Promise<void>;
   readonly #queue: HeadlessQueueReconciliationPort | undefined;
+  readonly #delivery: HeadlessDeliveryReconciliationPort | undefined;
   readonly #wake = new AbortController();
   #running = false;
   #stopRequested = false;
@@ -82,6 +88,7 @@ export class HeadlessOrchestratorService {
     this.#emit = options.emit ?? (() => undefined);
     this.#sleep = options.sleep ?? defaultSleep;
     this.#queue = options.queue;
+    this.#delivery = options.delivery;
   }
 
   public get running(): boolean { return this.#running; }
@@ -107,6 +114,15 @@ export class HeadlessOrchestratorService {
           this.#event("queue", queue.outcome, queue.message);
           if (queue.outcome !== "synchronized") {
             delay = this.#errorIntervalMs;
+            if (!this.#stopRequested) await this.#sleep(delay, this.#wake.signal);
+            continue;
+          }
+        }
+        if (this.#delivery !== undefined) {
+          const delivery = await this.#delivery.reconcile();
+          this.#event("delivery", delivery.outcome, delivery.message);
+          if (!delivery.allowWorkerCycle) {
+            if (["rate_limited", "reconciliation_required"].includes(delivery.outcome)) delay = this.#errorIntervalMs;
             if (!this.#stopRequested) await this.#sleep(delay, this.#wake.signal);
             continue;
           }

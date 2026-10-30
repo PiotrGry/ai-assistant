@@ -106,6 +106,7 @@ export {
   HEADLESS_SERVICE_LIMITS,
   HEADLESS_SERVICE_SCHEMA_VERSION,
   HeadlessOrchestratorService,
+  type HeadlessDeliveryReconciliationPort,
   type HeadlessRuntimePort,
   type HeadlessQueueReconciliationPort,
   type HeadlessServiceEvent,
@@ -118,8 +119,17 @@ export {
   loadHeadlessOrchestratorConfig,
   parseHeadlessOrchestratorConfig,
   type HeadlessOrchestratorConfig,
+  type HeadlessDeliveryPolicyConfig,
   type HeadlessRepositoryConfig,
 } from "./runtime/headless-config.js";
+export {
+  HEADLESS_DELIVERY_SCHEMA_VERSION,
+  HeadlessDeliveryCoordinator,
+  type HeadlessDeliveryCoordinatorOptions,
+  type HeadlessDeliveryOutcome,
+  type HeadlessDeliveryRepositoryRuntime,
+  type HeadlessDeliveryResult,
+} from "./runtime/headless-delivery.js";
 export {
   GITHUB_QUEUE_SNAPSHOT_SCHEMA_VERSION,
   GITHUB_QUEUE_LIMITS,

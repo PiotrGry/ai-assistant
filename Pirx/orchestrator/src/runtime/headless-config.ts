@@ -4,12 +4,25 @@ import { isAbsolute, resolve } from "node:path";
 import { PRODUCTION_RUNTIME_LIMITS, type ProductionRepositoryConfig } from "./production-runtime.js";
 import { HEADLESS_SERVICE_LIMITS } from "./headless-service.js";
 import { CODE_WORKER_CAPABILITIES } from "../claude/worker-profile.js";
+import type { ReleaseMergeMethod } from "./release-merge.js";
 
 export const HEADLESS_CONFIG_SCHEMA_VERSION = 1 as const;
 
 export interface HeadlessRepositoryConfig extends ProductionRepositoryConfig {
   readonly remoteName: string;
   readonly testCommands: readonly string[];
+  readonly delivery: HeadlessDeliveryPolicyConfig;
+}
+
+export interface HeadlessDeliveryPolicyConfig {
+  readonly releaseBranch: string;
+  readonly featureWorkflowName: string;
+  readonly releaseRequiredChecks: readonly string[];
+  readonly featureRequiredApprovals: number;
+  readonly releaseRequiredApprovals: number;
+  readonly featureMergeMethod: "merge";
+  readonly releaseMergeMethod: ReleaseMergeMethod;
+  readonly requireMergeable: boolean;
 }
 
 export interface HeadlessOrchestratorConfig {
@@ -40,7 +53,8 @@ export class HeadlessConfigurationError extends Error {
 }
 
 const TOP_LEVEL_KEYS = new Set(["schemaVersion", "databasePath", "workerId", "provider", "workerCapabilities", "repositories", "worktreeParent", "leaseDurationMs", "shutdownTimeoutMs", "workerTimeoutMs", "workerOutputBytes", "workerErrorBytes", "maximumConsecutiveResumeFailures", "cycleIntervalMs", "errorIntervalMs", "githubProjectOwner", "githubProjectNumber", "githubApiUrl", "githubTimeoutMs"]);
-const REPOSITORY_KEYS = new Set(["repository", "repositoryRoot", "baseBranch", "baseRevision", "remoteName", "testCommands"]);
+const REPOSITORY_KEYS = new Set(["repository", "repositoryRoot", "baseBranch", "baseRevision", "remoteName", "testCommands", "delivery"]);
+const DELIVERY_KEYS = new Set(["releaseBranch", "featureWorkflowName", "releaseRequiredChecks", "featureRequiredApprovals", "releaseRequiredApprovals", "featureMergeMethod", "releaseMergeMethod", "requireMergeable"]);
 const SENSITIVE_KEY = /^(?:token|secret|password|passwd|api[_-]?key|authorization|cookie|private[_-]?key|credential|connection[_-]?string)$/iu;
 const SENSITIVE_VALUE = /(?:-----BEGIN [^-]*PRIVATE KEY-----|\bbearer\s+[A-Za-z0-9._~+/=-]+|\b(?:ghp_|github_pat_|xox[baprs]-|sk-)[A-Za-z0-9._-]+)/iu;
 const SAFE_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
@@ -73,8 +87,14 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
   if (!Array.isArray(value.repositories) || value.repositories.length === 0 || value.repositories.length > 32) return invalid();
   const repositories: HeadlessRepositoryConfig[] = [];
   for (const item of value.repositories) {
-    if (!record(item) || !exactKeys(item, REPOSITORY_KEYS) || !text(item.repository, 512) || !REPOSITORY.test(item.repository) || !text(item.repositoryRoot) || !isAbsolute(item.repositoryRoot) || UNSAFE_PATH.test(item.repositoryRoot) || !text(item.baseBranch, 512) || !BRANCH.test(item.baseBranch) || item.baseBranch.includes("..") || !text(item.baseRevision, 64) || !REVISION.test(item.baseRevision) || !text(item.remoteName, 128) || !REMOTE.test(item.remoteName) || !Array.isArray(item.testCommands) || item.testCommands.length > 16 || item.testCommands.some((command) => !text(command, 256) || !TEST_COMMAND.test(command))) return invalid();
-    repositories.push(Object.freeze({ repository: item.repository, repositoryRoot: resolve(item.repositoryRoot), baseBranch: item.baseBranch, baseRevision: item.baseRevision, remoteName: item.remoteName, testCommands: Object.freeze([...item.testCommands] as string[]) }));
+    if (!record(item) || !exactKeys(item, REPOSITORY_KEYS) || !text(item.repository, 512) || !REPOSITORY.test(item.repository) || !text(item.repositoryRoot) || !isAbsolute(item.repositoryRoot) || UNSAFE_PATH.test(item.repositoryRoot) || !text(item.baseBranch, 512) || !BRANCH.test(item.baseBranch) || item.baseBranch.includes("..") || !text(item.baseRevision, 64) || !REVISION.test(item.baseRevision) || !text(item.remoteName, 128) || !REMOTE.test(item.remoteName) || !Array.isArray(item.testCommands) || item.testCommands.length > 16 || item.testCommands.some((command) => !text(command, 256) || !TEST_COMMAND.test(command)) || !record(item.delivery) || !exactKeys(item.delivery, DELIVERY_KEYS)) return invalid();
+    const delivery = item.delivery;
+    if (!text(delivery.releaseBranch, 512) || !BRANCH.test(delivery.releaseBranch) || delivery.releaseBranch.includes("..") || delivery.releaseBranch === item.baseBranch || !text(delivery.featureWorkflowName, 256) || !Array.isArray(delivery.releaseRequiredChecks) || delivery.releaseRequiredChecks.length === 0 || delivery.releaseRequiredChecks.length > 32 || delivery.releaseRequiredChecks.some((check) => !text(check, 256)) || new Set(delivery.releaseRequiredChecks).size !== delivery.releaseRequiredChecks.length || !integer(delivery.featureRequiredApprovals, 0, 100) || !integer(delivery.releaseRequiredApprovals, 0, 100) || delivery.featureMergeMethod !== "merge" || !["squash", "merge", "rebase"].includes(String(delivery.releaseMergeMethod)) || typeof delivery.requireMergeable !== "boolean") return invalid();
+    repositories.push(Object.freeze({
+      repository: item.repository, repositoryRoot: resolve(item.repositoryRoot), baseBranch: item.baseBranch, baseRevision: item.baseRevision, remoteName: item.remoteName,
+      testCommands: Object.freeze([...item.testCommands] as string[]),
+      delivery: Object.freeze({ releaseBranch: delivery.releaseBranch, featureWorkflowName: delivery.featureWorkflowName, releaseRequiredChecks: Object.freeze([...delivery.releaseRequiredChecks] as string[]), featureRequiredApprovals: delivery.featureRequiredApprovals, releaseRequiredApprovals: delivery.releaseRequiredApprovals, featureMergeMethod: "merge", releaseMergeMethod: delivery.releaseMergeMethod as ReleaseMergeMethod, requireMergeable: delivery.requireMergeable }),
+    }));
   }
   if (new Set(repositories.map((item) => item.repository)).size !== repositories.length) return invalid();
   if (!text(value.worktreeParent) || !isAbsolute(value.worktreeParent) || UNSAFE_PATH.test(value.worktreeParent)) return invalid();

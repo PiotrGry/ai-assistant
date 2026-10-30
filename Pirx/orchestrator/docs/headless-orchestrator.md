@@ -28,10 +28,20 @@ CLI credential stores.
     {
       "repository": "PiotrGry/ai-assistant",
       "repositoryRoot": "/srv/pirx/ai-assistant",
-      "baseBranch": "main",
+      "baseBranch": "develop",
       "baseRevision": "0123456789abcdef0123456789abcdef01234567",
       "remoteName": "origin",
-      "testCommands": ["npm run check"]
+      "testCommands": ["npm run check"],
+      "delivery": {
+        "releaseBranch": "main",
+        "featureWorkflowName": "CI",
+        "releaseRequiredChecks": ["CI"],
+        "featureRequiredApprovals": 0,
+        "releaseRequiredApprovals": 0,
+        "featureMergeMethod": "merge",
+        "releaseMergeMethod": "merge",
+        "requireMergeable": true
+      }
     }
   ],
   "worktreeParent": "/var/lib/pirx/worktrees",
@@ -53,6 +63,13 @@ CLI credential stores.
 Every field is required. Repositories form an explicit allowlist; test commands
 must match the bounded code-worker command policy. Update `baseRevision` to the
 reviewed revision from which a new assigned worktree may be created.
+
+`baseBranch` is the integration branch for feature PRs. `delivery.releaseBranch`
+is the protected Release target and must be different. Feature merges are
+intentionally restricted to the `merge` method because durable ReleaseTask
+membership refers to the worker's exact pushed revision; squash or rebase would
+replace that identity. Required checks and approvals are explicit repository
+policy, never inferred by Pirx.
 
 Run `gh auth login` for the service account before starting Pirx. The credential
 stays in the GitHub CLI credential store and is never copied into this JSON.
@@ -107,5 +124,13 @@ SQLite directory, repositories, and worktree directory, and give the container
 an init process that forwards `SIGTERM`. Do not store credentials in the image
 or configuration JSON.
 
-CI/Release continuation, MCP chat control, host power-off, and resource
-telemetry are deliberately separate follow-up Tasks.
+After a worker records `CODE_PUSHED`, the same loop creates or reuses its feature
+PR, observes CI for the exact head, creates one bounded repair Attempt after a
+correlated failure, and merges only after configured checks pass. It then
+creates an immutable one-Task Release and advances its Release PR through the
+same exact-head policy. Deployment and production-verification provider ports
+remain explicit follow-up configuration; until available, the Release truthfully
+remains in `deploying` and the runtime Task remains active.
+
+MCP chat control, host power-off, and resource telemetry are deliberately
+separate follow-up Tasks.
