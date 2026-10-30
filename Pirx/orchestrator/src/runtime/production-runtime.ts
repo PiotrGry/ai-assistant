@@ -5,7 +5,8 @@ import { CapabilityEnforcementGate, type CapabilityAuditSink } from "./capabilit
 import { SingleWorkerScheduler, type SchedulerCycleResult, type SchedulerOptions, type SchedulerPortResult } from "./scheduler.js";
 import { createWorkerRequest, type WorkerPort, type WorkerRequest, type WorkerRequestInput, type WorkerResult } from "./worker-contract.js";
 import { CapabilityAwareWorkerExecutionPort, type WorkerAdapterRegistry } from "./worker-execution.js";
-import type { WorkerFailureDiagnostic } from "./worker-diagnostic.js";
+import { createWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
+import { quotaCooldownFromDiagnostic } from "./worker-recovery.js";
 import { WorkerLifecycleCoordinator } from "./worker-lifecycle.js";
 import { WorkspaceProvisioner, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
 import type { RunnableTaskCandidate } from "./task-selection.js";
@@ -176,7 +177,10 @@ export class ProductionRuntime {
 
   #workerAvailability(candidate: RunnableTaskCandidate): SchedulerPortResult<"available" | "unavailable" | "unknown"> {
     if (repositoryFor(candidate.task, this.#repositories) === undefined) return portFailure("Task repository is not in the production allowlist.", "failed");
-    return this.#options.workerAdapters.get(this.#options.provider) === undefined ? { outcome: "success", value: "unavailable" } : { outcome: "success", value: "available" };
+    if (this.#options.workerAdapters.get(this.#options.provider) === undefined) return { outcome: "success", value: "unavailable" };
+    const durable = this.#store.workerAvailability.evaluate(this.#options.workerId, this.#options.provider, this.#clock.now());
+    if (durable.outcome !== "success") return portFailure(durable.message, "unknown");
+    return { outcome: "success", value: durable.value.recordedState === "missing" ? "available" : durable.value.availability };
   }
 
   #authorize(taskId: TaskId, required: readonly string[]): SchedulerPortResult<void> {
@@ -241,6 +245,12 @@ export class ProductionRuntime {
   #persist(taskId: TaskId, attemptIdValue: AttemptId, execution: ReturnType<typeof workerExecutionResult>): SchedulerPortResult<{ readonly checkpointRecorded: boolean }> {
     const attempt = this.#store.attempts.get(attemptIdValue);
     if (attempt.outcome !== "success" || attempt.value.taskId !== taskId || attempt.value.state !== "terminal") return portFailure("Worker result was not durably recorded.");
+    if (attempt.value.result === "QUOTA_EXHAUSTED") {
+      const cooldown = quotaCooldownFromDiagnostic({ workerId: this.#options.workerId, provider: this.#options.provider, observedAt: attempt.value.endedAt, diagnostic: attempt.value.diagnostic ?? createWorkerFailureDiagnostic("quota_exhausted") });
+      if (cooldown === undefined) return portFailure("Worker quota outcome could not be normalized.");
+      const stored = this.#store.workerAvailability.record(cooldown);
+      if (stored.outcome !== "success") return portFailure(stored.message, stored.outcome === "conflict" ? "conflict" : "failed");
+    }
     if (execution.outcome !== "success") {
       const checkpoint = this.#store.checkpoints.latestByTask(taskId);
       if (checkpoint.outcome !== "success" || checkpoint.value.previousAttemptId !== attemptIdValue) return portFailure("Terminal worker failure has no matching durable Checkpoint.");

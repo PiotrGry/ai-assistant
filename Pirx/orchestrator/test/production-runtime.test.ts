@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   ProductionRuntime,
   RuntimeSqliteStore,
+  createWorkerFailureDiagnostic,
   createCheckpoint,
   createTask,
   retryTask,
@@ -65,6 +66,33 @@ test("does not create an Attempt when the registered production provider is unav
     const result = await value.runtime.cycle();
     assert.deepEqual(result, { outcome: "deferred", reason: "worker_unavailable" });
     const attempts = value.store.attempts.listByTask(taskId); assert.equal(attempts.outcome, "success"); if (attempts.outcome === "success") assert.equal(attempts.value.length, 0);
+  } finally { await dispose(value); }
+});
+
+test("persists a normalized provider cooldown and defers later Tasks without another invocation", async () => {
+  const diagnostic = createWorkerFailureDiagnostic("quota_exhausted", { providerRecovery: { source: "provider_retry_after", retryAfterMs: 120_000, quotaBucket: "five-hour" } });
+  const value = await setup({ execute: async (request) => ({ kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "QUOTA_EXHAUSTED", reason: diagnostic.message, diagnostic }) });
+  try {
+    const first = await value.runtime.cycle();
+    assert.equal(first.outcome, "failed");
+    assert.equal(value.adapterCalls.value, 1);
+    const availability = value.store.workerAvailability.current("pirx-worker", "fake-claude");
+    assert.equal(availability.outcome, "success");
+    if (availability.outcome === "success") {
+      assert.equal(availability.value.state, "cooldown");
+      assert.equal(availability.value.startedAt, now);
+      assert.equal(availability.value.expiresAt, "2026-09-15T21:02:00.000Z");
+      assert.equal(availability.value.providerMetadata?.source, "provider_retry_after");
+    }
+
+    const secondTaskId = "production-runtime-task-two" as TaskId;
+    const second = createTask({ id: secondTaskId, githubReference: { ...issue, issueNumber: 195, nodeId: "issue-195", url: "https://github.com/PiotrGry/ai-assistant/issues/195" }, goal: "Wait for provider", scope: "production composition", acceptanceCriteria: ["no invocation during cooldown"], priority: 1, risk: "low", requiredCapabilities: ["repository.write", "git.push_assigned_branch"], createdAt: now });
+    assert.equal(second.ok, true);
+    if (!second.ok) return;
+    assert.equal(value.store.tasks.create(second.value).outcome, "success");
+    assert.equal(value.store.selection.synchronize({ taskId: secondTaskId, queueOrder: 2, dependencyState: "known", blockers: [], synchronizedAt: now }).outcome, "success");
+    assert.deepEqual(await value.runtime.cycle(), { outcome: "deferred", reason: "worker_unavailable" });
+    assert.equal(value.adapterCalls.value, 1);
   } finally { await dispose(value); }
 });
 

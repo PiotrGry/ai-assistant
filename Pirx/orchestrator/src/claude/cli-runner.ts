@@ -6,6 +6,8 @@ import { isAbsolute, join } from "node:path";
 
 import type { ClaudeCodeWorkerProfile } from "./worker-profile.js";
 import { createWorkerFailureDiagnostic, type WorkerFailureCode } from "../runtime/worker-diagnostic.js";
+import { extractProviderRecoveryMetadata } from "../runtime/worker-recovery.js";
+import type { WorkerProviderRecoveryMetadata } from "../runtime/worker-availability.js";
 
 export const CLAUDE_ROUND_TRIP_OUTCOMES = [
   "success",
@@ -197,7 +199,18 @@ function explicitFailureCode(parsed: unknown, stderr: string): "authentication_r
     return parsed.error_code as "authentication_required" | "quota_exhausted";
   }
   const marker = stderr.match(/\b(CLAUDE_AUTH_REQUIRED|CLAUDE_QUOTA_EXHAUSTED)\b/u)?.[1];
-  return marker === "CLAUDE_AUTH_REQUIRED" ? "authentication_required" : marker === "CLAUDE_QUOTA_EXHAUSTED" ? "quota_exhausted" : undefined;
+  if (marker === "CLAUDE_AUTH_REQUIRED") return "authentication_required";
+  if (marker === "CLAUDE_QUOTA_EXHAUSTED") return "quota_exhausted";
+  const providerText = [stderr, ...(isRecord(parsed) ? [parsed.message, parsed.error, parsed.result].filter((value): value is string => typeof value === "string") : [])].join("\n");
+  if (/\b(?:not authenticated|authentication required|login required|unauthorized)\b|\b401\b/iu.test(providerText)) return "authentication_required";
+  if (/\b(?:hit your session limit|quota exhausted|usage limit|rate limit|limit exceeded)\b|\b429\b/iu.test(providerText)) return "quota_exhausted";
+  return undefined;
+}
+function explicitFailure(parsed: unknown, stderr: string): { readonly outcome: "authentication_required" | "quota_exhausted"; readonly providerRecovery?: WorkerProviderRecoveryMetadata } | undefined {
+  const outcome = explicitFailureCode(parsed, stderr);
+  if (outcome === undefined) return undefined;
+  const providerRecovery = outcome === "quota_exhausted" ? extractProviderRecoveryMetadata(parsed) : undefined;
+  return { outcome, ...(providerRecovery === undefined ? {} : { providerRecovery }) };
 }
 function diagnosticCode(outcome: Exclude<ClaudeRoundTripOutcome, "success">): WorkerFailureCode {
   if (outcome === "claude_not_installed") return "spawn_failure";
@@ -209,9 +222,9 @@ function diagnosticCode(outcome: Exclude<ClaudeRoundTripOutcome, "success">): Wo
   if (outcome === "process_error") return "process_failure";
   return "adapter_failure";
 }
-function failure(outcome: Exclude<ClaudeRoundTripOutcome, "success">, requestId: string, startedAt: number, exitCode: number | null, code = diagnosticCode(outcome)): ClaudeRoundTripFailure {
+function failure(outcome: Exclude<ClaudeRoundTripOutcome, "success">, requestId: string, startedAt: number, exitCode: number | null, code = diagnosticCode(outcome), providerRecovery?: WorkerProviderRecoveryMetadata): ClaudeRoundTripFailure {
   const durationMs = Math.max(0, Date.now() - startedAt);
-  return { outcome, requestId, durationMs, exitCode, message: FAILURE_MESSAGES[outcome], diagnostic: createWorkerFailureDiagnostic(code, { exitCode, durationMs }) };
+  return { outcome, requestId, durationMs, exitCode, message: FAILURE_MESSAGES[outcome], diagnostic: createWorkerFailureDiagnostic(code, { exitCode, durationMs, ...(providerRecovery === undefined ? {} : { providerRecovery }) }) };
 }
 function validateStructuredOutput(value: unknown, requestId: string): value is { requestId: string; acknowledgement: string } {
   if (!isRecord(value) || Object.keys(value).length !== 2 || !Object.keys(value).every((key) => key === "requestId" || key === "acknowledgement")) return false;
@@ -380,8 +393,8 @@ export class ClaudeCodeCliRunner {
     let parsed: unknown;
     try { parsed = JSON.parse(stdout); }
     catch { return failure(explicitFailureCode(undefined, stderr) ?? (exitCode !== 0 ? "process_error" : "invalid_output"), input.requestId, input.startedAt, exitCode, exitCode !== 0 ? undefined : "malformed_cli_envelope"); }
-    const explicit = explicitFailureCode(parsed, stderr);
-    if (explicit !== undefined) return failure(explicit, input.requestId, input.startedAt, exitCode);
+    const explicit = explicitFailure(parsed, stderr);
+    if (explicit !== undefined) return failure(explicit.outcome, input.requestId, input.startedAt, exitCode, diagnosticCode(explicit.outcome), explicit.providerRecovery);
     if (exitCode !== 0) return failure("process_error", input.requestId, input.startedAt, exitCode);
     if (!isRecord(parsed) || parsed.type !== "result" || parsed.subtype !== "success" || parsed.is_error !== false) return failure("invalid_output", input.requestId, input.startedAt, exitCode, "malformed_cli_envelope");
     if (input.structuredOutput === true) {

@@ -550,6 +550,7 @@ export {
   WORKER_RECOVERY_SOURCES,
   evaluateWorkerAvailability,
   normalizeWorkerAvailabilityInput,
+  normalizeWorkerProviderRecoveryMetadata,
   validateWorkerAvailabilityRecord,
   type WorkerAvailabilityEvaluation,
   type WorkerAvailabilityInput,
@@ -558,6 +559,13 @@ export {
   type WorkerProviderRecoveryMetadata,
   type WorkerRecoverySource,
 } from "./runtime/worker-availability.js";
+export {
+  WORKER_RECOVERY_POLICY_LIMITS,
+  extractProviderRecoveryMetadata,
+  quotaCooldownFromDiagnostic,
+  type WorkerQuotaRecoveryInput,
+  type WorkerRecoveryPolicy,
+} from "./runtime/worker-recovery.js";
 export {
   LEASE_LIMITS,
   leaseDuration,

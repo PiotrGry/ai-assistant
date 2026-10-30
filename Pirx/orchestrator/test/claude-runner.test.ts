@@ -36,6 +36,8 @@ if (mode === "invalid-envelope") emit({ type: "message", text: "prose" });
 if (mode === "invalid-json") { process.stdout.write("not json"); process.exit(0); }
 if (mode === "auth") { process.stderr.write("CLAUDE_AUTH_REQUIRED"); process.exit(1); }
 if (mode === "quota") { process.stderr.write("CLAUDE_QUOTA_EXHAUSTED"); process.exit(1); }
+if (mode === "quota-prose") { process.stderr.write("You've hit your session limit; resets at 5pm"); process.exit(1); }
+if (mode === "quota-structured") emit({ error_code: "quota_exhausted", retry_after_ms: 120000, quota_bucket: "five-hour", status_code: "quota_exhausted" });
 if (mode === "process") { process.stderr.write("provider failed"); process.exit(17); }
 if (mode === "signal") { process.kill(process.pid, "SIGTERM"); }
 if (mode === "stdout-limit") { process.stdout.write("x".repeat(100000)); setInterval(() => {}, 1000); }
@@ -187,6 +189,18 @@ test("normalizes authentication, quota, process, and missing executable failures
   } finally {
     await rm(value.root, { recursive: true, force: true });
   }
+});
+
+test("preserves trustworthy structured quota recovery metadata without parsing prose", async () => {
+  const value = await fixture();
+  try {
+    const result = await runner(value, "quota-structured").run();
+    assert.equal(result.outcome, "quota_exhausted");
+    if (result.outcome === "quota_exhausted") assert.deepEqual(result.diagnostic.providerRecovery, { source: "provider_retry_after", retryAfterMs: 120_000, quotaBucket: "five-hour", providerStatusCode: "quota_exhausted" });
+    const prose = await runner(value, "quota-prose").run();
+    assert.equal(prose.outcome, "quota_exhausted");
+    if (prose.outcome === "quota_exhausted") assert.equal(prose.diagnostic.providerRecovery, undefined);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
 });
 
 test("terminates hung processes on timeout and cancellation, including forced kill", async () => {

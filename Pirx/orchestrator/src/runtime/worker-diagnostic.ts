@@ -1,3 +1,8 @@
+import {
+  normalizeWorkerProviderRecoveryMetadata,
+  type WorkerProviderRecoveryMetadata,
+} from "./worker-availability.js";
+
 export const WORKER_DIAGNOSTIC_SCHEMA_VERSION = 1 as const;
 
 export const WORKER_FAILURE_CODES = Object.freeze([
@@ -37,6 +42,18 @@ export function buildWorkerFailureDiagnosticSchema(): unknown {
       fieldNames: { type: "array", maxItems: 32, items: { type: "string", maxLength: 128 } },
       payloadLength: { type: "integer", minimum: 0, maximum: 1_048_576 },
       payloadDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+      providerRecovery: {
+        type: "object",
+        additionalProperties: false,
+        required: ["source"],
+        properties: {
+          source: { enum: ["provider_retry_after", "provider_reset", "bounded_default", "manual"] },
+          retryAfterMs: { type: "integer", minimum: 1, maximum: 604_800_000 },
+          resetAt: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+          quotaBucket: { type: "string", minLength: 1, maxLength: 256 },
+          providerStatusCode: { type: "string", minLength: 1, maxLength: 256 },
+        },
+      },
     },
   });
 }
@@ -53,6 +70,7 @@ export interface WorkerFailureDiagnostic {
   readonly fieldNames?: readonly string[];
   readonly payloadLength?: number;
   readonly payloadDigest?: string;
+  readonly providerRecovery?: WorkerProviderRecoveryMetadata;
 }
 
 const MESSAGES: Readonly<Record<WorkerFailureCode, string>> = Object.freeze({
@@ -87,7 +105,7 @@ function safeFields(value: unknown): readonly string[] | undefined {
   return fields.length === value.length ? Object.freeze([...fields]) : undefined;
 }
 
-export function createWorkerFailureDiagnostic(code: WorkerFailureCode, details: { readonly exitCode?: number | null; readonly durationMs?: number; readonly stage?: WorkerFailureDiagnostic["stage"]; readonly field?: string; readonly receivedType?: string; readonly fieldNames?: readonly string[]; readonly payloadLength?: number; readonly payloadDigest?: string } = {}): WorkerFailureDiagnostic {
+export function createWorkerFailureDiagnostic(code: WorkerFailureCode, details: { readonly exitCode?: number | null; readonly durationMs?: number; readonly stage?: WorkerFailureDiagnostic["stage"]; readonly field?: string; readonly receivedType?: string; readonly fieldNames?: readonly string[]; readonly payloadLength?: number; readonly payloadDigest?: string; readonly providerRecovery?: WorkerProviderRecoveryMetadata } = {}): WorkerFailureDiagnostic {
   const exitCode = safeNumber(details.exitCode, 255);
   const durationMs = safeNumber(details.durationMs, 300_000);
   const stage = details.stage;
@@ -96,6 +114,10 @@ export function createWorkerFailureDiagnostic(code: WorkerFailureCode, details: 
   const fieldNames = safeFields(details.fieldNames);
   const payloadLength = safeNumber(details.payloadLength, 1_048_576);
   const payloadDigest = typeof details.payloadDigest === "string" && /^[0-9a-f]{64}$/u.test(details.payloadDigest) ? details.payloadDigest : undefined;
+  let providerRecovery: WorkerProviderRecoveryMetadata | undefined;
+  try {
+    providerRecovery = code !== "quota_exhausted" ? undefined : normalizeWorkerProviderRecoveryMetadata(details.providerRecovery);
+  } catch { providerRecovery = undefined; }
   return Object.freeze({
     schemaVersion: WORKER_DIAGNOSTIC_SCHEMA_VERSION,
     code,
@@ -108,6 +130,7 @@ export function createWorkerFailureDiagnostic(code: WorkerFailureCode, details: 
     ...(fieldNames === undefined ? {} : { fieldNames }),
     ...(payloadLength === undefined ? {} : { payloadLength }),
     ...(payloadDigest === undefined ? {} : { payloadDigest }),
+    ...(providerRecovery === undefined ? {} : { providerRecovery }),
   });
 }
 
@@ -125,11 +148,14 @@ export function validateWorkerFailureDiagnostic(value: unknown): WorkerFailureDi
   const fieldNames = value.fieldNames === undefined ? undefined : safeFields(value.fieldNames);
   const payloadLength = value.payloadLength === undefined ? undefined : safeNumber(value.payloadLength, 1_048_576);
   const payloadDigest = value.payloadDigest === undefined ? undefined : typeof value.payloadDigest === "string" && /^[0-9a-f]{64}$/u.test(value.payloadDigest) ? value.payloadDigest : undefined;
+  let providerRecovery: WorkerProviderRecoveryMetadata | undefined;
+  try { providerRecovery = normalizeWorkerProviderRecoveryMetadata(value.providerRecovery as WorkerProviderRecoveryMetadata | undefined); }
+  catch { providerRecovery = undefined; }
   if ((value.exitCode !== undefined && exitCode === undefined) || (value.durationMs !== undefined && durationMs === undefined)) return undefined;
-  if ((value.stage !== undefined && stage === undefined) || (value.field !== undefined && field === undefined) || (value.receivedType !== undefined && receivedType === undefined) || (value.fieldNames !== undefined && fieldNames === undefined) || (value.payloadLength !== undefined && payloadLength === undefined) || (value.payloadDigest !== undefined && payloadDigest === undefined)) return undefined;
-  const allowed = new Set(["schemaVersion", "code", "message", "exitCode", "durationMs", "stage", "field", "receivedType", "fieldNames", "payloadLength", "payloadDigest"]);
+  if ((value.stage !== undefined && stage === undefined) || (value.field !== undefined && field === undefined) || (value.receivedType !== undefined && receivedType === undefined) || (value.fieldNames !== undefined && fieldNames === undefined) || (value.payloadLength !== undefined && payloadLength === undefined) || (value.payloadDigest !== undefined && payloadDigest === undefined) || (value.providerRecovery !== undefined && (providerRecovery === undefined || value.code !== "quota_exhausted"))) return undefined;
+  const allowed = new Set(["schemaVersion", "code", "message", "exitCode", "durationMs", "stage", "field", "receivedType", "fieldNames", "payloadLength", "payloadDigest", "providerRecovery"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) return undefined;
-  return Object.freeze({ schemaVersion: 1, code: value.code as WorkerFailureCode, message: value.message, ...(exitCode === undefined ? {} : { exitCode }), ...(durationMs === undefined ? {} : { durationMs }), ...(stage === undefined ? {} : { stage }), ...(field === undefined ? {} : { field }), ...(receivedType === undefined ? {} : { receivedType }), ...(fieldNames === undefined ? {} : { fieldNames }), ...(payloadLength === undefined ? {} : { payloadLength }), ...(payloadDigest === undefined ? {} : { payloadDigest }) });
+  return Object.freeze({ schemaVersion: 1, code: value.code as WorkerFailureCode, message: value.message, ...(exitCode === undefined ? {} : { exitCode }), ...(durationMs === undefined ? {} : { durationMs }), ...(stage === undefined ? {} : { stage }), ...(field === undefined ? {} : { field }), ...(receivedType === undefined ? {} : { receivedType }), ...(fieldNames === undefined ? {} : { fieldNames }), ...(payloadLength === undefined ? {} : { payloadLength }), ...(payloadDigest === undefined ? {} : { payloadDigest }), ...(providerRecovery === undefined ? {} : { providerRecovery }) });
 }
 
 export class WorkerFailureError extends Error {

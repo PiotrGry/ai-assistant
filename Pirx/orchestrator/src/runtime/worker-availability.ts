@@ -64,7 +64,7 @@ function bounded(value: unknown, label: string, maximum: number): string {
   return normalized;
 }
 
-function normalizeMetadata(value: WorkerProviderRecoveryMetadata | undefined): WorkerProviderRecoveryMetadata | undefined {
+export function normalizeWorkerProviderRecoveryMetadata(value: WorkerProviderRecoveryMetadata | undefined): WorkerProviderRecoveryMetadata | undefined {
   if (value === undefined) return undefined;
   if (!WORKER_RECOVERY_SOURCES.includes(value.source)) throw new Error("Worker recovery metadata source is invalid.");
   if (value.retryAfterMs !== undefined && (!Number.isSafeInteger(value.retryAfterMs) || value.retryAfterMs <= 0 || value.retryAfterMs > WORKER_AVAILABILITY_LIMITS.maximumRetryAfterMs)) throw new Error("Worker retry-after duration is invalid.");
@@ -85,7 +85,7 @@ export function normalizeWorkerAvailabilityInput(value: WorkerAvailabilityInput)
   const startedAt = timestamp(value.startedAt, "Worker availability start timestamp");
   const expiresAt = value.expiresAt === undefined ? undefined : timestamp(value.expiresAt, "Worker availability expiry timestamp");
   const reason = value.reason === undefined ? undefined : bounded(value.reason, "Worker availability reason", WORKER_AVAILABILITY_LIMITS.reason);
-  const providerMetadata = normalizeMetadata(value.providerMetadata);
+  const providerMetadata = normalizeWorkerProviderRecoveryMetadata(value.providerMetadata);
   if (value.state === "cooldown") {
     if (expiresAt === undefined || reason === undefined || Date.parse(expiresAt) <= Date.parse(startedAt)) throw new Error("Worker cooldown requires a future expiry and reason.");
   } else if (expiresAt !== undefined) {
