@@ -41,14 +41,36 @@ CLI credential stores.
   "workerOutputBytes": 16384,
   "workerErrorBytes": 16384,
   "maximumConsecutiveResumeFailures": 3,
-  "cycleIntervalMs": 5000,
-  "errorIntervalMs": 15000
+  "cycleIntervalMs": 30000,
+  "errorIntervalMs": 60000,
+  "githubProjectOwner": "PiotrGry",
+  "githubProjectNumber": 3,
+  "githubApiUrl": "https://api.github.com",
+  "githubTimeoutMs": 10000
 }
 ```
 
 Every field is required. Repositories form an explicit allowlist; test commands
 must match the bounded code-worker command policy. Update `baseRevision` to the
 reviewed revision from which a new assigned worktree may be created.
+
+Run `gh auth login` for the service account before starting Pirx. The credential
+stays in the GitHub CLI credential store and is never copied into this JSON.
+
+## Queue contract
+
+Before every scheduler cycle, Pirx reads one bounded snapshot of the configured
+GitHub Project. It executes only open items with a positive unique `Queue Order`,
+Worker `Pirx`, Work Type `Task`, `Bug`, or `Experiment`, and Status `Todo`, `Open`,
+or `In Progress`. A new executable Issue must contain `## Goal`,
+`## Implementation scope`, and checkbox items under `## Acceptance criteria`.
+
+Priority, Risk, repository allowlist, native `blockedBy` relationships, and the
+Markdown contract are validated before SQLite is changed. Open blockers skip
+only their dependent item. A failed or incomplete GitHub snapshot prevents a
+scheduler cycle, so Pirx never falls back to a stale Queue. SQLite remains
+authoritative after an Attempt starts; later Issue edits cannot rewrite that
+execution contract.
 
 ## Run
 
@@ -85,5 +107,5 @@ SQLite directory, repositories, and worktree directory, and give the container
 an init process that forwards `SIGTERM`. Do not store credentials in the image
 or configuration JSON.
 
-GitHub Queue synchronization, CI/Release continuation, MCP chat control, host
-power-off, and resource telemetry are deliberately separate follow-up Tasks.
+CI/Release continuation, MCP chat control, host power-off, and resource
+telemetry are deliberately separate follow-up Tasks.

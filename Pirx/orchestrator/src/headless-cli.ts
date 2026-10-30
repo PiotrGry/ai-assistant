@@ -1,8 +1,12 @@
 import { pathToFileURL } from "node:url";
 
 import { ProductionClaudeWorker } from "./claude/production-worker.js";
+import { loadGitHubConfig, type GitHubConfig } from "./github/config.js";
+import { GitHubQueueSnapshotReader } from "./github/queue-snapshot.js";
+import { GitHubTransport } from "./github/transport.js";
 import { HeadlessConfigurationError, loadHeadlessOrchestratorConfig } from "./runtime/headless-config.js";
-import { HeadlessOrchestratorService, type HeadlessServiceEvent } from "./runtime/headless-service.js";
+import { GitHubQueueReconciler, GitHubQueueSynchronizer } from "./runtime/github-queue-sync.js";
+import { HeadlessOrchestratorService, type HeadlessQueueReconciliationPort, type HeadlessServiceEvent } from "./runtime/headless-service.js";
 import { ProductionRuntime } from "./runtime/production-runtime.js";
 import { RuntimeSqliteStore } from "./runtime/sqlite.js";
 
@@ -19,7 +23,12 @@ function writeEvent(target: { write(value: string): unknown }, event: HeadlessSe
   target.write(`${JSON.stringify(event)}\n`);
 }
 
-export async function runHeadlessCli(host: HeadlessCliProcess = process): Promise<number> {
+export interface HeadlessCliOptions {
+  readonly queue?: HeadlessQueueReconciliationPort;
+  readonly githubConfigLoader?: (environment: NodeJS.ProcessEnv) => GitHubConfig;
+}
+
+export async function runHeadlessCli(host: HeadlessCliProcess = process, options: HeadlessCliOptions = {}): Promise<number> {
   let runtime: ProductionRuntime | undefined;
   try {
     const config = await loadHeadlessOrchestratorConfig(host.env);
@@ -34,8 +43,23 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process): Promis
       maximumConsecutiveResumeFailures: config.maximumConsecutiveResumeFailures,
       workerAdapters: { get: (provider) => provider === config.provider ? worker : undefined },
     });
+    const repositoryParts = config.repositories[0]!.repository.split("/");
+    const githubEnvironment: NodeJS.ProcessEnv = {
+      ...host.env,
+      PIRX_GITHUB_OWNER: repositoryParts[0], PIRX_GITHUB_REPOSITORY: repositoryParts[1],
+      PIRX_GITHUB_PROJECT_OWNER: config.githubProjectOwner, PIRX_GITHUB_PROJECT_NUMBER: String(config.githubProjectNumber),
+      PIRX_GITHUB_API_URL: config.githubApiUrl, PIRX_GITHUB_TIMEOUT_MS: String(config.githubTimeoutMs),
+    };
+    const githubConfig = (options.githubConfigLoader ?? loadGitHubConfig)(githubEnvironment);
+    const queue = options.queue ?? (() => {
+      const transport = new GitHubTransport(githubConfig);
+      const reader = new GitHubQueueSnapshotReader(transport, githubConfig);
+      const synchronizer = new GitHubQueueSynchronizer(store, { workerCapabilities: config.workerCapabilities, repositories: config.repositories.map((item) => item.repository) });
+      return new GitHubQueueReconciler(reader, synchronizer);
+    })();
     const service = new HeadlessOrchestratorService(runtime, {
       cycleIntervalMs: config.cycleIntervalMs, errorIntervalMs: config.errorIntervalMs,
+      queue,
       emit: (event) => writeEvent(event.event === "cycle_error" || event.outcome.includes("failed") || event.outcome.includes("timeout") ? host.stderr : host.stdout, event),
     });
     const stop = (signal: NodeJS.Signals): void => { void service.stop(signal); };

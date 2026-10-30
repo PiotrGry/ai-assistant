@@ -42,8 +42,12 @@ function validConfig(directory = "/tmp/pirx-headless"): Record<string, unknown> 
     workerOutputBytes: 16_384,
     workerErrorBytes: 16_384,
     maximumConsecutiveResumeFailures: 3,
-    cycleIntervalMs: 100,
-    errorIntervalMs: 200,
+    cycleIntervalMs: 30_000,
+    errorIntervalMs: 60_000,
+    githubProjectOwner: "PiotrGry",
+    githubProjectNumber: 3,
+    githubApiUrl: "https://api.github.com",
+    githubTimeoutMs: 10_000,
   };
 }
 
@@ -70,6 +74,18 @@ test("contains a cycle exception, uses the error delay, and continues to shutdow
   assert.deepEqual(delays, [250]);
   assert.equal(events.find((event) => event.event === "cycle_error")?.reason, "cycle_threw");
   assert.equal(JSON.stringify(events).includes("provider payload"), false);
+});
+
+test("does not execute stale runtime Queue data when GitHub reconciliation fails", async () => {
+  const port = runtime();
+  let service: HeadlessOrchestratorService;
+  service = new HeadlessOrchestratorService(port, {
+    cycleIntervalMs: 100, errorIntervalMs: 250,
+    queue: { reconcile: async () => ({ outcome: "rate_limited", message: "bounded retry exhausted" }) },
+    sleep: async () => { await service.stop("fixture"); },
+  });
+  assert.equal((await service.run()).outcome, "stopped");
+  assert.deepEqual(port.calls, ["recover", "shutdown"]);
 });
 
 test("closes storage once when startup recovery fails and reports a bounded outcome", async () => {
@@ -114,7 +130,7 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) test(`CLI drains gracefully
     const filename = join(directory, "config.json");
     await writeFile(filename, JSON.stringify(validConfig(directory)), { mode: 0o600 });
     const host = new FixtureHost(filename, signal);
-    assert.equal(await runHeadlessCli(host), 0);
+    assert.equal(await runHeadlessCli(host, { queue: { reconcile: async () => ({ outcome: "synchronized" }) }, githubConfigLoader: () => ({ token: "test-only", owner: "PiotrGry", repository: "ai-assistant", projectOwner: "PiotrGry", projectNumber: 3, apiUrl: "https://api.github.com", timeoutMs: 10_000 }) }), 0);
     assert.equal(host.exitCode, 0);
     assert.equal(host.errors.length, 0);
     assert.equal(host.output.some((line) => line.includes('"event":"stopped"')), true);

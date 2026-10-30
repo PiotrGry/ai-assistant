@@ -15,9 +15,13 @@ export interface HeadlessRuntimePort {
   status(): { readonly active: boolean; readonly stopping: boolean; readonly recovered: boolean };
 }
 
+export interface HeadlessQueueReconciliationPort {
+  reconcile(): Promise<{ readonly outcome: string; readonly message?: string }>;
+}
+
 export interface HeadlessServiceEvent {
   readonly schemaVersion: typeof HEADLESS_SERVICE_SCHEMA_VERSION;
-  readonly event: "starting" | "recovered" | "cycle" | "cycle_error" | "stopping" | "stopped";
+  readonly event: "starting" | "recovered" | "queue" | "cycle" | "cycle_error" | "stopping" | "stopped";
   readonly outcome: string;
   readonly reason?: string;
 }
@@ -27,6 +31,7 @@ export interface HeadlessServiceOptions {
   readonly errorIntervalMs?: number;
   readonly emit?: (event: HeadlessServiceEvent) => void;
   readonly sleep?: (durationMs: number, signal: AbortSignal) => Promise<void>;
+  readonly queue?: HeadlessQueueReconciliationPort;
 }
 
 export type HeadlessServiceResult =
@@ -62,6 +67,7 @@ export class HeadlessOrchestratorService {
   readonly #errorIntervalMs: number;
   readonly #emit: (event: HeadlessServiceEvent) => void;
   readonly #sleep: (durationMs: number, signal: AbortSignal) => Promise<void>;
+  readonly #queue: HeadlessQueueReconciliationPort | undefined;
   readonly #wake = new AbortController();
   #running = false;
   #stopRequested = false;
@@ -75,6 +81,7 @@ export class HeadlessOrchestratorService {
     this.#errorIntervalMs = options.errorIntervalMs ?? options.cycleIntervalMs;
     this.#emit = options.emit ?? (() => undefined);
     this.#sleep = options.sleep ?? defaultSleep;
+    this.#queue = options.queue;
   }
 
   public get running(): boolean { return this.#running; }
@@ -95,6 +102,15 @@ export class HeadlessOrchestratorService {
     while (!this.#stopRequested) {
       let delay = this.#cycleIntervalMs;
       try {
+        if (this.#queue !== undefined) {
+          const queue = await this.#queue.reconcile();
+          this.#event("queue", queue.outcome, queue.message);
+          if (queue.outcome !== "synchronized") {
+            delay = this.#errorIntervalMs;
+            if (!this.#stopRequested) await this.#sleep(delay, this.#wake.signal);
+            continue;
+          }
+        }
         const result = await this.#runtime.cycle();
         this.#event("cycle", result.outcome, "reason" in result ? result.reason : undefined);
       } catch {

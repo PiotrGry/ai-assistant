@@ -110,7 +110,7 @@ import {
   type WorkerProviderRecoveryMetadata,
 } from "./worker-availability.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 26 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 27 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -734,6 +734,15 @@ const MIGRATIONS: readonly string[] = [
     );
     CREATE INDEX IF NOT EXISTS runtime_worker_availability_current
       ON runtime_worker_availability (worker_id, provider, started_at DESC, sequence DESC);
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_task_external_blockers (
+      task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE CASCADE,
+      issue_identity TEXT NOT NULL CHECK (length(trim(issue_identity)) > 0),
+      PRIMARY KEY (task_id, issue_identity)
+    );
+    CREATE INDEX IF NOT EXISTS runtime_task_external_blockers_task
+      ON runtime_task_external_blockers (task_id, issue_identity);
   `,
 ];
 
@@ -1361,6 +1370,8 @@ export class TaskSelectionRepository {
         this.#store.database.prepare("INSERT INTO runtime_task_selection (task_id, queue_order, cooldown_until, dependency_state, synchronized_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET queue_order = excluded.queue_order, cooldown_until = excluded.cooldown_until, dependency_state = excluded.dependency_state, synchronized_at = excluded.synchronized_at").run(input.taskId, input.queueOrder ?? null, input.cooldownUntil ?? null, input.dependencyState, input.synchronizedAt);
         this.#store.database.prepare("DELETE FROM runtime_task_blockers WHERE task_id = ?").run(input.taskId);
         for (const blocker of input.blockers) this.#store.database.prepare("INSERT INTO runtime_task_blockers (task_id, prerequisite_task_id) VALUES (?, ?)").run(input.taskId, blocker);
+        this.#store.database.prepare("DELETE FROM runtime_task_external_blockers WHERE task_id = ?").run(input.taskId);
+        for (const blocker of input.externalBlockers ?? []) this.#store.database.prepare("INSERT INTO runtime_task_external_blockers (task_id, issue_identity) VALUES (?, ?)").run(input.taskId, blocker);
         return this.get(input.taskId);
       } catch (error: unknown) { return classifyStorageError(error); }
     });
@@ -1373,7 +1384,8 @@ export class TaskSelectionRepository {
         const row = this.#store.database.prepare("SELECT * FROM runtime_task_selection WHERE task_id = ?").get(taskId) as Record<string, unknown> | undefined;
         if (row === undefined) return notFound("Task selection metadata was not found.");
         const blockers = this.#store.database.prepare("SELECT prerequisite_task_id FROM runtime_task_blockers WHERE task_id = ? ORDER BY prerequisite_task_id").all(taskId) as Array<{ prerequisite_task_id: unknown }>;
-        if (typeof row.task_id !== "string" || (row.queue_order !== null && (typeof row.queue_order !== "number" || !Number.isSafeInteger(row.queue_order))) || (row.cooldown_until !== null && typeof row.cooldown_until !== "string") || typeof row.dependency_state !== "string" || typeof row.synchronized_at !== "string" || blockers.some((blocker) => typeof blocker.prerequisite_task_id !== "string")) return invalidRecord();
+        const externalBlockers = this.#store.database.prepare("SELECT issue_identity FROM runtime_task_external_blockers WHERE task_id = ? ORDER BY issue_identity").all(taskId) as Array<{ issue_identity: unknown }>;
+        if (typeof row.task_id !== "string" || (row.queue_order !== null && (typeof row.queue_order !== "number" || !Number.isSafeInteger(row.queue_order))) || (row.cooldown_until !== null && typeof row.cooldown_until !== "string") || typeof row.dependency_state !== "string" || typeof row.synchronized_at !== "string" || blockers.some((blocker) => typeof blocker.prerequisite_task_id !== "string") || externalBlockers.some((blocker) => typeof blocker.issue_identity !== "string")) return invalidRecord();
         const parsed = validateTaskSelectionMetadata({
           taskId: row.task_id as TaskId,
           ...(row.queue_order === null ? {} : { queueOrder: row.queue_order }),
@@ -1381,6 +1393,7 @@ export class TaskSelectionRepository {
           dependencyState: row.dependency_state as "known" | "unknown",
           synchronizedAt: row.synchronized_at as UtcTimestamp,
           blockers: blockers.map((blocker) => blocker.prerequisite_task_id as TaskId),
+          externalBlockers: externalBlockers.map((blocker) => blocker.issue_identity as string),
         });
         return parsed.ok ? success(parsed.value) : invalidRecord();
       } catch (error: unknown) { return classifyStorageError(error); }
@@ -1424,16 +1437,25 @@ export class TaskSelectionRepository {
     for (const task of tasks.value) {
       const metadata = metadataByTask.get(task.id);
       if (task.state !== "ready" && !retryRunnable.has(task.id)) {
-        explanations.push({ taskId: task.id, eligible: false, reasonCode: "NOT_READY", priority: task.priority, ...(metadata?.queueOrder === undefined ? {} : { queueOrder: metadata.queueOrder }), missingCapabilities: [], blockers: metadata?.blockers ?? [] });
+        explanations.push({ taskId: task.id, eligible: false, reasonCode: "NOT_READY", priority: task.priority, ...(metadata?.queueOrder === undefined ? {} : { queueOrder: metadata.queueOrder }), missingCapabilities: [], blockers: metadata?.blockers ?? [], ...(metadata?.externalBlockers.length ? { externalBlockers: metadata.externalBlockers } : {}) });
       }
     }
     if (reconciliationReasons.length > 0) return { outcome: "reconciliation_required", reasons: Object.freeze([...new Set(reconciliationReasons)].sort()), explanations: Object.freeze(explanations) };
+    const active = tasks.value.filter((task) => task.state === "in_progress" && !retryRunnable.has(task.id));
+    if (active.length > 1) return { outcome: "reconciliation_required", reasons: ["multiple_active_tasks"], explanations: Object.freeze(explanations) };
+    if (active.length === 1) {
+      for (const task of runnable.filter((value) => value.state === "ready")) {
+        const metadata = metadataByTask.get(task.id);
+        explanations.push({ taskId: task.id, eligible: false, reasonCode: "WIP_LIMIT_ACTIVE", priority: task.priority, ...(metadata?.queueOrder === undefined ? {} : { queueOrder: metadata.queueOrder }), missingCapabilities: [], blockers: metadata?.blockers ?? [], ...(metadata?.externalBlockers.length ? { externalBlockers: metadata.externalBlockers } : {}) });
+      }
+      return { outcome: "no_runnable_task", explanations: Object.freeze(explanations) };
+    }
     const eligible: RunnableTaskCandidate[] = [];
     for (const task of runnable) {
       const metadata = metadataByTask.get(task.id);
       if (metadata === undefined) continue;
       if (metadata.queueOrder === undefined) {
-        explanations.push({ taskId: task.id, eligible: false, reasonCode: "NOT_QUEUED", priority: task.priority, missingCapabilities: [], blockers: metadata.blockers });
+        explanations.push({ taskId: task.id, eligible: false, reasonCode: "NOT_QUEUED", priority: task.priority, missingCapabilities: [], blockers: metadata.blockers, ...(metadata.externalBlockers.length ? { externalBlockers: metadata.externalBlockers } : {}) });
         continue;
       }
       const missingBlocker = metadata.blockers.find((blocker) => !tasks.value.some((candidate) => candidate.id === blocker));
@@ -1444,8 +1466,8 @@ export class TaskSelectionRepository {
       const unfinished = metadata.blockers.filter((blocker) => tasks.value.some((candidate) => candidate.id === blocker && candidate.state !== "completed"));
       const missing = missingWorkerCapabilities(task, capabilities.value);
       const activeCooldown = cooldownIsActive(metadata.cooldownUntil, request.evaluatedAt) ? metadata.cooldownUntil : undefined;
-      const reasonCode = unfinished.length > 0 ? "BLOCKED_BY_PREREQUISITE" : activeCooldown !== undefined ? "COOLDOWN_ACTIVE" : missing.length > 0 ? "MISSING_CAPABILITY" : "ELIGIBLE";
-      const explanation: TaskEligibilityExplanation = { taskId: task.id, eligible: reasonCode === "ELIGIBLE", reasonCode, priority: task.priority, queueOrder: metadata.queueOrder, missingCapabilities: missing, blockers: metadata.blockers, ...(activeCooldown === undefined ? {} : { activeCooldown }) };
+      const reasonCode = unfinished.length > 0 || metadata.externalBlockers.length > 0 ? "BLOCKED_BY_PREREQUISITE" : activeCooldown !== undefined ? "COOLDOWN_ACTIVE" : missing.length > 0 ? "MISSING_CAPABILITY" : "ELIGIBLE";
+      const explanation: TaskEligibilityExplanation = { taskId: task.id, eligible: reasonCode === "ELIGIBLE", reasonCode, priority: task.priority, queueOrder: metadata.queueOrder, missingCapabilities: missing, blockers: metadata.blockers, ...(metadata.externalBlockers.length ? { externalBlockers: metadata.externalBlockers } : {}), ...(activeCooldown === undefined ? {} : { activeCooldown }) };
       explanations.push(explanation);
       if (explanation.eligible) eligible.push({ task, explanation });
     }

@@ -107,6 +107,7 @@ export {
   HEADLESS_SERVICE_SCHEMA_VERSION,
   HeadlessOrchestratorService,
   type HeadlessRuntimePort,
+  type HeadlessQueueReconciliationPort,
   type HeadlessServiceEvent,
   type HeadlessServiceOptions,
   type HeadlessServiceResult,
@@ -119,6 +120,26 @@ export {
   type HeadlessOrchestratorConfig,
   type HeadlessRepositoryConfig,
 } from "./runtime/headless-config.js";
+export {
+  GITHUB_QUEUE_SNAPSHOT_SCHEMA_VERSION,
+  GITHUB_QUEUE_LIMITS,
+  GitHubQueueSnapshotReader,
+  type GitHubQueueBlocker,
+  type GitHubQueueIssue,
+  type GitHubQueueSnapshot,
+  type GitHubQueueSnapshotOutcome,
+  type GitHubQueueSnapshotReaderOptions,
+  type GitHubQueueSnapshotResult,
+} from "./github/queue-snapshot.js";
+export {
+  GITHUB_QUEUE_SYNC_LIMITS,
+  GITHUB_QUEUE_SYNC_SCHEMA_VERSION,
+  GitHubQueueReconciler,
+  GitHubQueueSynchronizer,
+  type GitHubQueueReconcileResult,
+  type GitHubQueueSyncResult,
+  type GitHubQueueSynchronizerOptions,
+} from "./runtime/github-queue-sync.js";
 export {
   ProductionClaudeWorker,
   type ProductionClaudeRepositoryPolicy,

@@ -8,6 +8,7 @@ export const TASK_SELECTION_REASON_CODES = Object.freeze([
   "BLOCKED_BY_PREREQUISITE",
   "COOLDOWN_ACTIVE",
   "MISSING_CAPABILITY",
+  "WIP_LIMIT_ACTIVE",
   "ELIGIBLE",
 ] as const);
 export type TaskSelectionReasonCode = (typeof TASK_SELECTION_REASON_CODES)[number];
@@ -19,6 +20,7 @@ export interface TaskSelectionMetadata {
   readonly dependencyState: DependencyProjectionState;
   readonly synchronizedAt: UtcTimestamp;
   readonly blockers: readonly TaskId[];
+  readonly externalBlockers: readonly string[];
 }
 
 export interface TaskSelectionMetadataInput {
@@ -28,6 +30,7 @@ export interface TaskSelectionMetadataInput {
   readonly dependencyState: DependencyProjectionState;
   readonly synchronizedAt: UtcTimestamp;
   readonly blockers: readonly TaskId[];
+  readonly externalBlockers?: readonly string[];
 }
 
 export interface TaskSelectionWorker {
@@ -48,6 +51,7 @@ export interface TaskEligibilityExplanation {
   readonly queueOrder?: number;
   readonly missingCapabilities: readonly string[];
   readonly blockers: readonly TaskId[];
+  readonly externalBlockers?: readonly string[];
   readonly activeCooldown?: UtcTimestamp;
 }
 
@@ -73,7 +77,7 @@ function validTimestamp(value: unknown): value is UtcTimestamp {
   return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 }
 
-export function validateTaskSelectionMetadata(input: TaskSelectionMetadataInput): TaskSelectionValidationResult<TaskSelectionMetadataInput> {
+export function validateTaskSelectionMetadata(input: TaskSelectionMetadataInput): TaskSelectionValidationResult<TaskSelectionMetadata> {
   if (!validId(input.taskId)) return { ok: false, message: "Task selection metadata has an invalid Task ID." };
   if (input.queueOrder !== undefined && (!Number.isSafeInteger(input.queueOrder) || input.queueOrder <= 0)) return { ok: false, message: "Queue Order must be a positive integer when supplied." };
   if (input.cooldownUntil !== undefined && !validTimestamp(input.cooldownUntil)) return { ok: false, message: "Cooldown timestamp must be canonical UTC." };
@@ -81,7 +85,9 @@ export function validateTaskSelectionMetadata(input: TaskSelectionMetadataInput)
   if (input.dependencyState !== "known" && input.dependencyState !== "unknown") return { ok: false, message: "Dependency projection state is unsupported." };
   const blockers = [...new Set(input.blockers)];
   if (blockers.some((blocker) => !validId(blocker))) return { ok: false, message: "Blocker Task ID is invalid." };
-  return { ok: true, value: Object.freeze({ ...input, blockers: Object.freeze(blockers) }) };
+  const externalBlockers = [...new Set(input.externalBlockers ?? [])].sort();
+  if (externalBlockers.some((blocker) => typeof blocker !== "string" || blocker.length === 0 || blocker.length > 256 || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[1-9]\d*$/u.test(blocker))) return { ok: false, message: "External blocker Issue identity is invalid." };
+  return { ok: true, value: Object.freeze({ ...input, blockers: Object.freeze(blockers), externalBlockers: Object.freeze(externalBlockers) }) };
 }
 
 export function normalizeWorkerCapabilities(capabilities: readonly string[]): TaskSelectionValidationResult<readonly string[]> {

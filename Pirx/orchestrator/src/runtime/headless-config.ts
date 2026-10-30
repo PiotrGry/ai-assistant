@@ -28,6 +28,10 @@ export interface HeadlessOrchestratorConfig {
   readonly maximumConsecutiveResumeFailures: number;
   readonly cycleIntervalMs: number;
   readonly errorIntervalMs: number;
+  readonly githubProjectOwner: string;
+  readonly githubProjectNumber: number;
+  readonly githubApiUrl: string;
+  readonly githubTimeoutMs: number;
 }
 
 export class HeadlessConfigurationError extends Error {
@@ -35,7 +39,7 @@ export class HeadlessConfigurationError extends Error {
   public constructor(code: HeadlessConfigurationError["code"], message: string) { super(message.slice(0, 256)); this.name = "HeadlessConfigurationError"; this.code = code; }
 }
 
-const TOP_LEVEL_KEYS = new Set(["schemaVersion", "databasePath", "workerId", "provider", "workerCapabilities", "repositories", "worktreeParent", "leaseDurationMs", "shutdownTimeoutMs", "workerTimeoutMs", "workerOutputBytes", "workerErrorBytes", "maximumConsecutiveResumeFailures", "cycleIntervalMs", "errorIntervalMs"]);
+const TOP_LEVEL_KEYS = new Set(["schemaVersion", "databasePath", "workerId", "provider", "workerCapabilities", "repositories", "worktreeParent", "leaseDurationMs", "shutdownTimeoutMs", "workerTimeoutMs", "workerOutputBytes", "workerErrorBytes", "maximumConsecutiveResumeFailures", "cycleIntervalMs", "errorIntervalMs", "githubProjectOwner", "githubProjectNumber", "githubApiUrl", "githubTimeoutMs"]);
 const REPOSITORY_KEYS = new Set(["repository", "repositoryRoot", "baseBranch", "baseRevision", "remoteName", "testCommands"]);
 const SENSITIVE_KEY = /^(?:token|secret|password|passwd|api[_-]?key|authorization|cookie|private[_-]?key|credential|connection[_-]?string)$/iu;
 const SENSITIVE_VALUE = /(?:-----BEGIN [^-]*PRIVATE KEY-----|\bbearer\s+[A-Za-z0-9._~+/=-]+|\b(?:ghp_|github_pat_|xox[baprs]-|sk-)[A-Za-z0-9._-]+)/iu;
@@ -75,7 +79,10 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
   if (new Set(repositories.map((item) => item.repository)).size !== repositories.length) return invalid();
   if (!text(value.worktreeParent) || !isAbsolute(value.worktreeParent) || UNSAFE_PATH.test(value.worktreeParent)) return invalid();
   if (value.workerCapabilities.includes("tests.run") && repositories.some((item) => item.testCommands.length === 0)) return invalid();
-  if (!integer(value.leaseDurationMs, 1, PRODUCTION_RUNTIME_LIMITS.leaseDurationMs) || !integer(value.shutdownTimeoutMs, 1, PRODUCTION_RUNTIME_LIMITS.shutdownTimeoutMs) || !integer(value.workerTimeoutMs, 1, PRODUCTION_RUNTIME_LIMITS.workerTimeoutMs) || !integer(value.workerOutputBytes, 1, PRODUCTION_RUNTIME_LIMITS.workerOutputBytes) || !integer(value.workerErrorBytes, 1, PRODUCTION_RUNTIME_LIMITS.workerOutputBytes) || !integer(value.maximumConsecutiveResumeFailures, 1, 20) || !integer(value.cycleIntervalMs, HEADLESS_SERVICE_LIMITS.minimumIntervalMs, HEADLESS_SERVICE_LIMITS.maximumIntervalMs) || !integer(value.errorIntervalMs, HEADLESS_SERVICE_LIMITS.minimumIntervalMs, HEADLESS_SERVICE_LIMITS.maximumIntervalMs)) return invalid();
+  if (!text(value.githubProjectOwner, 100) || !/^[A-Za-z0-9_.-]+$/u.test(value.githubProjectOwner) || !integer(value.githubProjectNumber, 1, 1_000_000) || !text(value.githubApiUrl) || !integer(value.githubTimeoutMs, 1, 120_000)) return invalid();
+  let githubApiUrl: string;
+  try { const parsed = new URL(value.githubApiUrl); if ((parsed.protocol !== "https:" && parsed.protocol !== "http:") || parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "") return invalid(); githubApiUrl = parsed.toString().replace(/\/+$/u, ""); } catch { return invalid(); }
+  if (!integer(value.leaseDurationMs, 1, PRODUCTION_RUNTIME_LIMITS.leaseDurationMs) || !integer(value.shutdownTimeoutMs, 1, PRODUCTION_RUNTIME_LIMITS.shutdownTimeoutMs) || !integer(value.workerTimeoutMs, 1, PRODUCTION_RUNTIME_LIMITS.workerTimeoutMs) || !integer(value.workerOutputBytes, 1, PRODUCTION_RUNTIME_LIMITS.workerOutputBytes) || !integer(value.workerErrorBytes, 1, PRODUCTION_RUNTIME_LIMITS.workerOutputBytes) || !integer(value.maximumConsecutiveResumeFailures, 1, 20) || !integer(value.cycleIntervalMs, 30_000, HEADLESS_SERVICE_LIMITS.maximumIntervalMs) || !integer(value.errorIntervalMs, 30_000, HEADLESS_SERVICE_LIMITS.maximumIntervalMs)) return invalid();
   return Object.freeze({
     schemaVersion: HEADLESS_CONFIG_SCHEMA_VERSION,
     databasePath: resolve(value.databasePath), workerId: value.workerId.trim(), provider: value.provider.trim(),
@@ -84,6 +91,7 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
     shutdownTimeoutMs: value.shutdownTimeoutMs, workerTimeoutMs: value.workerTimeoutMs, workerOutputBytes: value.workerOutputBytes,
     workerErrorBytes: value.workerErrorBytes, maximumConsecutiveResumeFailures: value.maximumConsecutiveResumeFailures,
     cycleIntervalMs: value.cycleIntervalMs, errorIntervalMs: value.errorIntervalMs,
+    githubProjectOwner: value.githubProjectOwner, githubProjectNumber: value.githubProjectNumber, githubApiUrl, githubTimeoutMs: value.githubTimeoutMs,
   } as HeadlessOrchestratorConfig);
 }
 

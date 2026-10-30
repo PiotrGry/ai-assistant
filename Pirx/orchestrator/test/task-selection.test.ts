@@ -108,6 +108,19 @@ test("returns no_runnable_task for an empty eligible set and excludes non-ready 
   }
 });
 
+test("enforces one active Task across cycles until delivery advances it", async () => {
+  const setup = await fixture();
+  const store = RuntimeSqliteStore.open({ filename: setup.filename });
+  try {
+    assert.equal(store.tasks.create(task("task-active", 1, ["tests.run"], "in_progress")).outcome, "success");
+    assert.equal(store.tasks.create(task("task-next")).outcome, "success");
+    assert.equal(sync(store, "task-next", 20).outcome, "success");
+    const result = store.selection.select({ evaluatedAt: t2, worker: { workerId: "pirx", capabilities: ["tests.run"] } });
+    assert.equal(result.outcome, "no_runnable_task");
+    if (result.outcome === "no_runnable_task") assert.equal(result.explanations.find((value) => value.taskId === "task-next")?.reasonCode, "WIP_LIMIT_ACTIVE");
+  } finally { store.close(); await rm(setup.directory, { recursive: true, force: true }); }
+});
+
 test("selects only an explicitly checkpointed failed-CI successor Attempt from an in_progress Task", async () => {
   const setup = await fixture();
   const store = RuntimeSqliteStore.open({ filename: setup.filename });
