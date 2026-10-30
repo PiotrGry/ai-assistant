@@ -8,6 +8,7 @@ import { CapabilityAwareWorkerExecutionPort, type WorkerAdapterRegistry } from "
 import { createWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
 import { quotaCooldownFromDiagnostic } from "./worker-recovery.js";
 import { startResumedAttempt } from "./resume.js";
+import { RESUME_ESCALATION_LIMITS, ResumeEscalationCoordinator } from "./resume-escalation.js";
 import { WorkerLifecycleCoordinator } from "./worker-lifecycle.js";
 import { WorkspaceProvisioner, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
 import { WorkspaceResumeValidator, type WorkspaceResumeValidationRequest, type WorkspaceResumeValidationResult } from "./workspace-resume-validator.js";
@@ -50,6 +51,7 @@ export interface ProductionRuntimeOptions {
   readonly workerTimeoutMs?: number;
   readonly workerOutputBytes?: number;
   readonly workerErrorBytes?: number;
+  readonly maximumConsecutiveResumeFailures?: number;
   readonly workerAdapters: WorkerAdapterRegistry;
   readonly capabilityAudit?: CapabilityAuditSink;
   readonly workspace?: ProductionWorkspacePort;
@@ -94,6 +96,7 @@ function validateOptions(options: ProductionRuntimeOptions): void {
   if (new Set(options.repositories.map((item) => item.repository)).size !== options.repositories.length) throw new RangeError("Production repository allowlist contains duplicates.");
   for (const [value, maximum, label] of [[options.shutdownTimeoutMs ?? 5_000, PRODUCTION_RUNTIME_LIMITS.shutdownTimeoutMs, "shutdown"], [options.workerTimeoutMs ?? 30_000, PRODUCTION_RUNTIME_LIMITS.workerTimeoutMs, "worker"], [options.workerOutputBytes ?? 16_384, PRODUCTION_RUNTIME_LIMITS.workerOutputBytes, "worker output"]] as const) if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) throw new RangeError(`Production ${label} limit is invalid.`);
   if (options.workerErrorBytes !== undefined && (!Number.isSafeInteger(options.workerErrorBytes) || options.workerErrorBytes <= 0 || options.workerErrorBytes > PRODUCTION_RUNTIME_LIMITS.workerOutputBytes)) throw new RangeError("Production worker error limit is invalid.");
+  if (options.maximumConsecutiveResumeFailures !== undefined && (!Number.isSafeInteger(options.maximumConsecutiveResumeFailures) || options.maximumConsecutiveResumeFailures <= 0 || options.maximumConsecutiveResumeFailures > RESUME_ESCALATION_LIMITS.maximumFailures)) throw new RangeError("Production resume failure limit is invalid.");
   if (typeof options.workerAdapters.get !== "function") throw new RangeError("Production worker adapter registry is required.");
 }
 
@@ -130,6 +133,7 @@ export class ProductionRuntime {
   readonly #repositories: ReadonlyMap<string, ProductionRepositoryConfig>;
   readonly #workspace: ProductionWorkspacePort;
   readonly #resumeWorkspaceValidator: { validate(request: WorkspaceResumeValidationRequest): Promise<WorkspaceResumeValidationResult> };
+  readonly #resumeEscalation: ResumeEscalationCoordinator;
   readonly #scheduler: SingleWorkerScheduler;
   readonly #lifecycle: WorkerLifecycleCoordinator;
   readonly #clock: { now(): UtcTimestamp };
@@ -143,6 +147,7 @@ export class ProductionRuntime {
     this.#repositories = new Map(options.repositories.map((item) => [item.repository, Object.freeze({ ...item })]));
     this.#workspace = options.workspace ?? new WorkspaceProvisioner();
     this.#resumeWorkspaceValidator = options.resumeWorkspaceValidator ?? new WorkspaceResumeValidator(store);
+    this.#resumeEscalation = new ResumeEscalationCoordinator(store, { maximumConsecutiveFailures: options.maximumConsecutiveResumeFailures ?? RESUME_ESCALATION_LIMITS.defaultMaximumFailures });
     const audit = options.capabilityAudit ?? { record: () => undefined };
     const capabilityWorker = new CapabilityAwareWorkerExecutionPort(new CapabilityEnforcementGate(audit), options.workerAdapters, { now: () => this.#clock.now() });
     const worker: WorkerPort = { execute: async (request, signal) => {
@@ -176,7 +181,21 @@ export class ProductionRuntime {
   public get clock(): { now(): UtcTimestamp } { return this.#clock; }
   public status(): ProductionRuntimeStatus { return { schemaVersion: PRODUCTION_RUNTIME_SCHEMA_VERSION, workerId: this.#options.workerId, provider: this.#options.provider, repositoryCount: this.#repositories.size, active: this.#scheduler.active, stopping: this.#scheduler.stopping, recovered: this.#recovered }; }
   public recover(): Promise<SchedulerCycleResult> { return this.#scheduler.recover().then((value) => { if (value.outcome === "idle") this.#recovered = true; return value; }); }
-  public async cycle(): Promise<SchedulerCycleResult> { const result = await this.#scheduler.cycle(); if (result.outcome !== "reconciliation_required") this.#recovered = true; return result; }
+  public async cycle(): Promise<SchedulerCycleResult> {
+    if (!this.#scheduler.active) {
+      const tasks = this.#store.tasks.list();
+      if (tasks.outcome !== "success") return { outcome: "reconciliation_required", reason: "resume_escalation:task_projection_unavailable" };
+      for (const task of tasks.value) {
+        if (task.state !== "failed") continue;
+        const escalation = this.#resumeEscalation.evaluate(task.id, this.#clock.now());
+        if (escalation.outcome === "storage_error" || escalation.outcome === "invalid_request") return { outcome: "reconciliation_required", reason: `resume_escalation:${escalation.message}`.slice(0, 256) };
+        if (escalation.outcome === "escalated") return { outcome: "blocked", taskId: task.id, reason: escalation.message };
+      }
+    }
+    const result = await this.#scheduler.cycle();
+    if (result.outcome !== "reconciliation_required") this.#recovered = true;
+    return result;
+  }
   public async shutdown(): Promise<{ readonly outcome: "stopped" | "timeout"; readonly interrupted: boolean }> { const stopped = await this.#scheduler.shutdown(); if (stopped.outcome === "stopped") this.#store.close(); return stopped; }
   public close(): void { this.#store.close(); }
 
@@ -202,17 +221,18 @@ export class ProductionRuntime {
     if (history.outcome !== "success") return portFailure(history.message);
     const ordinal = history.value.length + 1;
     const previous = history.value[history.value.length - 1];
-    if (task.value.state === "failed" && previous?.state === "terminal" && previous.result === "QUOTA_EXHAUSTED") {
+    if (task.value.state === "failed" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED")) {
       const checkpoint = this.#store.checkpoints.latestByTask(taskId);
-      if (checkpoint.outcome !== "success" || checkpoint.value.previousAttemptId !== previous.id || checkpoint.value.trigger !== "PROVIDER_QUOTA") return portFailure("Quota resume Checkpoint does not match the latest Attempt.", "conflict");
+      const expectedTrigger = previous.result === "QUOTA_EXHAUSTED" ? "PROVIDER_QUOTA" : "RECOVERABLE_FAILURE";
+      if (checkpoint.outcome !== "success" || checkpoint.value.previousAttemptId !== previous.id || checkpoint.value.trigger !== expectedTrigger) return portFailure("Resume Checkpoint does not match the latest Attempt.", "conflict");
       const ownership = this.#store.workspaces.getByTaskAttempt(taskId, previous.id);
-      if (ownership.outcome !== "success") return portFailure("Quota resume requires active durable workspace ownership.", "conflict");
-      if (ownership.value.repository !== repository.repository || ownership.value.repositoryRoot !== repository.repositoryRoot || ownership.value.assignedBranch !== previous.branch || ownership.value.worktreePath !== previous.worktree) return portFailure("Quota resume workspace ownership does not match the predecessor Attempt.", "conflict");
+      if (ownership.outcome !== "success") return portFailure("Resume requires active durable workspace ownership.", "conflict");
+      if (ownership.value.repository !== repository.repository || ownership.value.repositoryRoot !== repository.repositoryRoot || ownership.value.assignedBranch !== previous.branch || ownership.value.worktreePath !== previous.worktree) return portFailure("Resume workspace ownership does not match the predecessor Attempt.", "conflict");
       const validated = await this.#resumeWorkspaceValidator.validate({ taskId, attemptId: previous.id, repository: ownership.value.repository, repositoryRoot: ownership.value.repositoryRoot, worktreePath: ownership.value.worktreePath, assignedBranch: ownership.value.assignedBranch, expectedCurrentCommit: ownership.value.currentRevision, expectedOwnershipVersion: ownership.value.version, ...(this.#options.workerTimeoutMs === undefined ? {} : { timeoutMs: this.#options.workerTimeoutMs }) });
-      if (validated.outcome !== "valid") return portFailure(`Quota resume workspace validation failed: ${validated.outcome}.`, validated.outcome === "unknown" ? "unknown" : "conflict");
+      if (validated.outcome !== "valid") return portFailure(`Resume workspace validation failed: ${validated.outcome}.`, validated.outcome === "unknown" ? "unknown" : "conflict");
       const id = this.#options.attemptIdFactory?.(taskId, ordinal, now) ?? attemptId(taskId, ordinal, now);
       const resumed = startResumedAttempt(this.#store, taskId, { check: () => ({ repository: "present", branch: "present", worktree: "present", currentCommit: "present" }) }, { id, worker: workerId, provider: this.#options.provider, branch: ownership.value.assignedBranch, worktree: ownership.value.worktreePath, currentCommit: ownership.value.currentRevision }, now, { transferWorkspaceOwnership: true });
-      if (resumed.outcome !== "ready" || !("attempt" in resumed)) return portFailure("Quota resume could not create a durable successor Attempt.", resumed.outcome === "human_action_required" ? "conflict" : "failed");
+      if (resumed.outcome !== "ready" || !("attempt" in resumed)) return portFailure("Resume could not create a durable successor Attempt.", resumed.outcome === "human_action_required" ? "conflict" : "failed");
       return { outcome: "success", value: { attemptId: resumed.attempt.id } };
     }
     if (task.value.state !== "ready") {

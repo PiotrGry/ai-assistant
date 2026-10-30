@@ -16,7 +16,7 @@ export const TASK_TRANSITIONS: Readonly<Record<TaskState, readonly TaskState[]>>
   ready: ["in_progress", "blocked", "cancelled"],
   in_progress: ["in_progress", "blocked", "failed", "completed", "cancelled"],
   blocked: ["ready", "in_progress", "cancelled"],
-  failed: ["ready", "in_progress", "cancelled"],
+  failed: ["ready", "in_progress", "blocked", "cancelled"],
   completed: [],
   cancelled: [],
 });

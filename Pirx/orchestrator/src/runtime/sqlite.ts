@@ -1165,7 +1165,8 @@ export class LeaseRepository {
         if (task.state === "failed") {
           const latestAttempt = this.#store.database.prepare("SELECT id, state, result FROM runtime_attempts WHERE task_id = ? ORDER BY ordinal DESC LIMIT 1").get(input.taskId) as { id: string; state: string; result: string | null } | undefined;
           const latestCheckpoint = this.#store.database.prepare("SELECT previous_attempt_id, trigger, json_extract(content_json, '$.currentState') AS current_state FROM runtime_checkpoints WHERE task_id = ? ORDER BY created_sequence DESC, created_at DESC, id DESC LIMIT 1").get(input.taskId) as { previous_attempt_id: string; trigger: string; current_state: string } | undefined;
-          if (latestAttempt?.state !== "terminal" || latestAttempt.result !== "QUOTA_EXHAUSTED" || latestCheckpoint?.previous_attempt_id !== latestAttempt.id || latestCheckpoint.trigger !== "PROVIDER_QUOTA" || latestCheckpoint.current_state !== "failed") return conflict("Failed Task is not an eligible checkpointed quota resume.");
+          const expectedTrigger = latestAttempt?.result === "QUOTA_EXHAUSTED" ? "PROVIDER_QUOTA" : latestAttempt?.result === "FAILED" ? "RECOVERABLE_FAILURE" : undefined;
+          if (latestAttempt?.state !== "terminal" || expectedTrigger === undefined || latestCheckpoint?.previous_attempt_id !== latestAttempt.id || latestCheckpoint.trigger !== expectedTrigger || latestCheckpoint.current_state !== "failed") return conflict("Failed Task is not an eligible checkpointed resume.");
         }
         const taskLease = this.#store.database.prepare("SELECT id FROM runtime_leases WHERE task_id = ? AND state = 'active'").get(input.taskId);
         if (taskLease !== undefined) return conflict("Task already has an active Lease.");
@@ -1323,10 +1324,11 @@ export class TaskSelectionRepository {
     if (task.state === "failed") {
       const latest = history.value[history.value.length - 1];
       if (latest === undefined) return { runnable: false, reconciliationReason: `missing_quota_attempt:${task.id}` };
-      if (latest.state !== "terminal" || latest.result !== "QUOTA_EXHAUSTED") return { runnable: false };
+      if (latest.state !== "terminal" || (latest.result !== "QUOTA_EXHAUSTED" && latest.result !== "FAILED")) return { runnable: false };
       const checkpoint = this.#store.checkpoints.latestByTask(task.id);
-      if (checkpoint.outcome !== "success") return { runnable: false, reconciliationReason: `quota_checkpoint_unavailable:${task.id}` };
-      if (checkpoint.value.taskId !== task.id || checkpoint.value.previousAttemptId !== latest.id || checkpoint.value.trigger !== "PROVIDER_QUOTA" || checkpoint.value.currentState !== task.state) return { runnable: false, reconciliationReason: `quota_checkpoint_mismatch:${task.id}` };
+      if (checkpoint.outcome !== "success") return { runnable: false, reconciliationReason: `resume_checkpoint_unavailable:${task.id}` };
+      const expectedTrigger = latest.result === "QUOTA_EXHAUSTED" ? "PROVIDER_QUOTA" : "RECOVERABLE_FAILURE";
+      if (checkpoint.value.taskId !== task.id || checkpoint.value.previousAttemptId !== latest.id || checkpoint.value.trigger !== expectedTrigger || checkpoint.value.currentState !== task.state) return { runnable: false, reconciliationReason: `resume_checkpoint_mismatch:${task.id}` };
       const activeLease = this.#store.leases.getActiveByTask(task.id);
       if (activeLease.outcome === "success") return { runnable: false, reconciliationReason: `active_lease_requires_reconciliation:${task.id}` };
       if (activeLease.outcome !== "not_found") return { runnable: false, reconciliationReason: `lease_lookup_unavailable:${task.id}` };

@@ -385,6 +385,15 @@ export {
   type WorkspaceReferenceStatus,
 } from "./runtime/resume.js";
 export {
+  RESUME_ESCALATION_LIMITS,
+  RESUME_ESCALATION_SCHEMA_VERSION,
+  ResumeEscalationCoordinator,
+  type ResumeEscalationEvidence,
+  type ResumeEscalationPolicy,
+  type ResumeEscalationReason,
+  type ResumeEscalationResult,
+} from "./runtime/resume-escalation.js";
+export {
   CAPABILITY_VOCABULARY,
   SENSITIVE_CAPABILITIES,
   evaluateCapabilities,

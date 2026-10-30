@@ -13,6 +13,7 @@ import {
   retryTask,
   startInitialAttempt,
   transitionAttempt,
+  transitionTask,
   type AttemptId,
   type TaskId,
   type UtcTimestamp,
@@ -164,6 +165,43 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
     assert.equal(store.tasks.list().outcome, "success");
     const allTasks = store.tasks.list();
     if (allTasks.outcome === "success") assert.equal(allTasks.value.length, 1);
+    runtime.close();
+  } finally {
+    try { store.close(); } catch { /* runtime may already have closed it */ }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("surfaces ambiguous resume state as human action before another Lease or worker invocation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-production-resume-escalation-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  let workerCalls = 0;
+  try {
+    const created = createTask({ id: taskId, githubReference: issue, goal: "Escalate ambiguity", scope: "production composition", acceptanceCriteria: ["human action"], priority: 1, risk: "medium", requiredCapabilities: ["repository.write", "git.push_assigned_branch"], createdAt: now });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    assert.equal(store.tasks.create(created.value).outcome, "success");
+    assert.equal(store.selection.synchronize({ taskId, queueOrder: 1, dependencyState: "known", blockers: [], synchronizedAt: now }).outcome, "success");
+    const started = store.startAttempt(taskId, { id: "ambiguous-attempt-1" as AttemptId, worker: "pirx-worker", provider: "fake-claude", branch: "pirx/ambiguous", worktree: "/tmp/pirx-ambiguous", currentCommit: baseRevision }, now);
+    assert.equal(started.outcome, "success");
+    if (started.outcome !== "success") return;
+    const terminal = transitionAttempt(started.value.attempt, "running", { type: "finish", result: "UNKNOWN", blockingReason: "provider result is ambiguous", currentCommit: baseRevision }, "2026-09-15T21:01:00.000Z" as UtcTimestamp);
+    assert.equal(terminal.ok, true);
+    if (!terminal.ok) return;
+    assert.equal(store.attempts.update(terminal.value, "running").outcome, "success");
+    const failed = transitionTask(started.value.task, "in_progress", { type: "fail", reason: "provider result is ambiguous" }, "2026-09-15T21:01:00.000Z" as UtcTimestamp);
+    assert.equal(failed.ok, true);
+    if (!failed.ok) return;
+    assert.equal(store.tasks.update(failed.value, { state: started.value.task.state, updatedAt: started.value.task.updatedAt }).outcome, "success");
+    const runtime = new ProductionRuntime(store, { workerId: "pirx-worker", provider: "fake-claude", workerCapabilities: ["repository.write", "git.push_assigned_branch"], repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }], worktreeParent: "/tmp/pirx-worktrees", leaseDurationMs: 60_000, maximumConsecutiveResumeFailures: 2, workerAdapters: { get: () => ({ execute: async (request) => { workerCalls += 1; return { kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "FAILED", reason: "must not run" }; } }) }, clock: { now: () => "2026-09-15T21:02:00.000Z" as UtcTimestamp } });
+    const result = await runtime.cycle();
+    assert.equal(result.outcome, "blocked");
+    if (result.outcome === "blocked") assert.match(result.reason, /Human action required/u);
+    assert.equal(workerCalls, 0);
+    assert.equal(store.leases.getActiveByTask(taskId).outcome, "not_found");
+    const task = store.tasks.get(taskId);
+    assert.equal(task.outcome, "success");
+    if (task.outcome === "success") assert.equal(task.value.state, "blocked");
     runtime.close();
   } finally {
     try { store.close(); } catch { /* runtime may already have closed it */ }
