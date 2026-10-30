@@ -101,6 +101,9 @@ export interface StartedResumeAttempt {
   readonly attempt: RetriedTask["attempt"];
 }
 export type ResumeStartResult = ResumeContextResult | StartedResumeAttempt;
+export interface StartResumedAttemptOptions {
+  readonly transferWorkspaceOwnership?: boolean;
+}
 
 function failure(outcome: ResumeFailure["outcome"], reason: ResumeReason, message: string, field?: string): ResumeFailure {
   return field === undefined ? { outcome, reason, message } : { outcome, reason, message, field };
@@ -223,10 +226,10 @@ interface ResumeTransactionStarted {
   readonly attempt: RetriedTask["attempt"];
 }
 
-export function startResumedAttempt(store: RuntimeSqliteStore, taskId: string, workspace: WorkspaceReferencePort, input: Omit<StartAttemptInput, "predecessorAttemptId">, evaluatedAt: UtcTimestamp): ResumeStartResult {
+export function startResumedAttempt(store: RuntimeSqliteStore, taskId: string, workspace: WorkspaceReferencePort, input: Omit<StartAttemptInput, "predecessorAttemptId">, evaluatedAt: UtcTimestamp, options: StartResumedAttemptOptions = {}): ResumeStartResult {
   const initial = buildResumeContext(store, taskId, workspace);
   if (initial.outcome !== "ready") return concurrentSuccessor(store, taskId, initial);
-  const committed = store.transaction<ResumeTransactionDecision | ResumeTransactionStarted>(({ tasks, attempts }) => {
+  const committed = store.transaction<ResumeTransactionDecision | ResumeTransactionStarted>(({ tasks, attempts, workspaces }) => {
     const current = buildResumeContext(store, taskId, workspace);
     if (current.outcome !== "ready") return { outcome: "success" as const, value: { kind: "decision" as const, result: concurrentSuccessor(store, taskId, current) } satisfies ResumeTransactionDecision };
     const task = tasks.get(taskId);
@@ -241,6 +244,10 @@ export function startResumedAttempt(store: RuntimeSqliteStore, taskId: string, w
     if (taskUpdate.outcome !== "success") return taskUpdate;
     const attempt = attempts.create(started.value.attempt);
     if (attempt.outcome !== "success") return attempt;
+    if (options.transferWorkspaceOwnership === true) {
+      const transferred = workspaces.transfer({ taskId: task.value.id, fromAttemptId: current.context.previousAttemptId, toAttemptId: started.value.attempt.id, transferredAt: evaluatedAt });
+      if (transferred.outcome !== "success") return transferred;
+    }
     return { outcome: "success" as const, value: { kind: "started" as const, context: current.context, attempt: started.value.attempt } satisfies ResumeTransactionStarted };
   });
   if (committed.outcome !== "success") return storageFailure("successor", committed);

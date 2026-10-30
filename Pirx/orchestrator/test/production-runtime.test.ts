@@ -96,6 +96,81 @@ test("persists a normalized provider cooldown and defers later Tasks without ano
   } finally { await dispose(value); }
 });
 
+test("resumes the same quota-failed Task with a new leased Attempt after cooldown", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-production-quota-resume-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  let clock = now;
+  let calls = 0;
+  try {
+    const created = createTask({ id: taskId, githubReference: issue, goal: "Resume after quota", scope: "production composition", acceptanceCriteria: ["same Task, new Attempt"], priority: 1, risk: "low", requiredCapabilities: ["repository.write", "git.push_assigned_branch"], createdAt: now });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    assert.equal(store.tasks.create(created.value).outcome, "success");
+    assert.equal(store.selection.synchronize({ taskId, queueOrder: 1, dependencyState: "known", blockers: [], synchronizedAt: now }).outcome, "success");
+    const diagnostic = createWorkerFailureDiagnostic("quota_exhausted", { providerRecovery: { source: "provider_retry_after", retryAfterMs: 120_000 } });
+    const runtime = new ProductionRuntime(store, {
+      workerId: "pirx-worker",
+      provider: "fake-claude",
+      workerCapabilities: ["repository.write", "git.push_assigned_branch"],
+      repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }],
+      worktreeParent: "/tmp/pirx-worktrees",
+      leaseDurationMs: 60_000,
+      workerTimeoutMs: 5_000,
+      attemptIdFactory: (_task, ordinal) => `quota-resume-attempt-${ordinal}` as AttemptId,
+      workerAdapters: { get: () => ({ execute: async (request) => {
+        calls += 1;
+        const lease = store.leases.getActiveByTask(taskId);
+        assert.equal(lease.outcome, "success");
+        assert.equal(lease.outcome === "success" ? lease.value.attemptId : undefined, request.attemptId);
+        return calls === 1
+          ? { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "QUOTA_EXHAUSTED" as const, reason: diagnostic.message, diagnostic }
+          : { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED" as const, branch: request.workspace.branch, finalCommit: "c".repeat(40) };
+      } }) },
+      workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, `pirx-${request.taskId}-${request.attemptId}`) } }) },
+      resumeWorkspaceValidator: { validate: async () => ({ outcome: "valid", message: "exact durable workspace verified" }) },
+      clock: { now: () => clock },
+    });
+
+    const first = await runtime.cycle();
+    assert.equal(first.outcome, "failed");
+    assert.equal(calls, 1);
+    const firstHistory = store.attempts.listByTask(taskId);
+    assert.equal(firstHistory.outcome, "success");
+    if (firstHistory.outcome !== "success") return;
+    assert.equal(firstHistory.value.length, 1);
+    assert.equal(firstHistory.value[0]?.state, "terminal");
+    if (firstHistory.value[0]?.state === "terminal") assert.equal(firstHistory.value[0].result, "QUOTA_EXHAUSTED");
+    const checkpoint = store.checkpoints.latestByTask(taskId);
+    assert.equal(checkpoint.outcome, "success");
+    if (checkpoint.outcome === "success") assert.equal(checkpoint.value.previousAttemptId, firstHistory.value[0]?.id);
+
+    clock = "2026-09-15T21:02:00.000Z" as UtcTimestamp;
+    const resumed = await runtime.cycle();
+    assert.equal(resumed.outcome, "started", JSON.stringify(resumed));
+    assert.equal(calls, 2);
+    const history = store.attempts.listByTask(taskId);
+    assert.equal(history.outcome, "success");
+    if (history.outcome === "success") {
+      assert.equal(history.value.length, 2);
+      assert.deepEqual(history.value.map((item) => item.ordinal), [1, 2]);
+      assert.equal(history.value[1]?.predecessorAttemptId, history.value[0]?.id);
+      assert.equal(history.value[1]?.checkpointReference, checkpoint.outcome === "success" ? checkpoint.value.id : undefined);
+      assert.equal(history.value[1]?.state, "terminal");
+      if (history.value[1]?.state === "terminal") assert.equal(history.value[1].result, "CODE_PUSHED");
+      const ownership = store.workspaces.getByTaskAttempt(taskId, history.value[1]!.id);
+      assert.equal(ownership.outcome, "success");
+      if (ownership.outcome === "success") assert.equal(ownership.value.currentRevision, "c".repeat(40));
+    }
+    assert.equal(store.tasks.list().outcome, "success");
+    const allTasks = store.tasks.list();
+    if (allTasks.outcome === "success") assert.equal(allTasks.value.length, 1);
+    runtime.close();
+  } finally {
+    try { store.close(); } catch { /* runtime may already have closed it */ }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("claims the durable CI retry Attempt after acquiring its Lease without creating Attempt 3", async () => {
   const setup = await mkdtemp(join(tmpdir(), "pirx-production-retry-"));
   const store = RuntimeSqliteStore.open({ filename: join(setup, "runtime.sqlite") });

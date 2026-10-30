@@ -68,9 +68,10 @@ async function prepare(filename: string): Promise<{ store: RuntimeSqliteStore; t
   const store = RuntimeSqliteStore.open({ filename });
   const createdTask = task();
   assert.equal(store.tasks.create(createdTask).outcome, "success");
-  const started = store.startAttempt(createdTask.id, { id: "resume-attempt-1" as AttemptId, worker: "pirx", provider: "test", branch: "task/resume" }, t1);
+  const started = store.startAttempt(createdTask.id, { id: "resume-attempt-1" as AttemptId, worker: "pirx", provider: "test", branch: "task/resume", worktree: "/tmp/pirx-resume", currentCommit: "abc123" }, t1);
   assert.equal(started.outcome, "success");
   if (started.outcome !== "success") throw new Error("start failed");
+  assert.equal(store.workspaces.claim({ taskId: createdTask.id, attemptId: started.value.attempt.id, repository: "PiotrGry/ai-assistant", repositoryRoot: "/tmp/pirx-repository", assignedBranch: "task/resume", worktreePath: "/tmp/pirx-resume", expectedBaseRevision: "abc123", acquiredAt: t1 }).outcome, "success");
   const finished = transitionAttempt(started.value.attempt, "running", { type: "finish", result: "FAILED", blockingReason: "provider stopped" }, t2);
   if (!finished.ok) throw new Error(finished.error.message);
   assert.equal(store.attempts.update(finished.value, "running").outcome, "success");
@@ -172,6 +173,48 @@ test("creates a successor Attempt transactionally and records its predecessor", 
     const duplicate = startResumedAttempt(setupValue.store, setupValue.task.id, presentWorkspace, { id: "resume-attempt-3" as AttemptId, worker: "pirx", provider: "test" }, t3);
     assert.equal(duplicate.outcome, "blocked");
     if (duplicate.outcome === "blocked") assert.equal(duplicate.reason, "CONCURRENT_SUCCESSOR");
+  } finally {
+    setupValue.store.close();
+    await rm(value.directory, { recursive: true, force: true });
+  }
+});
+
+test("atomically transfers exclusive workspace ownership to the resumed Attempt", async () => {
+  const value = await fixture();
+  const setupValue = await prepare(value.filename);
+  try {
+    const result = startResumedAttempt(setupValue.store, setupValue.task.id, presentWorkspace, { id: "resume-attempt-owned" as AttemptId, worker: "pirx", provider: "test", branch: "task/resume", worktree: "/tmp/pirx-resume", currentCommit: "abc123" }, t3, { transferWorkspaceOwnership: true });
+    assert.equal(result.outcome, "ready");
+    if (result.outcome !== "ready" || !("attempt" in result)) return;
+    assert.equal(setupValue.store.workspaces.getByTaskAttempt(setupValue.task.id, setupValue.attemptId).outcome, "not_found");
+    const ownership = setupValue.store.workspaces.getByTaskAttempt(setupValue.task.id, result.attempt.id);
+    assert.equal(ownership.outcome, "success");
+    if (ownership.outcome === "success") {
+      assert.equal(ownership.value.attemptId, result.attempt.id);
+      assert.equal(ownership.value.version, 2);
+    }
+  } finally {
+    setupValue.store.close();
+    await rm(value.directory, { recursive: true, force: true });
+  }
+});
+
+test("rolls back Task and Attempt creation when workspace ownership cannot transfer", async () => {
+  const value = await fixture();
+  const setupValue = await prepare(value.filename);
+  try {
+    const ownership = setupValue.store.workspaces.getByTaskAttempt(setupValue.task.id, setupValue.attemptId);
+    assert.equal(ownership.outcome, "success");
+    if (ownership.outcome !== "success") return;
+    assert.equal(setupValue.store.workspaces.release(ownership.value.attemptId, ownership.value.ownershipToken, ownership.value.version, t3).outcome, "success");
+    const result = startResumedAttempt(setupValue.store, setupValue.task.id, presentWorkspace, { id: "resume-attempt-rollback" as AttemptId, worker: "pirx", provider: "test" }, t3, { transferWorkspaceOwnership: true });
+    assert.equal(result.outcome, "blocked");
+    const history = setupValue.store.attempts.listByTask(setupValue.task.id);
+    assert.equal(history.outcome, "success");
+    if (history.outcome === "success") assert.equal(history.value.length, 1);
+    const storedTask = setupValue.store.tasks.get(setupValue.task.id);
+    assert.equal(storedTask.outcome, "success");
+    if (storedTask.outcome === "success") assert.equal(storedTask.value.state, "failed");
   } finally {
     setupValue.store.close();
     await rm(value.directory, { recursive: true, force: true });

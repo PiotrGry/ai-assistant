@@ -11,6 +11,7 @@ import {
   retryTask,
   startInitialAttempt,
   transitionAttempt,
+  transitionTask,
   type TaskSelectionMetadataInput,
   type TaskId,
   type TaskSnapshot,
@@ -136,6 +137,59 @@ test("selects only an explicitly checkpointed failed-CI successor Attempt from a
     const result = store.selection.select({ evaluatedAt: t3, worker: { workerId: "pirx", capabilities: ["tests.run"] } });
     assert.equal(result.outcome, "selected");
     if (result.outcome === "selected") assert.equal(result.candidate.task.id, currentTask.id);
+  } finally {
+    store.close();
+    await rm(setup.directory, { recursive: true, force: true });
+  }
+});
+
+test("selects a quota-failed Task only after its cooldown and prerequisites are complete", async () => {
+  const setup = await fixture();
+  const store = RuntimeSqliteStore.open({ filename: setup.filename });
+  try {
+    const prerequisite = task("quota-prerequisite");
+    const resumable = task("quota-resume");
+    assert.equal(store.tasks.create(prerequisite).outcome, "success");
+    assert.equal(store.tasks.create(resumable).outcome, "success");
+    assert.equal(sync(store, prerequisite.id, undefined).outcome, "success");
+    assert.equal(sync(store, resumable.id, 10, { blockers: [prerequisite.id], cooldownUntil: t3 }).outcome, "success");
+    const started = store.startAttempt(resumable.id, { id: "quota-attempt-1" as never, worker: "pirx", provider: "test", branch: "pirx/quota-resume", worktree: "/tmp/pirx-quota-resume", currentCommit: "a".repeat(40) }, t1);
+    assert.equal(started.outcome, "success");
+    if (started.outcome !== "success") return;
+    const terminal = transitionAttempt(started.value.attempt, "running", { type: "finish", result: "QUOTA_EXHAUSTED", blockingReason: "quota exhausted" }, t2);
+    assert.equal(terminal.ok, true);
+    if (!terminal.ok) return;
+    assert.equal(store.attempts.update(terminal.value, "running").outcome, "success");
+    const failedTransition = transitionTask(started.value.task, "in_progress", { type: "fail", reason: "quota exhausted" }, t2);
+    assert.equal(failedTransition.ok, true);
+    if (!failedTransition.ok) return;
+    const failed = failedTransition.value;
+    assert.equal(store.tasks.update(failed, { state: started.value.task.state, updatedAt: started.value.task.updatedAt }).outcome, "success");
+    const checkpoint = createCheckpoint({ id: "quota-checkpoint" as never, taskId: resumable.id, previousAttemptId: terminal.value.id, trigger: "PROVIDER_QUOTA", createdAt: t2, goal: resumable.goal, currentState: "failed", repository: "PiotrGry/ai-assistant", branch: "pirx/quota-resume", worktree: "/tmp/pirx-quota-resume", currentCommit: "a".repeat(40), completedWork: [], remainingWork: ["resume after cooldown"], changedFiles: [], findings: [], hypotheses: [], tests: [], evidence: [], blockingReason: "quota exhausted", lastAction: "saved quota checkpoint", resumeInstruction: "resume the same Task" });
+    assert.equal(checkpoint.ok, true);
+    if (!checkpoint.ok) return;
+    assert.equal(store.checkpoints.save(checkpoint.value).outcome, "success");
+
+    const before = store.selection.select({ evaluatedAt: t2, worker: { workerId: "pirx", capabilities: ["tests.run"] } });
+    assert.equal(before.outcome, "no_runnable_task");
+    if (before.outcome === "no_runnable_task") assert.equal(before.explanations.find((item) => item.taskId === resumable.id)?.reasonCode, "BLOCKED_BY_PREREQUISITE");
+    const prerequisiteStarted = store.startAttempt(prerequisite.id, { id: "quota-prerequisite-attempt" as never, worker: "pirx", provider: "test" }, t1);
+    assert.equal(prerequisiteStarted.outcome, "success");
+    if (prerequisiteStarted.outcome !== "success") return;
+    const prerequisiteTerminal = transitionAttempt(prerequisiteStarted.value.attempt, "running", { type: "finish", result: "CODE_PUSHED", branch: "pirx/prerequisite", finalCommit: "b".repeat(40) }, t2);
+    assert.equal(prerequisiteTerminal.ok, true);
+    if (!prerequisiteTerminal.ok) return;
+    assert.equal(store.attempts.update(prerequisiteTerminal.value, "running").outcome, "success");
+    const prerequisiteCompleted = transitionTask(prerequisiteStarted.value.task, "in_progress", { type: "complete", attempts: [prerequisiteTerminal.value], evidence: { attemptId: prerequisiteTerminal.value.id, finalCommit: "b".repeat(40), evidenceReference: "test:quota-prerequisite" } }, t2);
+    assert.equal(prerequisiteCompleted.ok, true);
+    if (!prerequisiteCompleted.ok) return;
+    assert.equal(store.tasks.update(prerequisiteCompleted.value, { state: prerequisiteStarted.value.task.state, updatedAt: prerequisiteStarted.value.task.updatedAt }).outcome, "success");
+    const duringCooldown = store.selection.select({ evaluatedAt: t2, worker: { workerId: "pirx", capabilities: ["tests.run"] } });
+    assert.equal(duringCooldown.outcome, "no_runnable_task");
+    if (duringCooldown.outcome === "no_runnable_task") assert.equal(duringCooldown.explanations.find((item) => item.taskId === resumable.id)?.reasonCode, "COOLDOWN_ACTIVE");
+    const after = store.selection.select({ evaluatedAt: t3, worker: { workerId: "pirx", capabilities: ["tests.run"] } });
+    assert.equal(after.outcome, "selected");
+    if (after.outcome === "selected") assert.equal(after.candidate.task.id, resumable.id);
   } finally {
     store.close();
     await rm(setup.directory, { recursive: true, force: true });

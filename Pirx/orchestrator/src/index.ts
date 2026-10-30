@@ -378,6 +378,7 @@ export {
   type ResumeReason,
   type ResumeStartResult,
   type ResumeWorkspaceReference,
+  type StartResumedAttemptOptions,
   type StartedResumeAttempt,
   type WorkspaceReferenceCheck,
   type WorkspaceReferencePort,

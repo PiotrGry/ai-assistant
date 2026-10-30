@@ -7,8 +7,10 @@ import { createWorkerRequest, type WorkerPort, type WorkerRequest, type WorkerRe
 import { CapabilityAwareWorkerExecutionPort, type WorkerAdapterRegistry } from "./worker-execution.js";
 import { createWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
 import { quotaCooldownFromDiagnostic } from "./worker-recovery.js";
+import { startResumedAttempt } from "./resume.js";
 import { WorkerLifecycleCoordinator } from "./worker-lifecycle.js";
 import { WorkspaceProvisioner, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
+import { WorkspaceResumeValidator, type WorkspaceResumeValidationRequest, type WorkspaceResumeValidationResult } from "./workspace-resume-validator.js";
 import type { RunnableTaskCandidate } from "./task-selection.js";
 import type { AttemptId, AttemptSnapshot, TaskId, TaskSnapshot, UtcTimestamp } from "./task-domain.js";
 import { RuntimeSqliteStore, type RuntimeSqliteStoreOptions, type RuntimeSqliteStore as RuntimeSqliteStoreType, type StorageResult } from "./sqlite.js";
@@ -51,6 +53,7 @@ export interface ProductionRuntimeOptions {
   readonly workerAdapters: WorkerAdapterRegistry;
   readonly capabilityAudit?: CapabilityAuditSink;
   readonly workspace?: ProductionWorkspacePort;
+  readonly resumeWorkspaceValidator?: { validate(request: WorkspaceResumeValidationRequest): Promise<WorkspaceResumeValidationResult> };
   readonly clock?: { now(): UtcTimestamp };
   readonly attemptIdFactory?: (taskId: TaskId, ordinal: number, now: UtcTimestamp) => AttemptId;
   readonly branchFactory?: (task: TaskSnapshot) => string;
@@ -126,6 +129,7 @@ export class ProductionRuntime {
   readonly #options: ProductionRuntimeOptions;
   readonly #repositories: ReadonlyMap<string, ProductionRepositoryConfig>;
   readonly #workspace: ProductionWorkspacePort;
+  readonly #resumeWorkspaceValidator: { validate(request: WorkspaceResumeValidationRequest): Promise<WorkspaceResumeValidationResult> };
   readonly #scheduler: SingleWorkerScheduler;
   readonly #lifecycle: WorkerLifecycleCoordinator;
   readonly #clock: { now(): UtcTimestamp };
@@ -138,6 +142,7 @@ export class ProductionRuntime {
     this.#clock = options.clock ?? { now: nowUtc };
     this.#repositories = new Map(options.repositories.map((item) => [item.repository, Object.freeze({ ...item })]));
     this.#workspace = options.workspace ?? new WorkspaceProvisioner();
+    this.#resumeWorkspaceValidator = options.resumeWorkspaceValidator ?? new WorkspaceResumeValidator(store);
     const audit = options.capabilityAudit ?? { record: () => undefined };
     const capabilityWorker = new CapabilityAwareWorkerExecutionPort(new CapabilityEnforcementGate(audit), options.workerAdapters, { now: () => this.#clock.now() });
     const worker: WorkerPort = { execute: async (request, signal) => {
@@ -188,7 +193,7 @@ export class ProductionRuntime {
     return missing.length === 0 ? { outcome: "success", value: undefined } : portFailure(`Worker is missing required capabilities: ${missing.join(", ")}.`);
   }
 
-  #startAttempt(taskId: TaskId, workerId: string, now: UtcTimestamp): SchedulerPortResult<{ readonly attemptId: AttemptId }> {
+  async #startAttempt(taskId: TaskId, workerId: string, now: UtcTimestamp): Promise<SchedulerPortResult<{ readonly attemptId: AttemptId }>> {
     const task = this.#store.tasks.get(taskId);
     if (task.outcome !== "success") return portFailure(task.message);
     const repository = repositoryFor(task.value, this.#repositories);
@@ -197,6 +202,19 @@ export class ProductionRuntime {
     if (history.outcome !== "success") return portFailure(history.message);
     const ordinal = history.value.length + 1;
     const previous = history.value[history.value.length - 1];
+    if (task.value.state === "failed" && previous?.state === "terminal" && previous.result === "QUOTA_EXHAUSTED") {
+      const checkpoint = this.#store.checkpoints.latestByTask(taskId);
+      if (checkpoint.outcome !== "success" || checkpoint.value.previousAttemptId !== previous.id || checkpoint.value.trigger !== "PROVIDER_QUOTA") return portFailure("Quota resume Checkpoint does not match the latest Attempt.", "conflict");
+      const ownership = this.#store.workspaces.getByTaskAttempt(taskId, previous.id);
+      if (ownership.outcome !== "success") return portFailure("Quota resume requires active durable workspace ownership.", "conflict");
+      if (ownership.value.repository !== repository.repository || ownership.value.repositoryRoot !== repository.repositoryRoot || ownership.value.assignedBranch !== previous.branch || ownership.value.worktreePath !== previous.worktree) return portFailure("Quota resume workspace ownership does not match the predecessor Attempt.", "conflict");
+      const validated = await this.#resumeWorkspaceValidator.validate({ taskId, attemptId: previous.id, repository: ownership.value.repository, repositoryRoot: ownership.value.repositoryRoot, worktreePath: ownership.value.worktreePath, assignedBranch: ownership.value.assignedBranch, expectedCurrentCommit: ownership.value.currentRevision, expectedOwnershipVersion: ownership.value.version, ...(this.#options.workerTimeoutMs === undefined ? {} : { timeoutMs: this.#options.workerTimeoutMs }) });
+      if (validated.outcome !== "valid") return portFailure(`Quota resume workspace validation failed: ${validated.outcome}.`, validated.outcome === "unknown" ? "unknown" : "conflict");
+      const id = this.#options.attemptIdFactory?.(taskId, ordinal, now) ?? attemptId(taskId, ordinal, now);
+      const resumed = startResumedAttempt(this.#store, taskId, { check: () => ({ repository: "present", branch: "present", worktree: "present", currentCommit: "present" }) }, { id, worker: workerId, provider: this.#options.provider, branch: ownership.value.assignedBranch, worktree: ownership.value.worktreePath, currentCommit: ownership.value.currentRevision }, now, { transferWorkspaceOwnership: true });
+      if (resumed.outcome !== "ready" || !("attempt" in resumed)) return portFailure("Quota resume could not create a durable successor Attempt.", resumed.outcome === "human_action_required" ? "conflict" : "failed");
+      return { outcome: "success", value: { attemptId: resumed.attempt.id } };
+    }
     if (task.value.state !== "ready") {
       if (task.value.state !== "in_progress" || previous?.state !== "running" || previous.predecessorAttemptId === undefined || previous.checkpointReference === undefined) return portFailure("Only an explicitly checkpointed retry Attempt can be claimed by the scheduler.", "conflict");
       const predecessor = history.value.find((attempt) => attempt.id === previous.predecessorAttemptId);
