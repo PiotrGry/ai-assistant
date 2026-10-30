@@ -4,6 +4,9 @@ This package is the bounded GitHub API boundary for Pirx M1. It keeps
 authentication at the transport boundary, returns sanitized typed outcomes,
 and prevents business logic from using a raw HTTP or GraphQL client.
 
+The supervised production entrypoint and its strict configuration are
+documented in [docs/headless-orchestrator.md](docs/headless-orchestrator.md).
+
 ## Configuration
 
 `loadGitHubConfig()` validates the repository settings before the first request

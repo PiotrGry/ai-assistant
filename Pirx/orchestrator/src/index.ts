@@ -103,6 +103,28 @@ export {
   type ProductionWorkspacePort,
 } from "./runtime/production-runtime.js";
 export {
+  HEADLESS_SERVICE_LIMITS,
+  HEADLESS_SERVICE_SCHEMA_VERSION,
+  HeadlessOrchestratorService,
+  type HeadlessRuntimePort,
+  type HeadlessServiceEvent,
+  type HeadlessServiceOptions,
+  type HeadlessServiceResult,
+} from "./runtime/headless-service.js";
+export {
+  HEADLESS_CONFIG_SCHEMA_VERSION,
+  HeadlessConfigurationError,
+  loadHeadlessOrchestratorConfig,
+  parseHeadlessOrchestratorConfig,
+  type HeadlessOrchestratorConfig,
+  type HeadlessRepositoryConfig,
+} from "./runtime/headless-config.js";
+export {
+  ProductionClaudeWorker,
+  type ProductionClaudeRepositoryPolicy,
+  type ProductionClaudeWorkerOptions,
+} from "./claude/production-worker.js";
+export {
   GITHUB_PROJECT_FIELD_NAMES,
   GitHubProjectSchemaResolver,
   GitHubProjectSynchronizer,

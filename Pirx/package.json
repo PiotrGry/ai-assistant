@@ -15,6 +15,7 @@
   "calendar:authorize": "pnpm --filter @pirx/mcp-server calendar:authorize",
   "github:round-trip": "pnpm --filter @pirx/orchestrator github:round-trip",
   "claude:round-trip": "pnpm --filter @pirx/orchestrator claude:round-trip",
+    "orchestrator:run": "node --enable-source-maps orchestrator/dist/headless-cli.js",
     "start": "node --enable-source-maps agent/dist/index.js",
     "tui": "node --enable-source-maps tui/dist/index.js"
   },
