@@ -542,6 +542,22 @@ export {
   type WorkspaceOwnershipState,
 } from "./runtime/workspace-ownership.js";
 export { WorkspaceOwnershipRepository } from "./runtime/sqlite.js";
+export { WorkerAvailabilityRepository } from "./runtime/sqlite.js";
+export {
+  WORKER_AVAILABILITY_LIMITS,
+  WORKER_AVAILABILITY_SCHEMA_VERSION,
+  WORKER_AVAILABILITY_STATES,
+  WORKER_RECOVERY_SOURCES,
+  evaluateWorkerAvailability,
+  normalizeWorkerAvailabilityInput,
+  validateWorkerAvailabilityRecord,
+  type WorkerAvailabilityEvaluation,
+  type WorkerAvailabilityInput,
+  type WorkerAvailabilityRecord,
+  type WorkerAvailabilityState,
+  type WorkerProviderRecoveryMetadata,
+  type WorkerRecoverySource,
+} from "./runtime/worker-availability.js";
 export {
   LEASE_LIMITS,
   leaseDuration,

@@ -100,8 +100,17 @@ import {
   type ReleaseCorrelationRecord,
   type ReleaseCorrelationState,
 } from "./release-correlation.js";
+import {
+  evaluateWorkerAvailability,
+  normalizeWorkerAvailabilityInput,
+  validateWorkerAvailabilityRecord,
+  type WorkerAvailabilityEvaluation,
+  type WorkerAvailabilityInput,
+  type WorkerAvailabilityRecord,
+  type WorkerProviderRecoveryMetadata,
+} from "./worker-availability.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 25 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 26 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -209,6 +218,7 @@ export interface RuntimeTransaction {
   readonly featureMerges: FeatureMergeRepository;
   readonly shipmentCycles: ShipmentCycleRepository;
   readonly retryDecisions: RetryDecisionRepository;
+  readonly workerAvailability: WorkerAvailabilityRepository;
 }
 
 export class RuntimeStorageError extends Error {
@@ -706,6 +716,24 @@ const MIGRATIONS: readonly string[] = [
     );
     CREATE INDEX IF NOT EXISTS runtime_release_production_verifications_release
       ON runtime_release_production_verifications (release_id, observed_at DESC, id DESC);
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_worker_availability (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      worker_id TEXT NOT NULL CHECK (length(trim(worker_id)) > 0),
+      provider TEXT NOT NULL CHECK (length(trim(provider)) > 0),
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      state TEXT NOT NULL CHECK (state IN ('available', 'unavailable', 'cooldown', 'unknown')),
+      started_at TEXT NOT NULL,
+      expires_at TEXT,
+      reason TEXT,
+      provider_metadata_json TEXT CHECK (provider_metadata_json IS NULL OR json_valid(provider_metadata_json)),
+      UNIQUE (worker_id, provider, started_at),
+      CHECK ((state = 'cooldown' AND expires_at IS NOT NULL AND reason IS NOT NULL) OR (state <> 'cooldown' AND expires_at IS NULL)),
+      CHECK ((state NOT IN ('unavailable', 'unknown')) OR reason IS NOT NULL)
+    );
+    CREATE INDEX IF NOT EXISTS runtime_worker_availability_current
+      ON runtime_worker_availability (worker_id, provider, started_at DESC, sequence DESC);
   `,
 ];
 
@@ -2434,6 +2462,99 @@ export class RetryDecisionRepository {
   }
 }
 
+function workerAvailabilityFromRow(row: Record<string, unknown>): StorageResult<WorkerAvailabilityRecord> {
+  try {
+    if (typeof row.sequence !== "number" || !Number.isSafeInteger(row.sequence) || row.sequence <= 0 || row.schema_version !== 1 || typeof row.worker_id !== "string" || typeof row.provider !== "string" || typeof row.state !== "string" || typeof row.started_at !== "string") return invalidRecord();
+    let providerMetadata: WorkerProviderRecoveryMetadata | undefined;
+    if (row.provider_metadata_json !== null) {
+      if (typeof row.provider_metadata_json !== "string") return invalidRecord();
+      providerMetadata = JSON.parse(row.provider_metadata_json) as WorkerProviderRecoveryMetadata;
+    }
+    const value: WorkerAvailabilityRecord = {
+      schemaVersion: 1,
+      sequence: row.sequence,
+      workerId: row.worker_id,
+      provider: row.provider,
+      state: row.state as WorkerAvailabilityRecord["state"],
+      startedAt: row.started_at as UtcTimestamp,
+      ...(row.expires_at === null ? {} : { expiresAt: row.expires_at as UtcTimestamp }),
+      ...(row.reason === null ? {} : { reason: row.reason as string }),
+      ...(providerMetadata === undefined ? {} : { providerMetadata }),
+    };
+    return validateWorkerAvailabilityRecord(value) ? success(Object.freeze(value)) : invalidRecord();
+  } catch {
+    return invalidRecord();
+  }
+}
+
+export class WorkerAvailabilityRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public record(input: WorkerAvailabilityInput): StorageResult<WorkerAvailabilityRecord> {
+    return this.#store.execute(() => {
+      let normalized: WorkerAvailabilityInput;
+      try { normalized = normalizeWorkerAvailabilityInput(input); }
+      catch { return { outcome: "invalid_record", message: "Worker availability input is invalid." }; }
+      const existing = this.#get("worker_id = ? AND provider = ? AND started_at = ?", normalized.workerId, normalized.provider, normalized.startedAt);
+      if (existing.outcome === "success") {
+        const comparable = { workerId: existing.value.workerId, provider: existing.value.provider, state: existing.value.state, startedAt: existing.value.startedAt, ...(existing.value.expiresAt === undefined ? {} : { expiresAt: existing.value.expiresAt }), ...(existing.value.reason === undefined ? {} : { reason: existing.value.reason }), ...(existing.value.providerMetadata === undefined ? {} : { providerMetadata: existing.value.providerMetadata }) };
+        return JSON.stringify(comparable) === JSON.stringify(normalized) ? existing : conflict("Worker availability identity conflicts with an existing record.");
+      }
+      if (existing.outcome !== "not_found") return existing;
+      try {
+        this.#store.database.prepare("INSERT INTO runtime_worker_availability (worker_id, provider, schema_version, state, started_at, expires_at, reason, provider_metadata_json) VALUES (?, ?, 1, ?, ?, ?, ?, ?)").run(normalized.workerId, normalized.provider, normalized.state, normalized.startedAt, normalized.expiresAt ?? null, normalized.reason ?? null, normalized.providerMetadata === undefined ? null : JSON.stringify(normalized.providerMetadata));
+        return this.#get("worker_id = ? AND provider = ? AND started_at = ?", normalized.workerId, normalized.provider, normalized.startedAt);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public current(workerId: string, provider: string): StorageResult<WorkerAvailabilityRecord> {
+    try {
+      const normalized = normalizeWorkerAvailabilityInput({ workerId, provider, state: "available", startedAt: "2000-01-01T00:00:00.000Z" as UtcTimestamp });
+      return this.#get("worker_id = ? AND provider = ? ORDER BY started_at DESC, sequence DESC", normalized.workerId, normalized.provider);
+    } catch {
+      return { outcome: "invalid_record", message: "Worker availability identity is invalid." };
+    }
+  }
+
+  public evaluate(workerId: string, provider: string, evaluatedAt: UtcTimestamp): StorageResult<WorkerAvailabilityEvaluation> {
+    const current = this.current(workerId, provider);
+    if (current.outcome === "not_found") {
+      try { return success(evaluateWorkerAvailability(undefined, evaluatedAt, { workerId, provider })); }
+      catch { return { outcome: "invalid_record", message: "Worker availability evaluation is invalid." }; }
+    }
+    if (current.outcome !== "success") return current;
+    try { return success(evaluateWorkerAvailability(current.value, evaluatedAt)); }
+    catch { return invalidRecord(); }
+  }
+
+  public history(workerId: string, provider: string): StorageResult<readonly WorkerAvailabilityRecord[]> {
+    return this.#store.execute(() => {
+      try {
+        const normalized = normalizeWorkerAvailabilityInput({ workerId, provider, state: "available", startedAt: "2000-01-01T00:00:00.000Z" as UtcTimestamp });
+        const rows = this.#store.database.prepare("SELECT * FROM runtime_worker_availability WHERE worker_id = ? AND provider = ? ORDER BY started_at, sequence").all(normalized.workerId, normalized.provider) as Record<string, unknown>[];
+        const values: WorkerAvailabilityRecord[] = [];
+        for (const row of rows) {
+          const parsed = workerAvailabilityFromRow(row);
+          if (parsed.outcome !== "success") return parsed;
+          values.push(parsed.value);
+        }
+        return success(Object.freeze(values));
+      } catch { return { outcome: "invalid_record", message: "Worker availability identity is invalid." }; }
+    });
+  }
+
+  #get(where: string, ...parameters: readonly string[]): StorageResult<WorkerAvailabilityRecord> {
+    return this.#store.execute(() => {
+      try {
+        const row = this.#store.database.prepare(`SELECT * FROM runtime_worker_availability WHERE ${where} LIMIT 1`).get(...parameters) as Record<string, unknown> | undefined;
+        return row === undefined ? notFound("Worker availability was not found.") : workerAvailabilityFromRow(row);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+}
+
 export class RuntimeSqliteStore {
   readonly #database: DatabaseSync;
   readonly #filename: string;
@@ -2455,6 +2576,7 @@ export class RuntimeSqliteStore {
   readonly featureMerges: FeatureMergeRepository;
   readonly shipmentCycles: ShipmentCycleRepository;
   readonly retryDecisions: RetryDecisionRepository;
+  readonly workerAvailability: WorkerAvailabilityRepository;
 
   private constructor(database: DatabaseSync, filename: string) {
     this.#database = database;
@@ -2475,6 +2597,7 @@ export class RuntimeSqliteStore {
     this.featureMerges = new FeatureMergeRepository(this);
     this.shipmentCycles = new ShipmentCycleRepository(this);
     this.retryDecisions = new RetryDecisionRepository(this);
+    this.workerAvailability = new WorkerAvailabilityRepository(this);
   }
 
   public static open(options: RuntimeSqliteStoreOptions = {}): RuntimeSqliteStore {
@@ -2524,14 +2647,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions, workerAvailability: this.workerAvailability }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec("BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions, workerAvailability: this.workerAvailability });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;
