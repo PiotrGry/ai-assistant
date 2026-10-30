@@ -747,6 +747,15 @@ export {
   type WorkspaceProvisionResult,
 } from "./runtime/workspace.js";
 export {
+  WORKSPACE_CLEANUP_LIMITS,
+  WORKSPACE_CLEANUP_SCHEMA_VERSION,
+  WorkspaceCleanupCoordinator,
+  type WorkspaceCleanupDisposition,
+  type WorkspaceCleanupOutcome,
+  type WorkspaceCleanupRequest,
+  type WorkspaceCleanupResult,
+} from "./runtime/workspace-cleanup.js";
+export {
   WORKSPACE_RESUME_VALIDATION_LIMITS,
   WorkspaceResumeValidator,
   validateWorkspaceForResume,
