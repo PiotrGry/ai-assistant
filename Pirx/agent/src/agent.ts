@@ -24,9 +24,13 @@ import { withToolArgumentRecovery, ToolArgumentGenerationError, TOOL_ARGUMENT_FA
 type ResponseWithMetrics = ChatResponse;
 
 // Local models often end a turn by announcing a step instead of calling its tool. One hidden check per
-// text-only reply lets the model make that call; this prompt is never stored in the conversation history.
+// pending announcement lets the model make that call; completed answers need no extra generation.
 const CONTINUATION_CHECK_PROMPT =
   "[Pirx: kontynuacja] Jeżeli do spełnienia prośby użytkownika potrzebny jest jeszcze krok wymagający narzędzia, wykonaj go teraz. W przeciwnym razie odpowiedz dokładnie: GOTOWE";
+
+function announcesPendingAction(content: string): boolean {
+  return /^(?:już\s+)?(?:sprawdzam|sprawdzę|pobieram|pobiorę|odczytuję|odczytam|uruchamiam|uruchomię|zapisuję|zapiszę|szukam|poszukam|i(?:'ll| will)\s+(?:check|fetch|read|start|save|look)|let me\s+(?:check|fetch|read|look))(?=\s|[.!,:;?]|$)/iu.test(content.trim());
+}
 
 export interface TurnMetrics {
   readonly timestamp: string;
@@ -619,6 +623,7 @@ export class PirxAgent {
         if (
           toolCalls.length === 0 &&
           this.#config.continuationCheck === true &&
+          announcesPendingAction(response.message.content) &&
           mayExecuteTools &&
           tools.length > 0
         ) {
@@ -677,7 +682,11 @@ export class PirxAgent {
               this.#messages.push({ role: "assistant", content: finalContent });
               break;
             }
-            throw error;
+            recordArgumentRecovery();
+            finalContent = `${response.message.content}\n\nNie udało się sprawdzić dalszej kontynuacji. Żadne dodatkowe wywołanie narzędzia z tego sprawdzenia nie zostało wykonane.`;
+            totals.doneReason = "continuation_check_error";
+            this.#messages.push({ role: "assistant", content: finalContent });
+            break;
           }
           if (checkOperation !== undefined) {
             context.operationRecorder?.finish(checkOperation, {

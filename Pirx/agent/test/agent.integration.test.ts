@@ -130,8 +130,8 @@ test("continuation check runs a tool the model only announced, then ends on the 
 
   assert.equal(turn.content, "Narzędzie odpowiedziało: Hello, Piotr!");
   assert.equal(turn.metrics.tool_calls, 1);
-  assert.equal(turn.metrics.model_calls, 4);
-  assert.equal(ollama.requests.length, 4);
+  assert.equal(turn.metrics.model_calls, 3);
+  assert.equal(ollama.requests.length, 3);
   const check = ollama.requests[1]?.messages as Array<{ role: string; content: string }>;
   assert.equal(check.at(-2)?.content, "Pobieram teraz powitanie.");
   assert.equal(check.at(-1)?.role, "system");
@@ -163,7 +163,7 @@ test("custom-persona chat receives orchestration routing and can inspect the dae
   assert.ok(turn.messages.some((message) => message.role === "tool" && message.tool_name === "pirx_orchestrator_status"));
 });
 
-test("continuation check keeps the original answer when the model has nothing left to do", async (context) => {
+test("finished answers do not trigger a redundant continuation check", async (context) => {
   const { agent, ollama } = await createContinuationAgent(context, [
     { role: "assistant", content: "Cześć, Piotrze!" },
     { role: "assistant", content: "Inna odpowiedź po sprawdzeniu." },
@@ -172,9 +172,21 @@ test("continuation check keeps the original answer when the model has nothing le
   const turn = await agent.chat("Cześć.");
 
   assert.equal(turn.content, "Cześć, Piotrze!");
-  assert.equal(turn.metrics.model_calls, 2);
+  assert.equal(turn.metrics.model_calls, 1);
   assert.equal(turn.metrics.tool_calls, 0);
-  assert.equal(ollama.requests.length, 2);
+  assert.equal(ollama.requests.length, 1);
+});
+
+test("optional continuation failure preserves the original answer and explains that no additional call ran", async (context) => {
+  const { agent } = await createContinuationAgent(context, [
+    { role: "assistant", content: "Sprawdzam dalsze kroki. Dotychczasowy wynik: zablokowane." },
+    { backendError: "temporary continuation outage" },
+  ]);
+  const turn = await agent.chat("Sprawdź stan.");
+  assert.match(turn.content, /Dotychczasowy wynik: zablokowane/u);
+  assert.match(turn.content, /Żadne dodatkowe wywołanie/u);
+  assert.equal(turn.metrics.done_reason, "continuation_check_error");
+  assert.equal(turn.metrics.tool_calls, 0);
 });
 
 test("backend argument parse failure retries generation once without repeating completed MCP calls", async (context) => {
@@ -187,7 +199,7 @@ test("backend argument parse failure retries generation once without repeating c
   const turn = await agent.chat("Sprawdź wynik.");
   assert.equal(turn.content, "Mam już wynik wcześniejszej operacji.");
   assert.equal(turn.metrics.tool_calls, 1);
-  assert.equal(turn.metrics.model_calls, 4);
+  assert.equal(turn.metrics.model_calls, 3);
   assert.equal(turn.metrics.input_tokens, null);
   const retry = ollama.requests[2]?.messages as Array<{ content: string }>;
   assert.match(retry.at(-1)?.content ?? "", /naprawa formatu/u);

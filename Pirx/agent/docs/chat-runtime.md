@@ -25,6 +25,8 @@ Short confirmations retain their preceding substantive user request and proposed
 action. If those references cannot fit, chat fails explicitly instead of sending
 an isolated approval to the model. Host continuation/recovery instructions use
 system messages and never replace the user's request in context selection.
+Optional continuation applies to pending-action announcements, not ordinary
+completed answers. Its failure cannot erase the answer already generated.
 
 ## Execution budgets and failures
 
