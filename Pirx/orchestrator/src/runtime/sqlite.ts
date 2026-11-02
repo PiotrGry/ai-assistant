@@ -110,7 +110,7 @@ import {
   type WorkerProviderRecoveryMetadata,
 } from "./worker-availability.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 30 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 31 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -832,6 +832,16 @@ const MIGRATIONS: readonly string[] = [
       ON runtime_execution_metrics (observed_at DESC, signal_id DESC);
     CREATE INDEX IF NOT EXISTS runtime_execution_metrics_source
       ON runtime_execution_metrics (source_kind, source_id, source_version);
+  `,
+  `
+    CREATE TABLE runtime_orchestrator_diagnostics (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      recorded_at TEXT NOT NULL,
+      event TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      diagnostic_json TEXT NOT NULL
+    );
+    CREATE INDEX runtime_orchestrator_diagnostics_event ON runtime_orchestrator_diagnostics(event, sequence DESC);
   `,
 ];
 

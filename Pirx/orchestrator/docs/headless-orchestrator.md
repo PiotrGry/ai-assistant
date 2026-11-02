@@ -214,6 +214,29 @@ service heartbeat, active Task/Attempt/Lease, next queued Task, and active
 Release. It never returns goals, prompts, Checkpoints, logs, filesystem paths,
 or provider payloads.
 
+Status also contains the latest durable diagnostic for each service event type:
+sequence, recording time, source event, outcome, full sanitized reason and
+structured result details. Queue, delivery, worker cycle and observability
+results are recorded before the next heartbeat can replace their status.
+Diagnostics survive restart in `runtime_orchestrator_diagnostics` (schema 31).
+Known diagnostic reasons are not cut to 256 characters. For long records use
+`pirx_orchestrator_diagnostic` with the sequence and follow every `nextOffset`;
+`totalCharacters` makes partial retrieval explicit. The record is retained in
+full after secret masking. Raw prompt/body/checkpoint/credential fields are
+redacted. Unclassified exceptions are explicitly marked instead of exporting
+arbitrary provider payloads as diagnostic text.
+
+The daemon also emits JSON events to systemd journal. Read them with
+`journalctl --user -u pirx-orchestrator.service -n 100 --no-pager`, or follow
+with `journalctl --user -u pirx-orchestrator.service -f`.
+Chat can read the same service journal through `pirx_orchestrator_logs`.
+It returns complete sanitized messages, timestamps, priorities and opaque cursors,
+newest first. Follow `nextBeforeCursor` to retrieve older entries. The executable,
+unit and arguments are fixed; no arbitrary command or system-unit input is
+accepted. Unsupported platform, malformed entries, access failure and oversized
+command output produce explicit errors. Journal retention is managed by systemd;
+the tool cannot recover entries already removed by host retention.
+
 `pirx_orchestrator_control` accepts an exactly host-authorized `pause` or
 `resume` request with a stable `operationId`. Pause lets the current bounded
 operation finish and prevents the next Queue/delivery/worker cycle. Resume only

@@ -113,6 +113,8 @@ test("server exposes complete tools with safe annotations", async (context) => {
       "obsidian_write",
       "pirx_execution_report",
       "pirx_orchestrator_control",
+      "pirx_orchestrator_diagnostic",
+      "pirx_orchestrator_logs",
       "pirx_orchestrator_shutdown",
       "pirx_orchestrator_start",
       "pirx_orchestrator_status",

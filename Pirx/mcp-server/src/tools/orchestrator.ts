@@ -9,6 +9,7 @@ import {
   RuntimeSqliteStore,
   type ExecutionReportQuery,
   type ExecutionReportResult,
+  type OrchestratorDiagnosticChunk,
   type HostShutdownCommand,
   type HostShutdownCommandResult,
   type OrchestratorControlRequest,
@@ -24,6 +25,7 @@ export interface OrchestratorControlToolPort {
   status(now: UtcTimestamp, staleAfterMs: number): StorageResult<OrchestratorStatusSnapshot>;
   request(input: OrchestratorControlRequest): OrchestratorControlRequestResult;
   shutdown(input: HostShutdownCommand): HostShutdownCommandResult;
+  diagnostic?(sequence: number, offset: number, length: number): StorageResult<OrchestratorDiagnosticChunk>;
 }
 
 export interface ExecutionObservabilityToolPort {
@@ -51,6 +53,7 @@ export class SqliteOrchestratorControlToolPort implements OrchestratorControlToo
   readonly #filename: string;
   public constructor(filename: string) { this.#filename = filename; }
   public status(now: UtcTimestamp, staleAfterMs: number): StorageResult<OrchestratorStatusSnapshot> { return this.#withStore((_store, repository) => repository.status(now, staleAfterMs)); }
+  public diagnostic(sequence: number, offset: number, length: number): StorageResult<OrchestratorDiagnosticChunk> { return this.#withStore((_store, repository) => repository.diagnostic(sequence, offset, length)); }
   public request(input: OrchestratorControlRequest): OrchestratorControlRequestResult {
     const value = this.#withStore((_store, repository) => ({ outcome: "success" as const, value: repository.request(input) }));
     return value.outcome === "success" ? value.value : { outcome: "storage_error", operationId: input.operationId, message: value.message };
@@ -71,6 +74,7 @@ export class SqliteOrchestratorControlToolPort implements OrchestratorControlToo
 const entitySchema = z.object({ id: z.string(), state: z.string(), issueNumber: z.number().int().positive().optional(), ordinal: z.number().int().positive().optional(), result: z.string().optional(), queueOrder: z.number().int().positive().optional(), expiresAt: z.string().optional() });
 const hostShutdownSchema = z.object({ requestOperationId: z.string(), target: z.enum(["queue_drained", "next_checkpoint"]), state: z.enum(["armed", "triggered", "draining", "poweroff_requested", "accepted", "cancelled", "failed"]), requestedAt: z.string(), version: z.number().int().positive(), triggeredAt: z.string().optional(), terminalAt: z.string().optional(), terminalOutcome: z.string().optional() });
 const snapshotSchema = z.object({
+  diagnostics: z.array(z.object({ sequence: z.number().int().positive(), recordedAt: z.string(), event: z.string(), outcome: z.string(), reason: z.string().optional(), details: z.unknown().optional() })).optional(),
   schemaVersion: z.literal(1), requestedMode: z.enum(["running", "paused"]), observedState: z.enum(["starting", "running", "paused", "stopping", "stopped", "error"]), version: z.number().int().nonnegative(), heartbeatAt: z.string().optional(), heartbeatStale: z.boolean(), lastQueueOutcome: z.string().optional(), lastDeliveryOutcome: z.string().optional(), lastCycleOutcome: z.string().optional(), activeTask: entitySchema.optional(), activeAttempt: entitySchema.optional(), activeLease: entitySchema.optional(), nextQueuedTask: entitySchema.optional(), activeRelease: entitySchema.optional(), hostShutdown: hostShutdownSchema.optional(),
 });
 const statusOutputSchema = z.union([
@@ -128,6 +132,18 @@ export function registerOrchestratorTools(server: McpServer, options: { readonly
     if (options.port === undefined) return structured({ outcome: "unconfigured", configured: false, message: options.configurationError ?? "PIRX_ORCHESTRATOR_DATABASE is not configured." }, true);
     const value = options.port.status(now(), input.staleAfterMs ?? 120_000);
     return value.outcome === "success" ? structured({ outcome: "success", configured: true, snapshot: value.value }) : structured({ outcome: "unavailable", configured: true, message: value.message }, true);
+  });
+
+  server.registerTool("pirx_orchestrator_diagnostic", {
+    title: "Read complete orchestrator diagnostic details",
+    description: "Read a persisted diagnostic by sequence from status. Retrieve every chunk using nextOffset until absent. Contains sanitized source context and full reasons; never infer a cause from outcome alone. Does not run or resume work.",
+    inputSchema: z.object({ sequence: z.number().int().positive(), offset: z.number().int().nonnegative().optional(), length: z.number().int().min(1).max(8_000).optional() }).strict(),
+    outputSchema: z.union([z.object({ outcome: z.literal("success"), diagnostic: z.object({ sequence: z.number(), offset: z.number(), totalCharacters: z.number(), text: z.string(), nextOffset: z.number().optional() }) }), z.object({ outcome: z.enum(["unconfigured", "unavailable", "not_found", "invalid_request"]), message: z.string() })]),
+    annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+  }, async (input) => {
+    if (options.port?.diagnostic === undefined) return structured({ outcome: "unconfigured", message: "Orchestrator diagnostics are not configured." }, true);
+    const value = options.port.diagnostic(input.sequence, input.offset ?? 0, input.length ?? 6_000);
+    return value.outcome === "success" ? structured({ outcome: "success", diagnostic: value.value }) : structured({ outcome: value.outcome === "not_found" ? "not_found" : value.outcome === "invalid_record" ? "invalid_request" : "unavailable", message: value.message }, true);
   });
 
   server.registerTool("pirx_execution_report", {

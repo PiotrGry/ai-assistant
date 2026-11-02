@@ -122,6 +122,8 @@ export {
   OrchestratorControlRepository,
   SqliteHeadlessControlPort,
   type OrchestratorControlAction,
+  type OrchestratorDiagnostic,
+  type OrchestratorDiagnosticChunk,
   type OrchestratorControlRecord,
   type OrchestratorControlRequest,
   type OrchestratorControlRequestResult,
@@ -131,6 +133,7 @@ export {
   type OrchestratorRequestedMode,
   type OrchestratorStatusSnapshot,
 } from "./runtime/orchestrator-control.js";
+export { diagnosticContext } from "./runtime/diagnostic-context.js";
 export {
   HOST_SHUTDOWN_SCHEMA_VERSION,
   HostShutdownRepository,

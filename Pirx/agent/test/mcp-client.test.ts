@@ -16,6 +16,7 @@ test("chat forwards runtime configuration to the real MCP child and can pause/re
   const store = RuntimeSqliteStore.open({ filename });
   const at = new Date().toISOString();
   new OrchestratorControlRepository(store).heartbeat("paused", at);
+  new OrchestratorControlRepository(store).recordDiagnostic({ schemaVersion: 1, event: "queue", outcome: "invalid_snapshot", reason: "Duplicate Queue Order=10 on closed Issues #48 and #189", details: { provider: "github", affectedIssues: [48, 189] } }, at);
   const saved = process.env.PIRX_ORCHESTRATOR_DATABASE;
   process.env.PIRX_ORCHESTRATOR_DATABASE = filename;
   const client = new PirxMcpClient(resolve(directory, "mcp-server", "dist", "index.js"), 30_000);
@@ -26,8 +27,12 @@ test("chat forwards runtime configuration to the real MCP child and can pause/re
   });
   await client.connect();
   const status = await client.callTool("pirx_orchestrator_status", {});
-  assert.equal(status.isError, false);
+  assert.equal(status.isError, false, status.text);
   assert.equal(JSON.parse(status.text).snapshot.observedState, "paused");
+  assert.match(JSON.parse(status.text).snapshot.diagnostics[0].reason, /Duplicate Queue Order/u);
+  const diagnostic = await client.callTool("pirx_orchestrator_diagnostic", { sequence: 1 });
+  assert.equal(diagnostic.isError, false);
+  assert.deepEqual(JSON.parse(JSON.parse(diagnostic.text).diagnostic.text).details.affectedIssues, [48, 189]);
   for (const action of ["pause", "resume"] as const) {
     const result = await client.callTool("pirx_orchestrator_control", { action, reason: "chat integration regression", operationId: `chat-${action}` }, { operationId: `chat-${action}` });
     assert.equal(result.isError, false, result.text);

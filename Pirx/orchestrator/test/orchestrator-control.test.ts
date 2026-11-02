@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   OrchestratorControlRepository,
+  SqliteHeadlessControlPort,
   HostShutdownRepository,
   RuntimeSqliteStore,
   createTask,
@@ -16,6 +17,39 @@ import {
 const t0 = "2026-10-30T12:00:00.000Z" as UtcTimestamp;
 const t1 = "2026-10-30T12:01:00.000Z" as UtcTimestamp;
 const t2 = "2026-10-30T12:05:00.000Z" as UtcTimestamp;
+
+test("preserves complete source diagnostics across restart and paginates without losing details", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-full-diagnostic-"));
+  const filename = join(directory, "runtime.sqlite");
+  let store = RuntimeSqliteStore.open({ filename });
+  try {
+    const reason = `Duplicate order in closed Issues. ${"detailed source context; ".repeat(600)} END`;
+    const control = new SqliteHeadlessControlPort(store, () => t1);
+    control.observe({ schemaVersion: 1, event: "queue", outcome: "invalid_snapshot", reason, details: { issues: [48, 189], authorization: "Bearer never-expose-me", nested: { token: "private-value" } } });
+    control.observe({ schemaVersion: 1, event: "control", outcome: "running" });
+    store.close(); store = RuntimeSqliteStore.open({ filename });
+    const repository = new OrchestratorControlRepository(store);
+    const status = repository.status(t2, 120_000);
+    assert.equal(status.outcome, "success");
+    if (status.outcome !== "success") return;
+    const queue = status.value.diagnostics?.find((item) => item.event === "queue");
+    assert.equal(queue?.reason, reason);
+    let reconstructed = ""; let offset = 0;
+    do {
+      const chunk = repository.diagnostic(queue!.sequence, offset, 1000);
+      assert.equal(chunk.outcome, "success"); if (chunk.outcome !== "success") return;
+      reconstructed += chunk.value.text;
+      if (chunk.value.nextOffset === undefined) break;
+      offset = chunk.value.nextOffset;
+    } while (true);
+    assert.equal(JSON.parse(reconstructed).reason, reason);
+    assert.deepEqual(JSON.parse(reconstructed).details.issues, [48, 189]);
+    assert.equal(reconstructed.includes("never-expose-me"), false);
+    assert.equal(reconstructed.includes("private-value"), false);
+    assert.equal(repository.diagnostic(999).outcome, "not_found");
+    assert.equal(repository.diagnostic(1, -1).outcome, "invalid_record");
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
 
 test("persists idempotent pause/resume control and stale heartbeat across restart", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pirx-control-"));

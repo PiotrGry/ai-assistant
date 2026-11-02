@@ -1,4 +1,5 @@
 import type { SchedulerCycleResult } from "./scheduler.js";
+import { diagnosticContext } from "./diagnostic-context.js";
 
 export const HEADLESS_SERVICE_SCHEMA_VERSION = 1 as const;
 export const HEADLESS_SERVICE_LIMITS = Object.freeze({
@@ -52,6 +53,7 @@ export interface HeadlessServiceEvent {
   readonly event: "starting" | "recovered" | "control" | "queue" | "delivery" | "cycle" | "cycle_error" | "observability" | "host_shutdown" | "stopping" | "stopped";
   readonly outcome: string;
   readonly reason?: string;
+  readonly details?: unknown;
 }
 
 export interface HeadlessServiceOptions {
@@ -166,7 +168,7 @@ export class HeadlessOrchestratorService {
         if (this.#queue !== undefined) {
           const queue = await this.#queue.reconcile();
           queueOutcome = queue.outcome;
-          this.#event("queue", queue.outcome, queue.message);
+          this.#event("queue", queue.outcome, queue.message, queue);
           await this.#reconcileObservability();
           if (queue.outcome !== "synchronized") {
             delay = this.#errorIntervalMs;
@@ -178,7 +180,7 @@ export class HeadlessOrchestratorService {
         if (this.#delivery !== undefined) {
           const delivery = await this.#delivery.reconcile();
           deliveryOutcome = delivery.outcome;
-          this.#event("delivery", delivery.outcome, delivery.message);
+          this.#event("delivery", delivery.outcome, delivery.message, delivery);
           await this.#reconcileObservability();
           if (!delivery.allowWorkerCycle) {
             if (["rate_limited", "reconciliation_required"].includes(delivery.outcome)) delay = this.#errorIntervalMs;
@@ -187,12 +189,12 @@ export class HeadlessOrchestratorService {
           }
         }
         const result = await this.#runtime.cycle();
-        this.#event("cycle", result.outcome, "reason" in result ? result.reason : undefined);
+        this.#event("cycle", result.outcome, "reason" in result ? result.reason : undefined, result);
         await this.#reconcileObservability();
         if (this.#evaluateHostShutdown({ ...(queueOutcome === undefined ? {} : { queueOutcome }), ...(deliveryOutcome === undefined ? {} : { deliveryOutcome }), cycleOutcome: result.outcome })) return this.stop("host_shutdown_triggered");
-      } catch {
+      } catch (error) {
         delay = this.#errorIntervalMs;
-        this.#event("cycle_error", "contained", "cycle_threw");
+        this.#event("cycle_error", "contained", "cycle_threw", { name: error instanceof Error ? error.name : "unknown", code: "cycle_threw", unclassifiedException: true });
         await this.#reconcileObservability();
       }
       if (!this.#stopRequested) await this.#sleep(delay, this.#wake.signal);
@@ -268,7 +270,7 @@ export class HeadlessOrchestratorService {
     if (this.#observability === undefined) return;
     try {
       const value = await this.#observability.reconcile();
-      this.#event("observability", value.outcome, value.message);
+      this.#event("observability", value.outcome, value.message, value);
     } catch { this.#event("observability", "storage_error", "projection_threw"); }
   }
 
@@ -278,8 +280,8 @@ export class HeadlessOrchestratorService {
     this.#runtime.close();
   }
 
-  #event(event: HeadlessServiceEvent["event"], outcome: string, reason?: unknown): void {
-    const value = Object.freeze({ schemaVersion: HEADLESS_SERVICE_SCHEMA_VERSION, event, outcome: boundedReason(outcome), ...(reason === undefined ? {} : { reason: boundedReason(reason) }) });
+  #event(event: HeadlessServiceEvent["event"], outcome: string, reason?: unknown, details?: unknown): void {
+    const value = Object.freeze({ schemaVersion: HEADLESS_SERVICE_SCHEMA_VERSION, event, outcome: boundedReason(outcome), ...(reason === undefined ? {} : { reason: String(diagnosticContext(reason)) }), ...(details === undefined ? {} : { details: diagnosticContext(details) }) });
     try { this.#control?.observe(value); } catch { /* status publication cannot crash orchestration */ }
     this.#emit(value);
   }

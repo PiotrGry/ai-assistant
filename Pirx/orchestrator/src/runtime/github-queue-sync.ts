@@ -34,7 +34,7 @@ const RISK: Readonly<Record<string, TaskRisk>> = Object.freeze({ Low: "low", Med
 const EXECUTABLE_STATUS = new Set(["Todo", "Open", "In Progress"]);
 const EXECUTABLE_TYPE = new Set(["Task", "Bug", "Experiment"]);
 
-function failure(outcome: Exclude<GitHubQueueSyncResult["outcome"], "synchronized">, message: string): GitHubQueueSyncResult { return { outcome, message: message.slice(0, 256) }; }
+function failure(outcome: Exclude<GitHubQueueSyncResult["outcome"], "synchronized">, message: string): GitHubQueueSyncResult { return { outcome, message }; }
 function identity(issue: Pick<GitHubQueueIssue, "owner" | "repository" | "issueNumber">): string { return `${issue.owner}/${issue.repository}#${issue.issueNumber}`; }
 function section(body: string, name: string): string | undefined {
   const lines = body.split(/\r?\n/u);
@@ -75,8 +75,10 @@ export class GitHubQueueSynchronizer {
     const planned: PlannedTask[] = [];
     for (const issue of snapshot.items) {
       if (issue.queueOrder === undefined) continue;
-      if (!Number.isSafeInteger(issue.queueOrder) || issue.queueOrder <= 0 || orders.has(issue.queueOrder)) return failure("invalid_snapshot", "Queue Order must be positive and unique across the Project.");
-      orders.set(issue.queueOrder, identity(issue));
+      if (!Number.isSafeInteger(issue.queueOrder) || issue.queueOrder <= 0) return failure("invalid_snapshot", `Queue Order must be a positive integer. Issue ${identity(issue)} has Queue Order=${issue.queueOrder}, Issue state=${issue.state}, Project Status=${issue.status ?? "missing"}. Validation currently includes historical Project items.`);
+      const previous = orders.get(issue.queueOrder);
+      if (previous !== undefined) return failure("invalid_snapshot", `Duplicate Queue Order=${issue.queueOrder}: ${previous} conflicts with ${identity(issue)} (Issue state=${issue.state}, Project Status=${issue.status ?? "missing"}). Validation currently includes historical Project items, including Done/closed Issues; this error does not imply a missing label or milestone.`);
+      orders.set(issue.queueOrder, `${identity(issue)} (Issue state=${issue.state}, Project Status=${issue.status ?? "missing"})`);
       if (issue.worker === undefined || issue.status === undefined || issue.workType === undefined) return failure("invalid_snapshot", "A queued Project item is missing required planning metadata.");
       if (issue.worker !== "Pirx" || issue.state !== "OPEN" || !EXECUTABLE_STATUS.has(issue.status) || !EXECUTABLE_TYPE.has(issue.workType)) continue;
       if (!this.#repositories.has(`${issue.owner}/${issue.repository}`)) return failure("invalid_snapshot", "A Pirx Queue item targets a repository outside the configured allowlist.");

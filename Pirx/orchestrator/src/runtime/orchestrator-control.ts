@@ -2,6 +2,7 @@ import type { HeadlessControlPort, HeadlessServiceEvent } from "./headless-servi
 import type { RuntimeSqliteStore, StorageResult } from "./sqlite.js";
 import type { UtcTimestamp } from "./task-domain.js";
 import { HostShutdownRepository, type HostShutdownState, type HostShutdownTarget } from "./host-shutdown.js";
+import { diagnosticContext } from "./diagnostic-context.js";
 
 export const ORCHESTRATOR_CONTROL_SCHEMA_VERSION = 1 as const;
 export type OrchestratorRequestedMode = "running" | "paused";
@@ -52,7 +53,11 @@ export interface OrchestratorStatusSnapshot {
   readonly nextQueuedTask?: OrchestratorEntitySummary;
   readonly activeRelease?: OrchestratorEntitySummary;
   readonly hostShutdown?: OrchestratorHostShutdownSummary;
+  readonly diagnostics?: readonly OrchestratorDiagnostic[];
 }
+
+export interface OrchestratorDiagnostic { readonly sequence: number; readonly recordedAt: string; readonly event: string; readonly outcome: string; readonly reason?: string; readonly details?: unknown; }
+export interface OrchestratorDiagnosticChunk { readonly sequence: number; readonly offset: number; readonly totalCharacters: number; readonly text: string; readonly nextOffset?: number; }
 
 function canonicalTimestamp(value: unknown): value is UtcTimestamp { return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value; }
 function boundedText(value: unknown, maximum: number): value is string { return typeof value === "string" && value.trim().length > 0 && value.length <= maximum && !/[\u0000-\u001f\u007f]/u.test(value); }
@@ -78,6 +83,25 @@ function summary(row: Record<string, unknown> | undefined, options: { issue?: bo
 export class OrchestratorControlRepository {
   readonly #store: RuntimeSqliteStore;
   public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public recordDiagnostic(event: HeadlessServiceEvent, at: UtcTimestamp): StorageResult<number> {
+    if (!canonicalTimestamp(at)) return { outcome: "invalid_record", message: "Diagnostic timestamp is invalid." };
+    return this.#store.execute(() => {
+      const result = this.#store.database.prepare("INSERT INTO runtime_orchestrator_diagnostics (recorded_at,event,outcome,diagnostic_json) VALUES (?,?,?,?)").run(at, event.event, event.outcome, JSON.stringify(diagnosticContext(event)));
+      return { outcome: "success", value: Number(result.lastInsertRowid) };
+    });
+  }
+
+  public diagnostic(sequence: number, offset = 0, length = 6_000): StorageResult<OrchestratorDiagnosticChunk> {
+    if (!Number.isSafeInteger(sequence) || sequence < 1 || !Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 || length > 8_000) return { outcome: "invalid_record", message: "Diagnostic chunk bounds are invalid." };
+    return this.#store.execute(() => {
+      const row = this.#store.database.prepare("SELECT diagnostic_json FROM runtime_orchestrator_diagnostics WHERE sequence = ?").get(sequence) as { diagnostic_json: string } | undefined;
+      if (row === undefined) return { outcome: "not_found", message: "Diagnostic record was not found." };
+      const text = JSON.stringify(diagnosticContext(JSON.parse(row.diagnostic_json)));
+      const next = Math.min(text.length, offset + length);
+      return { outcome: "success", value: { sequence, offset, totalCharacters: text.length, text: text.slice(offset, next), ...(next < text.length ? { nextOffset: next } : {}) } };
+    });
+  }
 
   public get(): StorageResult<OrchestratorControlRecord> {
     return this.#store.execute(() => {
@@ -148,7 +172,12 @@ export class OrchestratorControlRepository {
         const activeReleaseSummary = summary(release);
         const hostShutdown = shutdown.outcome === "success" ? { requestOperationId: shutdown.value.requestOperationId, target: shutdown.value.target, state: shutdown.value.state, requestedAt: shutdown.value.requestedAt, version: shutdown.value.version, ...(shutdown.value.triggeredAt === undefined ? {} : { triggeredAt: shutdown.value.triggeredAt }), ...(shutdown.value.terminalAt === undefined ? {} : { terminalAt: shutdown.value.terminalAt }), ...(shutdown.value.terminalOutcome === undefined ? {} : { terminalOutcome: shutdown.value.terminalOutcome }) } : undefined;
         const snapshot: OrchestratorStatusSnapshot = { schemaVersion: 1, requestedMode: record?.requestedMode ?? "running", observedState: record?.observedState ?? "stopped", version: record?.version ?? 0, ...(record?.heartbeatAt === undefined ? {} : { heartbeatAt: record.heartbeatAt }), heartbeatStale, ...(record?.lastQueueOutcome === undefined ? {} : { lastQueueOutcome: record.lastQueueOutcome }), ...(record?.lastDeliveryOutcome === undefined ? {} : { lastDeliveryOutcome: record.lastDeliveryOutcome }), ...(record?.lastCycleOutcome === undefined ? {} : { lastCycleOutcome: record.lastCycleOutcome }), ...(activeTaskSummary === undefined ? {} : { activeTask: activeTaskSummary }), ...(activeAttemptSummary === undefined ? {} : { activeAttempt: activeAttemptSummary }), ...(activeLeaseSummary === undefined ? {} : { activeLease: activeLeaseSummary }), ...(nextTaskSummary === undefined ? {} : { nextQueuedTask: nextTaskSummary }), ...(activeReleaseSummary === undefined ? {} : { activeRelease: activeReleaseSummary }), ...(hostShutdown === undefined ? {} : { hostShutdown }) };
-        return { outcome: "success", value: Object.freeze(snapshot) };
+        const rows = this.#store.database.prepare("SELECT * FROM runtime_orchestrator_diagnostics WHERE sequence IN (SELECT MAX(sequence) FROM runtime_orchestrator_diagnostics GROUP BY event) ORDER BY sequence DESC LIMIT 12").all() as Array<{ sequence: number; recorded_at: string; diagnostic_json: string }>;
+        const diagnostics = rows.map((row): OrchestratorDiagnostic => {
+          const parsed = diagnosticContext(JSON.parse(row.diagnostic_json)) as HeadlessServiceEvent;
+          return { sequence: row.sequence, recordedAt: row.recorded_at, event: parsed.event, outcome: parsed.outcome, ...(parsed.reason === undefined ? {} : { reason: parsed.reason }), ...(parsed.details === undefined ? {} : { details: parsed.details }) };
+        });
+        return { outcome: "success", value: Object.freeze({ ...snapshot, diagnostics }) };
       } catch { return { outcome: "storage_error", message: "Orchestrator status snapshot could not be read." }; }
     });
   }
@@ -164,6 +193,7 @@ export class SqliteHeadlessControlPort implements HeadlessControlPort {
     return value.outcome === "success" ? { outcome: "success", mode: value.value.requestedMode } : { outcome: "error", message: value.message };
   }
   public observe(event: HeadlessServiceEvent): void {
+    this.#repository.recordDiagnostic(event, this.#now());
     const observed: OrchestratorObservedState = event.event === "starting" ? "starting" : event.event === "stopping" || event.event === "host_shutdown" ? "stopping" : event.event === "stopped" ? "stopped" : event.event === "cycle_error" ? "error" : event.event === "control" && event.outcome === "paused" ? "paused" : "running";
     const outcomes = event.event === "queue" ? { queue: event.outcome } : event.event === "delivery" ? { delivery: event.outcome } : event.event === "cycle" || event.event === "cycle_error" ? { cycle: event.outcome } : {};
     this.#repository.heartbeat(observed, this.#now(), outcomes);

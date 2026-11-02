@@ -36,6 +36,7 @@ import { registerGitHubFailureHandoffPocTool } from "./tools/github-failure-hand
 import { registerOrchestratorTools, SqliteExecutionObservabilityToolPort, SqliteOrchestratorControlToolPort, type ExecutionObservabilityToolPort, type OrchestratorControlToolPort } from "./tools/orchestrator.js";
 import { registerResourceTools, SqliteResourceReportPort, type ResourceReportPort } from "./tools/resources.js";
 import { registerOrchestratorServiceTool, SystemdOrchestratorServicePort, type OrchestratorServicePort } from "./tools/orchestrator-service.js";
+import { registerOrchestratorLogTool, SystemdOrchestratorLogsPort, type OrchestratorLogsPort } from "./tools/orchestrator-logs.js";
 import { CodexCliRunner } from "@pirx/orchestrator";
 import {
   FileGitHubFailureHandoffPocStore,
@@ -62,6 +63,7 @@ export interface McpServerOptions {
   readonly executionObservabilityPort?: ExecutionObservabilityToolPort;
   readonly resourceReportPort?: ResourceReportPort;
   readonly orchestratorServicePort?: OrchestratorServicePort;
+  readonly orchestratorLogsPort?: OrchestratorLogsPort;
 }
 
 export function createMcpServer(options: McpServerOptions = {}): McpServer {
@@ -94,6 +96,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
     ...(config.orchestratorDatabasePath === undefined ? { configurationError: "PIRX_ORCHESTRATOR_DATABASE is not configured." } : {}),
   });
   registerResourceTools(server, { port: options.resourceReportPort ?? new SqliteResourceReportPort(config.resourceDatabasePath) });
+  registerOrchestratorLogTool(server, options.orchestratorLogsPort ?? new SystemdOrchestratorLogsPort({ environment }));
   registerOrchestratorServiceTool(server, {
     port: options.orchestratorServicePort ?? new SystemdOrchestratorServicePort({ environment }),
     authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
