@@ -111,6 +111,8 @@ test("server exposes complete tools with safe annotations", async (context) => {
       "obsidian_read",
       "obsidian_search",
       "obsidian_write",
+      "pirx_orchestrator_control",
+      "pirx_orchestrator_status",
       "system_info",
     ],
   );
@@ -123,6 +125,8 @@ test("server exposes complete tools with safe annotations", async (context) => {
   assert.equal(byName.get("calendar_delete_event")?.annotations?.destructiveHint, true);
   assert.equal(byName.get("github_actions_watch")?.annotations?.readOnlyHint, true);
   assert.equal(byName.get("github_actions_watch")?.annotations?.idempotentHint, true);
+  assert.equal(byName.get("pirx_orchestrator_status")?.annotations?.readOnlyHint, true);
+  assert.equal(byName.get("pirx_orchestrator_control")?.annotations?.destructiveHint, true);
   assert.equal(byName.get("obsidian_read")?.annotations?.readOnlyHint, true);
   assert.equal(byName.get("obsidian_write")?.annotations?.destructiveHint, true);
   assert.match(byName.get("calendar_get_event")?.description ?? "", /current external state/u);

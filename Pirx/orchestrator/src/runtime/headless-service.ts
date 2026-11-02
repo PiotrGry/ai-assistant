@@ -23,9 +23,15 @@ export interface HeadlessDeliveryReconciliationPort {
   reconcile(): Promise<{ readonly outcome: string; readonly allowWorkerCycle: boolean; readonly message?: string }>;
 }
 
+export interface HeadlessControlPort {
+  read(): { readonly outcome: "success"; readonly mode: "running" | "paused" } | { readonly outcome: "error"; readonly message: string } | Promise<{ readonly outcome: "success"; readonly mode: "running" | "paused" } | { readonly outcome: "error"; readonly message: string }>;
+  observe(event: HeadlessServiceEvent): void;
+  paused(): void;
+}
+
 export interface HeadlessServiceEvent {
   readonly schemaVersion: typeof HEADLESS_SERVICE_SCHEMA_VERSION;
-  readonly event: "starting" | "recovered" | "queue" | "delivery" | "cycle" | "cycle_error" | "stopping" | "stopped";
+  readonly event: "starting" | "recovered" | "control" | "queue" | "delivery" | "cycle" | "cycle_error" | "stopping" | "stopped";
   readonly outcome: string;
   readonly reason?: string;
 }
@@ -37,6 +43,7 @@ export interface HeadlessServiceOptions {
   readonly sleep?: (durationMs: number, signal: AbortSignal) => Promise<void>;
   readonly queue?: HeadlessQueueReconciliationPort;
   readonly delivery?: HeadlessDeliveryReconciliationPort;
+  readonly control?: HeadlessControlPort;
 }
 
 export type HeadlessServiceResult =
@@ -74,6 +81,7 @@ export class HeadlessOrchestratorService {
   readonly #sleep: (durationMs: number, signal: AbortSignal) => Promise<void>;
   readonly #queue: HeadlessQueueReconciliationPort | undefined;
   readonly #delivery: HeadlessDeliveryReconciliationPort | undefined;
+  readonly #control: HeadlessControlPort | undefined;
   readonly #wake = new AbortController();
   #running = false;
   #stopRequested = false;
@@ -89,6 +97,7 @@ export class HeadlessOrchestratorService {
     this.#sleep = options.sleep ?? defaultSleep;
     this.#queue = options.queue;
     this.#delivery = options.delivery;
+    this.#control = options.control;
   }
 
   public get running(): boolean { return this.#running; }
@@ -109,6 +118,22 @@ export class HeadlessOrchestratorService {
     while (!this.#stopRequested) {
       let delay = this.#cycleIntervalMs;
       try {
+        if (this.#control !== undefined) {
+          const control = await this.#control.read();
+          if (control.outcome !== "success") {
+            delay = this.#errorIntervalMs;
+            this.#event("control", "unavailable", control.message);
+            if (!this.#stopRequested) await this.#sleep(delay, this.#wake.signal);
+            continue;
+          }
+          if (control.mode === "paused") {
+            this.#control.paused();
+            this.#event("control", "paused");
+            if (!this.#stopRequested) await this.#sleep(delay, this.#wake.signal);
+            continue;
+          }
+          this.#event("control", "running");
+        }
         if (this.#queue !== undefined) {
           const queue = await this.#queue.reconcile();
           this.#event("queue", queue.outcome, queue.message);
@@ -164,8 +189,8 @@ export class HeadlessOrchestratorService {
       this.#event("stopped", "shutdown_timeout");
       return { outcome: "shutdown_timeout", exitCode: 3, interrupted: true };
     }
-    this.#closed = true; // ProductionRuntime.shutdown owns storage close on success.
     this.#event("stopped", "success");
+    this.#closeOnce();
     return { outcome: "stopped", exitCode: 0, interrupted: result.interrupted };
   }
 
@@ -176,6 +201,8 @@ export class HeadlessOrchestratorService {
   }
 
   #event(event: HeadlessServiceEvent["event"], outcome: string, reason?: unknown): void {
-    this.#emit(Object.freeze({ schemaVersion: HEADLESS_SERVICE_SCHEMA_VERSION, event, outcome: boundedReason(outcome), ...(reason === undefined ? {} : { reason: boundedReason(reason) }) }));
+    const value = Object.freeze({ schemaVersion: HEADLESS_SERVICE_SCHEMA_VERSION, event, outcome: boundedReason(outcome), ...(reason === undefined ? {} : { reason: boundedReason(reason) }) });
+    try { this.#control?.observe(value); } catch { /* status publication cannot crash orchestration */ }
+    this.#emit(value);
   }
 }

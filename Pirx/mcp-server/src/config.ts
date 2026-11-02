@@ -14,6 +14,7 @@ export interface GoogleCalendarConfig {
 
 export interface McpServerConfig {
   readonly obsidianVaultPath: string | undefined;
+  readonly orchestratorDatabasePath: string | undefined;
   readonly googleCalendar: GoogleCalendarConfig;
   readonly githubPocIssue: number | undefined;
   readonly githubPocConfigurationError: string | undefined;
@@ -92,6 +93,7 @@ export function loadMcpServerConfig(
   return {
     obsidianVaultPath:
       optionalPath(environment.PIRX_OBSIDIAN_VAULT) ?? defaultObsidianVault(),
+    orchestratorDatabasePath: optionalPath(environment.PIRX_ORCHESTRATOR_DATABASE),
     googleCalendar: {
       credentialsFile: resolve(
         environment.PIRX_GOOGLE_CREDENTIALS_FILE?.trim() ||

@@ -262,5 +262,5 @@ test("blocks startup when a durable active Lease needs reconciliation and preven
     const beforeShutdown = slow.store.attempts.listByTask(taskId); assert.equal(beforeShutdown.outcome, "success"); if (beforeShutdown.outcome === "success") assert.equal(beforeShutdown.value.length, 1);
     const stopped = await slow.runtime.shutdown(); assert.equal(stopped.outcome, "stopped"); assert.equal(slow.adapterCalls.value, 1);
     await first;
-  } finally { try { slow.store.close(); } catch { /* shutdown closes the store */ } await rm(slow.directory, { recursive: true, force: true }); }
+  } finally { slow.store.close(); await rm(slow.directory, { recursive: true, force: true }); }
 });

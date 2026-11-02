@@ -14,6 +14,7 @@ test("MCP configuration uses the existing environment-based approach", () => {
     PIRX_GOOGLE_TIMEOUT_MS: "4321",
     PIRX_GOOGLE_AUTH_TIMEOUT_MS: "9876",
     PIRX_GITHUB_POC_ISSUE: "179",
+    PIRX_ORCHESTRATOR_DATABASE: "/tmp/pirx-runtime.sqlite",
   });
 
   assert.equal(config.obsidianVaultPath, resolve("/tmp/pirx-vault"));
@@ -24,6 +25,7 @@ test("MCP configuration uses the existing environment-based approach", () => {
   assert.equal(config.googleCalendar.requestTimeoutMs, 4_321);
   assert.equal(config.googleCalendar.authorizationTimeoutMs, 9_876);
   assert.equal(config.githubPocIssue, 179);
+  assert.equal(config.orchestratorDatabasePath, resolve("/tmp/pirx-runtime.sqlite"));
   assert.equal(config.githubPocConfigurationError, undefined);
 });
 

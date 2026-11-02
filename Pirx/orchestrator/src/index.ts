@@ -106,6 +106,7 @@ export {
   HEADLESS_SERVICE_LIMITS,
   HEADLESS_SERVICE_SCHEMA_VERSION,
   HeadlessOrchestratorService,
+  type HeadlessControlPort,
   type HeadlessDeliveryReconciliationPort,
   type HeadlessRuntimePort,
   type HeadlessQueueReconciliationPort,
@@ -113,6 +114,19 @@ export {
   type HeadlessServiceOptions,
   type HeadlessServiceResult,
 } from "./runtime/headless-service.js";
+export {
+  ORCHESTRATOR_CONTROL_SCHEMA_VERSION,
+  OrchestratorControlRepository,
+  SqliteHeadlessControlPort,
+  type OrchestratorControlAction,
+  type OrchestratorControlRecord,
+  type OrchestratorControlRequest,
+  type OrchestratorControlRequestResult,
+  type OrchestratorEntitySummary,
+  type OrchestratorObservedState,
+  type OrchestratorRequestedMode,
+  type OrchestratorStatusSnapshot,
+} from "./runtime/orchestrator-control.js";
 export {
   HEADLESS_CONFIG_SCHEMA_VERSION,
   HeadlessConfigurationError,

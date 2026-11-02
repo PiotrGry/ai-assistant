@@ -196,7 +196,7 @@ export class ProductionRuntime {
     if (result.outcome !== "reconciliation_required") this.#recovered = true;
     return result;
   }
-  public async shutdown(): Promise<{ readonly outcome: "stopped" | "timeout"; readonly interrupted: boolean }> { const stopped = await this.#scheduler.shutdown(); if (stopped.outcome === "stopped") this.#store.close(); return stopped; }
+  public shutdown(): Promise<{ readonly outcome: "stopped" | "timeout"; readonly interrupted: boolean }> { return this.#scheduler.shutdown(); }
   public close(): void { this.#store.close(); }
 
   #workerAvailability(candidate: RunnableTaskCandidate): SchedulerPortResult<"available" | "unavailable" | "unknown"> {

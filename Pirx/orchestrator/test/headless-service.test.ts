@@ -61,7 +61,7 @@ test("headless service recovers before the first serial cycle and stops idempote
   service = new HeadlessOrchestratorService(port, { cycleIntervalMs: 100, emit: (event) => events.push(event), sleep: async () => { await service.stop("fixture"); } });
   const result = await service.run();
   assert.deepEqual(result, { outcome: "stopped", exitCode: 0, interrupted: false });
-  assert.deepEqual(port.calls, ["recover", "cycle", "shutdown"]);
+  assert.deepEqual(port.calls, ["recover", "cycle", "shutdown", "close"]);
   assert.deepEqual(events.map((event) => event.event), ["starting", "recovered", "cycle", "stopping", "stopped"]);
   assert.strictEqual(await service.stop("replay"), result);
   assert.equal(port.calls.filter((value) => value === "shutdown").length, 1);
@@ -88,7 +88,7 @@ test("does not execute stale runtime Queue data when GitHub reconciliation fails
     sleep: async () => { await service.stop("fixture"); },
   });
   assert.equal((await service.run()).outcome, "stopped");
-  assert.deepEqual(port.calls, ["recover", "shutdown"]);
+  assert.deepEqual(port.calls, ["recover", "shutdown", "close"]);
 });
 
 test("runs the leased worker only when delivery reconciliation permits it", async () => {
@@ -100,7 +100,7 @@ test("runs the leased worker only when delivery reconciliation permits it", asyn
     sleep: async () => { await service.stop("fixture"); },
   });
   assert.equal((await service.run()).outcome, "stopped");
-  assert.deepEqual(port.calls, ["recover", "cycle", "shutdown"]);
+  assert.deepEqual(port.calls, ["recover", "cycle", "shutdown", "close"]);
 });
 
 test("does not start worker execution while delivery is pending", async () => {
@@ -112,7 +112,27 @@ test("does not start worker execution while delivery is pending", async () => {
     sleep: async () => { await service.stop("fixture"); },
   });
   assert.equal((await service.run()).outcome, "stopped");
-  assert.deepEqual(port.calls, ["recover", "shutdown"]);
+  assert.deepEqual(port.calls, ["recover", "shutdown", "close"]);
+});
+
+test("honours a durable pause before Queue or worker work and resumes on a later poll", async () => {
+  const port = runtime();
+  const modes: Array<"paused" | "running"> = ["paused", "running"];
+  let pausedHeartbeats = 0;
+  let sleeps = 0;
+  let service: HeadlessOrchestratorService;
+  service = new HeadlessOrchestratorService(port, {
+    cycleIntervalMs: 100,
+    control: {
+      read: () => ({ outcome: "success", mode: modes.shift() ?? "running" }),
+      observe: () => undefined,
+      paused: () => { pausedHeartbeats += 1; },
+    },
+    sleep: async () => { sleeps += 1; if (sleeps === 2) await service.stop("fixture"); },
+  });
+  assert.equal((await service.run()).outcome, "stopped");
+  assert.equal(pausedHeartbeats, 1);
+  assert.deepEqual(port.calls, ["recover", "cycle", "shutdown", "close"]);
 });
 
 test("closes storage once when startup recovery fails and reports a bounded outcome", async () => {

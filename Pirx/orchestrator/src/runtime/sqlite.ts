@@ -110,7 +110,7 @@ import {
   type WorkerProviderRecoveryMetadata,
 } from "./worker-availability.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 27 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 28 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -743,6 +743,29 @@ const MIGRATIONS: readonly string[] = [
     );
     CREATE INDEX IF NOT EXISTS runtime_task_external_blockers_task
       ON runtime_task_external_blockers (task_id, issue_identity);
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_orchestrator_control (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      requested_mode TEXT NOT NULL CHECK (requested_mode IN ('running', 'paused')),
+      requested_at TEXT NOT NULL,
+      requested_by TEXT NOT NULL CHECK (length(trim(requested_by)) > 0),
+      request_reason TEXT NOT NULL CHECK (length(trim(request_reason)) > 0),
+      request_version INTEGER NOT NULL CHECK (request_version > 0),
+      observed_state TEXT NOT NULL CHECK (observed_state IN ('starting', 'running', 'paused', 'stopping', 'stopped', 'error')),
+      heartbeat_at TEXT,
+      last_queue_outcome TEXT,
+      last_delivery_outcome TEXT,
+      last_cycle_outcome TEXT
+    );
+    CREATE TABLE IF NOT EXISTS runtime_orchestrator_control_commands (
+      operation_id TEXT PRIMARY KEY CHECK (length(trim(operation_id)) > 0),
+      action TEXT NOT NULL CHECK (action IN ('pause', 'resume')),
+      reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+      requested_by TEXT NOT NULL CHECK (length(trim(requested_by)) > 0),
+      requested_at TEXT NOT NULL,
+      resulting_version INTEGER NOT NULL CHECK (resulting_version > 0)
+    );
   `,
 ];
 

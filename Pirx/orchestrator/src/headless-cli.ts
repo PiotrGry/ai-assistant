@@ -10,7 +10,8 @@ import { GitHubTransport } from "./github/transport.js";
 import { HeadlessConfigurationError, loadHeadlessOrchestratorConfig } from "./runtime/headless-config.js";
 import { HeadlessDeliveryCoordinator } from "./runtime/headless-delivery.js";
 import { GitHubQueueReconciler, GitHubQueueSynchronizer } from "./runtime/github-queue-sync.js";
-import { HeadlessOrchestratorService, type HeadlessDeliveryReconciliationPort, type HeadlessQueueReconciliationPort, type HeadlessServiceEvent } from "./runtime/headless-service.js";
+import { HeadlessOrchestratorService, type HeadlessControlPort, type HeadlessDeliveryReconciliationPort, type HeadlessQueueReconciliationPort, type HeadlessServiceEvent } from "./runtime/headless-service.js";
+import { SqliteHeadlessControlPort } from "./runtime/orchestrator-control.js";
 import { ProductionRuntime } from "./runtime/production-runtime.js";
 import { ReleaseMergeCoordinator } from "./runtime/release-merge.js";
 import { ShipmentCycleCoordinator } from "./runtime/shipment-coordinator.js";
@@ -32,6 +33,7 @@ function writeEvent(target: { write(value: string): unknown }, event: HeadlessSe
 export interface HeadlessCliOptions {
   readonly queue?: HeadlessQueueReconciliationPort;
   readonly delivery?: HeadlessDeliveryReconciliationPort;
+  readonly control?: HeadlessControlPort;
   readonly githubConfigLoader?: (environment: NodeJS.ProcessEnv) => GitHubConfig;
 }
 
@@ -77,7 +79,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
     })), { timeoutMs: config.githubTimeoutMs });
     const service = new HeadlessOrchestratorService(runtime, {
       cycleIntervalMs: config.cycleIntervalMs, errorIntervalMs: config.errorIntervalMs,
-      queue, delivery,
+      queue, delivery, control: options.control ?? new SqliteHeadlessControlPort(store),
       emit: (event) => writeEvent(event.event === "cycle_error" || event.outcome.includes("failed") || event.outcome.includes("timeout") ? host.stderr : host.stdout, event),
     });
     const stop = (signal: NodeJS.Signals): void => { void service.stop(signal); };

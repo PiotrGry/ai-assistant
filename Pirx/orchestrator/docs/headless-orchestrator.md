@@ -132,5 +132,27 @@ same exact-head policy. Deployment and production-verification provider ports
 remain explicit follow-up configuration; until available, the Release truthfully
 remains in `deploying` and the runtime Task remains active.
 
-MCP chat control, host power-off, and resource telemetry are deliberately
-separate follow-up Tasks.
+Host power-off and resource telemetry are deliberately separate follow-up
+Tasks.
+
+## Chat status and pause/resume
+
+Give the local MCP server the same runtime database path and the existing host
+authorization secret:
+
+```sh
+PIRX_ORCHESTRATOR_DATABASE=/var/lib/pirx/runtime.sqlite
+PIRX_MCP_AUTH_SECRET=use-the-existing-local-host-secret
+```
+
+`pirx_orchestrator_status` is read-only and returns only a bounded summary of
+service heartbeat, active Task/Attempt/Lease, next queued Task, and active
+Release. It never returns goals, prompts, Checkpoints, logs, filesystem paths,
+or provider payloads.
+
+`pirx_orchestrator_control` accepts an exactly host-authorized `pause` or
+`resume` request with a stable `operationId`. Pause lets the current bounded
+operation finish and prevents the next Queue/delivery/worker cycle. Resume only
+changes the durable requested mode; the normal daemon loop observes it and
+continues. Neither command selects a Task, creates an Attempt, bypasses safety
+policy, stops the host, or powers it off.
