@@ -1,11 +1,12 @@
 import { render } from "ink";
 
-import { PirxAgent, SessionLogger, loadConfig } from "@pirx/agent";
+import { PirxAgent, SessionLogger, loadConfig, initializeHostEnvironment } from "@pirx/agent";
 
 import { App } from "./app.js";
 import { TuiEventBus } from "./events.js";
 
 async function main(): Promise<void> {
+  initializeHostEnvironment();
   const config = loadConfig();
   const events = new TuiEventBus();
   const agent = await PirxAgent.create(config, {

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { PirxMcpClient } from "../src/mcp-client.js";
+import { initializeHostEnvironment } from "../src/startup-environment.js";
 
 test("chat forwards runtime configuration to the real MCP child and can pause/resume its SQLite control", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pirx-chat-control-"));
@@ -18,11 +19,17 @@ test("chat forwards runtime configuration to the real MCP child and can pause/re
   new OrchestratorControlRepository(store).heartbeat("paused", at);
   new OrchestratorControlRepository(store).recordDiagnostic({ schemaVersion: 1, event: "queue", outcome: "invalid_snapshot", reason: "Duplicate Queue Order=10 on closed Issues #48 and #189", details: { provider: "github", affectedIssues: [48, 189] } }, at);
   const saved = process.env.PIRX_ORCHESTRATOR_DATABASE;
-  process.env.PIRX_ORCHESTRATOR_DATABASE = filename;
+  const savedConfig = process.env.PIRX_CHAT_CONFIG;
+  const configFile = join(root, "chat.json");
+  await writeFile(configFile, JSON.stringify({ PIRX_ORCHESTRATOR_DATABASE: filename }));
+  process.env.PIRX_CHAT_CONFIG = configFile;
+  delete process.env.PIRX_ORCHESTRATOR_DATABASE;
+  initializeHostEnvironment();
   const client = new PirxMcpClient(resolve(directory, "mcp-server", "dist", "index.js"), 30_000);
   context.after(async () => {
     await client.close(); store.close();
     if (saved === undefined) delete process.env.PIRX_ORCHESTRATOR_DATABASE; else process.env.PIRX_ORCHESTRATOR_DATABASE = saved;
+    if (savedConfig === undefined) delete process.env.PIRX_CHAT_CONFIG; else process.env.PIRX_CHAT_CONFIG = savedConfig;
     await rm(root, { recursive: true, force: true });
   });
   await client.connect();

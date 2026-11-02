@@ -8,6 +8,7 @@ export type {
   TurnMetrics,
 } from "./agent.js";
 export { loadConfig } from "./config.js";
+export { initializeHostEnvironment } from "./startup-environment.js";
 export { SessionLogger } from "./logger.js";
 export type { SessionTurn } from "./logger.js";
 export type { AgentConfig, StorageMode, SystemPrompt } from "./config.js";

@@ -4,6 +4,7 @@ import { stdin, stdout } from "node:process";
 import { PirxAgent } from "./agent.js";
 import { loadConfig } from "./config.js";
 import { SessionLogger } from "./logger.js";
+import { initializeHostEnvironment } from "./startup-environment.js";
 
 const HELP = `Dostępne komendy:
   /help       pokaż pomoc
@@ -42,6 +43,7 @@ async function readPrompt(readline: Interface): Promise<string | undefined> {
 }
 
 async function main(): Promise<void> {
+  initializeHostEnvironment();
   const config = loadConfig();
   const agent = await PirxAgent.create(config, {
     onToolCall: (name, arguments_) => {

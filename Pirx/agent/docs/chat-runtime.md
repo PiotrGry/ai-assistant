@@ -5,6 +5,29 @@ explicit supported commands. `running` is a daemon state, not evidence that a
 blocked Task is executing. Orchestrator status includes `attentionRequired` with
 the queued failed/blocked Task, last Attempt and sanitized blocking reason.
 
+## Shared startup configuration
+
+Both `pnpm tui` and `pnpm start` initialize defaults from
+`$XDG_CONFIG_HOME/pirx/chat.json` (normally `~/.config/pirx/chat.json`) before
+creating the agent or MCP child. `PIRX_CHAT_CONFIG` selects an explicit file.
+The JSON is a flat map of supported environment names to string values, e.g.:
+
+```json
+{
+  "OLLAMA_NUM_CTX": "32768",
+  "PIRX_ORCHESTRATOR_DATABASE": "/home/operator/.local/share/pirx/runtime.sqlite",
+  "PIRX_ORCHESTRATOR_SERVICE_ENABLED": "true",
+  "PIRX_GITHUB_OWNER": "owner",
+  "PIRX_GITHUB_REPOSITORY": "repository"
+}
+```
+
+Explicit environment variables override file defaults. Invalid settings fail
+startup before any defaults are applied. Missing optional configuration keeps
+existing behavior; a missing explicitly selected file is an error. Shell scripts,
+PATH and credentials are not loaded from this file. The MCP child receives only
+its existing environment allowlist. Editing the file requires restarting chat.
+
 ## Context
 
 `OLLAMA_NUM_CTX` defaults to 32768. The workstation profile also sets it explicitly

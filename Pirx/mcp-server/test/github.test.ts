@@ -225,8 +225,8 @@ test("GitHub Actions watch is one read-only MCP call with internal polling", asy
   assert.equal(transport.writes.length, 0);
 });
 
-test("repository-scoped Issue tools stay listed and name the missing GitHub configuration", async (context) => {
-  const fixture = await connected({ environment: { PIRX_GOOGLE_CALENDAR_TIMEZONE: "UTC" } });
+test("repository-scoped Issue tools stay listed and name invalid GitHub configuration", async (context) => {
+  const fixture = await connected({ environment: { PIRX_GOOGLE_CALENDAR_TIMEZONE: "UTC", PIRX_GITHUB_API_URL: "not-a-url" } });
   context.after(async () => {
     await fixture.client.close();
     await fixture.server.close();
@@ -242,7 +242,7 @@ test("repository-scoped Issue tools stay listed and name the missing GitHub conf
   assert.equal(get.isError, true);
   const content = get.structuredContent as { errorCode: string; message: string };
   assert.equal(content.errorCode, "configuration");
-  assert.match(content.message, /PIRX_GITHUB_OWNER/u);
+  assert.match(content.message, /PIRX_GITHUB_API_URL/u);
 });
 
 test("GitHub POC uses the fixed Issue and proves idempotent replay", async (context) => {
