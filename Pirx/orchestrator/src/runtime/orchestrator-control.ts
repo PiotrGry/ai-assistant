@@ -1,6 +1,7 @@
 import type { HeadlessControlPort, HeadlessServiceEvent } from "./headless-service.js";
 import type { RuntimeSqliteStore, StorageResult } from "./sqlite.js";
 import type { UtcTimestamp } from "./task-domain.js";
+import { HostShutdownRepository, type HostShutdownState, type HostShutdownTarget } from "./host-shutdown.js";
 
 export const ORCHESTRATOR_CONTROL_SCHEMA_VERSION = 1 as const;
 export type OrchestratorRequestedMode = "running" | "paused";
@@ -34,6 +35,7 @@ export type OrchestratorControlRequestResult =
   | { readonly outcome: "conflict" | "invalid_request" | "storage_error"; readonly operationId: string; readonly message: string };
 
 export interface OrchestratorEntitySummary { readonly id: string; readonly state: string; readonly issueNumber?: number; readonly ordinal?: number; readonly result?: string; readonly queueOrder?: number; readonly expiresAt?: UtcTimestamp; }
+export interface OrchestratorHostShutdownSummary { readonly requestOperationId: string; readonly target: HostShutdownTarget; readonly state: HostShutdownState; readonly requestedAt: UtcTimestamp; readonly version: number; readonly triggeredAt?: UtcTimestamp; readonly terminalAt?: UtcTimestamp; readonly terminalOutcome?: string; }
 export interface OrchestratorStatusSnapshot {
   readonly schemaVersion: typeof ORCHESTRATOR_CONTROL_SCHEMA_VERSION;
   readonly requestedMode: OrchestratorRequestedMode;
@@ -49,6 +51,7 @@ export interface OrchestratorStatusSnapshot {
   readonly activeLease?: OrchestratorEntitySummary;
   readonly nextQueuedTask?: OrchestratorEntitySummary;
   readonly activeRelease?: OrchestratorEntitySummary;
+  readonly hostShutdown?: OrchestratorHostShutdownSummary;
 }
 
 function canonicalTimestamp(value: unknown): value is UtcTimestamp { return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value; }
@@ -128,6 +131,8 @@ export class OrchestratorControlRepository {
     return this.#store.execute(() => {
       const control = this.get();
       if (control.outcome !== "success" && control.outcome !== "not_found") return control;
+      const shutdown = new HostShutdownRepository(this.#store).get();
+      if (shutdown.outcome !== "success" && shutdown.outcome !== "not_found") return shutdown;
       try {
         const activeTask = this.#store.database.prepare("SELECT id, state, github_issue_number AS issue_number FROM runtime_tasks WHERE state = 'in_progress' ORDER BY updated_at, id LIMIT 1").get() as Record<string, unknown> | undefined;
         const activeAttempt = activeTask === undefined || typeof activeTask.id !== "string" ? undefined : this.#store.database.prepare("SELECT id, state, ordinal, result FROM runtime_attempts WHERE task_id = ? ORDER BY ordinal DESC LIMIT 1").get(activeTask.id) as Record<string, unknown> | undefined;
@@ -141,7 +146,8 @@ export class OrchestratorControlRepository {
         const activeLeaseSummary = summary(lease, { expiry: true });
         const nextTaskSummary = summary(next, { issue: true, queue: true });
         const activeReleaseSummary = summary(release);
-        const snapshot: OrchestratorStatusSnapshot = { schemaVersion: 1, requestedMode: record?.requestedMode ?? "running", observedState: record?.observedState ?? "stopped", version: record?.version ?? 0, ...(record?.heartbeatAt === undefined ? {} : { heartbeatAt: record.heartbeatAt }), heartbeatStale, ...(record?.lastQueueOutcome === undefined ? {} : { lastQueueOutcome: record.lastQueueOutcome }), ...(record?.lastDeliveryOutcome === undefined ? {} : { lastDeliveryOutcome: record.lastDeliveryOutcome }), ...(record?.lastCycleOutcome === undefined ? {} : { lastCycleOutcome: record.lastCycleOutcome }), ...(activeTaskSummary === undefined ? {} : { activeTask: activeTaskSummary }), ...(activeAttemptSummary === undefined ? {} : { activeAttempt: activeAttemptSummary }), ...(activeLeaseSummary === undefined ? {} : { activeLease: activeLeaseSummary }), ...(nextTaskSummary === undefined ? {} : { nextQueuedTask: nextTaskSummary }), ...(activeReleaseSummary === undefined ? {} : { activeRelease: activeReleaseSummary }) };
+        const hostShutdown = shutdown.outcome === "success" ? { requestOperationId: shutdown.value.requestOperationId, target: shutdown.value.target, state: shutdown.value.state, requestedAt: shutdown.value.requestedAt, version: shutdown.value.version, ...(shutdown.value.triggeredAt === undefined ? {} : { triggeredAt: shutdown.value.triggeredAt }), ...(shutdown.value.terminalAt === undefined ? {} : { terminalAt: shutdown.value.terminalAt }), ...(shutdown.value.terminalOutcome === undefined ? {} : { terminalOutcome: shutdown.value.terminalOutcome }) } : undefined;
+        const snapshot: OrchestratorStatusSnapshot = { schemaVersion: 1, requestedMode: record?.requestedMode ?? "running", observedState: record?.observedState ?? "stopped", version: record?.version ?? 0, ...(record?.heartbeatAt === undefined ? {} : { heartbeatAt: record.heartbeatAt }), heartbeatStale, ...(record?.lastQueueOutcome === undefined ? {} : { lastQueueOutcome: record.lastQueueOutcome }), ...(record?.lastDeliveryOutcome === undefined ? {} : { lastDeliveryOutcome: record.lastDeliveryOutcome }), ...(record?.lastCycleOutcome === undefined ? {} : { lastCycleOutcome: record.lastCycleOutcome }), ...(activeTaskSummary === undefined ? {} : { activeTask: activeTaskSummary }), ...(activeAttemptSummary === undefined ? {} : { activeAttempt: activeAttemptSummary }), ...(activeLeaseSummary === undefined ? {} : { activeLease: activeLeaseSummary }), ...(nextTaskSummary === undefined ? {} : { nextQueuedTask: nextTaskSummary }), ...(activeReleaseSummary === undefined ? {} : { activeRelease: activeReleaseSummary }), ...(hostShutdown === undefined ? {} : { hostShutdown }) };
         return { outcome: "success", value: Object.freeze(snapshot) };
       } catch { return { outcome: "storage_error", message: "Orchestrator status snapshot could not be read." }; }
     });
@@ -158,7 +164,7 @@ export class SqliteHeadlessControlPort implements HeadlessControlPort {
     return value.outcome === "success" ? { outcome: "success", mode: value.value.requestedMode } : { outcome: "error", message: value.message };
   }
   public observe(event: HeadlessServiceEvent): void {
-    const observed: OrchestratorObservedState = event.event === "starting" ? "starting" : event.event === "stopping" ? "stopping" : event.event === "stopped" ? "stopped" : event.event === "cycle_error" ? "error" : event.event === "control" && event.outcome === "paused" ? "paused" : "running";
+    const observed: OrchestratorObservedState = event.event === "starting" ? "starting" : event.event === "stopping" || event.event === "host_shutdown" ? "stopping" : event.event === "stopped" ? "stopped" : event.event === "cycle_error" ? "error" : event.event === "control" && event.outcome === "paused" ? "paused" : "running";
     const outcomes = event.event === "queue" ? { queue: event.outcome } : event.event === "delivery" ? { delivery: event.outcome } : event.event === "cycle" || event.event === "cycle_error" ? { cycle: event.outcome } : {};
     this.#repository.heartbeat(observed, this.#now(), outcomes);
   }

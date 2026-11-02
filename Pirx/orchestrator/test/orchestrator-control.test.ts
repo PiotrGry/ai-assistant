@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   OrchestratorControlRepository,
+  HostShutdownRepository,
   RuntimeSqliteStore,
   createTask,
   type TaskId,
@@ -58,6 +59,7 @@ test("returns bounded active and next Queue entity summaries without task conten
     assert.equal(store.selection.synchronize({ taskId: next.value.id, queueOrder: 500, dependencyState: "known", synchronizedAt: t0, blockers: [] }).outcome, "success");
     assert.equal(store.startAttempt(active.value.id, { id: "active-control-attempt" as never, worker: "pirx", provider: "claude-code", branch: "pirx/task-control" }, t1).outcome, "success");
     const control = new OrchestratorControlRepository(store);
+    assert.equal(new HostShutdownRepository(store).command({ action: "arm", operationId: "status-shutdown", target: "next_checkpoint", reason: "private operator reason", requestedBy: "mcp-chat", requestedAt: t1 }).outcome, "applied");
     assert.equal(control.heartbeat("running", t1).outcome, "success");
     const result = control.status(t1, 120_000);
     assert.equal(result.outcome, "success");
@@ -66,7 +68,9 @@ test("returns bounded active and next Queue entity summaries without task conten
       assert.equal(result.value.activeAttempt?.ordinal, 1);
       assert.equal(result.value.nextQueuedTask?.issueNumber, 212);
       assert.equal(result.value.nextQueuedTask?.queueOrder, 500);
+      assert.equal(result.value.hostShutdown?.state, "armed");
       assert.equal(JSON.stringify(result.value).includes("do not expose"), false);
+      assert.equal(JSON.stringify(result.value).includes("private operator reason"), false);
     }
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });

@@ -149,11 +149,72 @@ test("surfaces a bounded shutdown timeout without closing active storage underne
   assert.deepEqual(port.calls, ["shutdown"]);
 });
 
+test("drains, closes runtime storage, and only then invokes an armed host power-off", async () => {
+  const port = runtime();
+  const calls: string[] = [];
+  let evaluations = 0;
+  const service = new HeadlessOrchestratorService(port, {
+    cycleIntervalMs: 100,
+    queue: { reconcile: async () => ({ outcome: "synchronized" }) },
+    delivery: { reconcile: async () => ({ outcome: "idle", allowWorkerCycle: true }) },
+    hostShutdown: {
+      evaluate: () => ++evaluations === 1 ? { outcome: "armed", requestOperationId: "shutdown-1" } : { outcome: "triggered", requestOperationId: "shutdown-1" },
+      beginDrain: () => { calls.push("beginDrain"); return { outcome: "success" }; },
+      powerOffRequested: () => { calls.push("powerOffRequested"); return { outcome: "success" }; },
+      failBeforeClose: () => { calls.push("failed"); },
+      powerOffAfterClose: async () => { calls.push(port.calls.at(-1) === "close" ? "powerOffAfterClose" : "powerOffBeforeClose"); return { outcome: "accepted", message: "accepted" }; },
+    },
+  });
+  assert.deepEqual(await service.run(), { outcome: "stopped", exitCode: 0, interrupted: false });
+  assert.deepEqual(port.calls, ["recover", "cycle", "shutdown", "close"]);
+  assert.deepEqual(calls, ["beginDrain", "powerOffRequested", "powerOffAfterClose"]);
+});
+
+test("fails closed without power-off when the armed host drain times out", async () => {
+  const calls: string[] = [];
+  const port = runtime({ shutdown: async () => { port.calls.push("shutdown"); return { outcome: "timeout", interrupted: true }; } });
+  const service = new HeadlessOrchestratorService(port, {
+    cycleIntervalMs: 100,
+    hostShutdown: {
+      evaluate: () => ({ outcome: "triggered", requestOperationId: "shutdown-timeout" }),
+      beginDrain: () => ({ outcome: "success" }),
+      powerOffRequested: () => { calls.push("requested"); return { outcome: "success" }; },
+      failBeforeClose: (reason) => { calls.push(reason); },
+      powerOffAfterClose: async () => { calls.push("poweroff"); return { outcome: "accepted", message: "unexpected" }; },
+    },
+  });
+  assert.deepEqual(await service.run(), { outcome: "shutdown_timeout", exitCode: 3, interrupted: true });
+  assert.deepEqual(port.calls, ["recover", "shutdown"]);
+  assert.deepEqual(calls, ["runtime_drain_timeout"]);
+});
+
+test("returns a controlled failure after a rejected post-close power-off command", async () => {
+  const port = runtime();
+  let evaluations = 0;
+  const service = new HeadlessOrchestratorService(port, {
+    cycleIntervalMs: 100,
+    queue: { reconcile: async () => ({ outcome: "synchronized" }) },
+    delivery: { reconcile: async () => ({ outcome: "idle", allowWorkerCycle: true }) },
+    hostShutdown: {
+      evaluate: () => ++evaluations === 1 ? { outcome: "armed", requestOperationId: "shutdown-rejected" } : { outcome: "triggered", requestOperationId: "shutdown-rejected" },
+      beginDrain: () => ({ outcome: "success" }),
+      powerOffRequested: () => ({ outcome: "success" }),
+      failBeforeClose: () => undefined,
+      powerOffAfterClose: async () => ({ outcome: "failed", message: "Host power-off command was rejected." }),
+    },
+  });
+  assert.deepEqual(await service.run(), { outcome: "host_shutdown_failed", exitCode: 4, reason: "Host power-off command was rejected." });
+  assert.deepEqual(port.calls, ["recover", "cycle", "shutdown", "close"]);
+});
+
 test("strict config accepts bounded operational fields and rejects unknown or sensitive fields", () => {
   const parsed = parseHeadlessOrchestratorConfig(validConfig());
   assert.equal(parsed.schemaVersion, 1);
   assert.equal(parsed.repositories[0]?.testCommands[0], "npm run check");
   assert.equal(parsed.repositories[0]?.delivery.releaseBranch, "main");
+  const powered = parseHeadlessOrchestratorConfig({ ...validConfig(), hostPowerOff: { enabled: true, method: "linux-systemctl", acceptanceTimeoutMs: 5_000 } });
+  assert.equal(powered.hostPowerOff?.method, "linux-systemctl");
+  assert.throws(() => parseHeadlessOrchestratorConfig({ ...validConfig(), hostPowerOff: { enabled: true, method: "shell", acceptanceTimeoutMs: 5_000, command: "shutdown now" } }), HeadlessConfigurationError);
   assert.throws(() => parseHeadlessOrchestratorConfig({ ...validConfig(), token: "fixture" }), (error: unknown) => error instanceof HeadlessConfigurationError && error.code === "sensitive_configuration");
   assert.throws(() => parseHeadlessOrchestratorConfig({ ...validConfig(), unexpected: true }), (error: unknown) => error instanceof HeadlessConfigurationError && error.code === "invalid_configuration");
   assert.throws(() => parseHeadlessOrchestratorConfig({ ...validConfig(), cycleIntervalMs: 1 }), HeadlessConfigurationError);

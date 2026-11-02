@@ -56,11 +56,16 @@ CLI credential stores.
   "githubProjectOwner": "PiotrGry",
   "githubProjectNumber": 3,
   "githubApiUrl": "https://api.github.com",
-  "githubTimeoutMs": 10000
+  "githubTimeoutMs": 10000,
+  "hostPowerOff": {
+    "enabled": true,
+    "method": "linux-systemctl",
+    "acceptanceTimeoutMs": 5000
+  }
 }
 ```
 
-Every field is required. Repositories form an explicit allowlist; test commands
+Every field except `hostPowerOff` is required. Repositories form an explicit allowlist; test commands
 must match the bounded code-worker command policy. Update `baseRevision` to the
 reviewed revision from which a new assigned worktree may be created.
 
@@ -105,6 +110,7 @@ The process writes one bounded JSON event per line. Exit codes are:
 - `1`: configuration or startup construction failure;
 - `2`: durable startup recovery could not complete;
 - `3`: bounded shutdown timed out.
+- `4`: an armed host shutdown could not be safely completed or accepted.
 
 `SIGTERM` and `SIGINT` both stop new cycles, interrupt/drain the active cycle
 through `ProductionRuntime`, and close storage after a successful drain.
@@ -132,8 +138,7 @@ same exact-head policy. Deployment and production-verification provider ports
 remain explicit follow-up configuration; until available, the Release truthfully
 remains in `deploying` and the runtime Task remains active.
 
-Host power-off and resource telemetry are deliberately separate follow-up
-Tasks.
+Resource telemetry remains a separate follow-up Task.
 
 ## Chat status and pause/resume
 
@@ -156,3 +161,21 @@ operation finish and prevents the next Queue/delivery/worker cycle. Resume only
 changes the durable requested mode; the normal daemon loop observes it and
 continues. Neither command selects a Task, creates an Attempt, bypasses safety
 policy, stops the host, or powers it off.
+
+## Safe host power-off
+
+`pirx_orchestrator_shutdown` is a separate exactly host-authorized tool. `arm`
+accepts `queue_drained` or `next_checkpoint`; `cancel` works only while the
+request is still armed. MCP persists the command but never executes an OS
+process. The daemon snapshots the Checkpoint sequence, evaluates fresh durable
+state, drains the runtime, records `poweroff_requested`, and closes its primary
+SQLite connection before invoking the adapter. Replay cannot invoke the
+adapter twice.
+
+Power-off is disabled when `hostPowerOff` is absent. The initial enabled method
+is an exact shell-free `/usr/bin/systemctl poweroff --no-wall` invocation. The
+service user must be granted only the host PolicyKit/systemd permission needed
+for that command; do not run Pirx as root and do not add arbitrary commands to
+the configuration. A missing permission or rejected command is a controlled
+failure and never falls back to `sudo`, a shell, force-kill, reboot, suspend, or
+another mutation.

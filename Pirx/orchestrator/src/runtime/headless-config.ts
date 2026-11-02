@@ -45,6 +45,7 @@ export interface HeadlessOrchestratorConfig {
   readonly githubProjectNumber: number;
   readonly githubApiUrl: string;
   readonly githubTimeoutMs: number;
+  readonly hostPowerOff?: { readonly enabled: true; readonly method: "linux-systemctl"; readonly acceptanceTimeoutMs: number };
 }
 
 export class HeadlessConfigurationError extends Error {
@@ -52,7 +53,7 @@ export class HeadlessConfigurationError extends Error {
   public constructor(code: HeadlessConfigurationError["code"], message: string) { super(message.slice(0, 256)); this.name = "HeadlessConfigurationError"; this.code = code; }
 }
 
-const TOP_LEVEL_KEYS = new Set(["schemaVersion", "databasePath", "workerId", "provider", "workerCapabilities", "repositories", "worktreeParent", "leaseDurationMs", "shutdownTimeoutMs", "workerTimeoutMs", "workerOutputBytes", "workerErrorBytes", "maximumConsecutiveResumeFailures", "cycleIntervalMs", "errorIntervalMs", "githubProjectOwner", "githubProjectNumber", "githubApiUrl", "githubTimeoutMs"]);
+const TOP_LEVEL_KEYS = new Set(["schemaVersion", "databasePath", "workerId", "provider", "workerCapabilities", "repositories", "worktreeParent", "leaseDurationMs", "shutdownTimeoutMs", "workerTimeoutMs", "workerOutputBytes", "workerErrorBytes", "maximumConsecutiveResumeFailures", "cycleIntervalMs", "errorIntervalMs", "githubProjectOwner", "githubProjectNumber", "githubApiUrl", "githubTimeoutMs", "hostPowerOff"]);
 const REPOSITORY_KEYS = new Set(["repository", "repositoryRoot", "baseBranch", "baseRevision", "remoteName", "testCommands", "delivery"]);
 const DELIVERY_KEYS = new Set(["releaseBranch", "featureWorkflowName", "releaseRequiredChecks", "featureRequiredApprovals", "releaseRequiredApprovals", "featureMergeMethod", "releaseMergeMethod", "requireMergeable"]);
 const SENSITIVE_KEY = /^(?:token|secret|password|passwd|api[_-]?key|authorization|cookie|private[_-]?key|credential|connection[_-]?string)$/iu;
@@ -103,6 +104,11 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
   let githubApiUrl: string;
   try { const parsed = new URL(value.githubApiUrl); if ((parsed.protocol !== "https:" && parsed.protocol !== "http:") || parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "") return invalid(); githubApiUrl = parsed.toString().replace(/\/+$/u, ""); } catch { return invalid(); }
   if (!integer(value.leaseDurationMs, 1, PRODUCTION_RUNTIME_LIMITS.leaseDurationMs) || !integer(value.shutdownTimeoutMs, 1, PRODUCTION_RUNTIME_LIMITS.shutdownTimeoutMs) || !integer(value.workerTimeoutMs, 1, PRODUCTION_RUNTIME_LIMITS.workerTimeoutMs) || !integer(value.workerOutputBytes, 1, PRODUCTION_RUNTIME_LIMITS.workerOutputBytes) || !integer(value.workerErrorBytes, 1, PRODUCTION_RUNTIME_LIMITS.workerOutputBytes) || !integer(value.maximumConsecutiveResumeFailures, 1, 20) || !integer(value.cycleIntervalMs, 30_000, HEADLESS_SERVICE_LIMITS.maximumIntervalMs) || !integer(value.errorIntervalMs, 30_000, HEADLESS_SERVICE_LIMITS.maximumIntervalMs)) return invalid();
+  let hostPowerOff: HeadlessOrchestratorConfig["hostPowerOff"];
+  if (value.hostPowerOff !== undefined) {
+    if (!record(value.hostPowerOff) || !exactKeys(value.hostPowerOff, new Set(["enabled", "method", "acceptanceTimeoutMs"])) || value.hostPowerOff.enabled !== true || value.hostPowerOff.method !== "linux-systemctl" || !integer(value.hostPowerOff.acceptanceTimeoutMs, 100, 30_000)) return invalid();
+    hostPowerOff = Object.freeze({ enabled: true, method: "linux-systemctl", acceptanceTimeoutMs: value.hostPowerOff.acceptanceTimeoutMs as number });
+  }
   return Object.freeze({
     schemaVersion: HEADLESS_CONFIG_SCHEMA_VERSION,
     databasePath: resolve(value.databasePath), workerId: value.workerId.trim(), provider: value.provider.trim(),
@@ -112,6 +118,7 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
     workerErrorBytes: value.workerErrorBytes, maximumConsecutiveResumeFailures: value.maximumConsecutiveResumeFailures,
     cycleIntervalMs: value.cycleIntervalMs, errorIntervalMs: value.errorIntervalMs,
     githubProjectOwner: value.githubProjectOwner, githubProjectNumber: value.githubProjectNumber, githubApiUrl, githubTimeoutMs: value.githubTimeoutMs,
+    ...(hostPowerOff === undefined ? {} : { hostPowerOff }),
   } as HeadlessOrchestratorConfig);
 }
 

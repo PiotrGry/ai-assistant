@@ -29,9 +29,23 @@ export interface HeadlessControlPort {
   paused(): void;
 }
 
+export type HeadlessHostShutdownEvaluation =
+  | { readonly outcome: "idle" }
+  | { readonly outcome: "armed"; readonly requestOperationId: string }
+  | { readonly outcome: "triggered"; readonly requestOperationId: string }
+  | { readonly outcome: "error"; readonly message: string };
+
+export interface HeadlessHostShutdownPort {
+  evaluate(input: { readonly queueOutcome?: string; readonly deliveryOutcome?: string; readonly cycleOutcome?: string }): HeadlessHostShutdownEvaluation;
+  beginDrain(): { readonly outcome: "success" } | { readonly outcome: "error"; readonly message: string };
+  powerOffRequested(): { readonly outcome: "success" } | { readonly outcome: "error"; readonly message: string };
+  failBeforeClose(reason: string): void;
+  powerOffAfterClose(): Promise<{ readonly outcome: "accepted" | "failed"; readonly message: string }>;
+}
+
 export interface HeadlessServiceEvent {
   readonly schemaVersion: typeof HEADLESS_SERVICE_SCHEMA_VERSION;
-  readonly event: "starting" | "recovered" | "control" | "queue" | "delivery" | "cycle" | "cycle_error" | "stopping" | "stopped";
+  readonly event: "starting" | "recovered" | "control" | "queue" | "delivery" | "cycle" | "cycle_error" | "host_shutdown" | "stopping" | "stopped";
   readonly outcome: string;
   readonly reason?: string;
 }
@@ -44,12 +58,14 @@ export interface HeadlessServiceOptions {
   readonly queue?: HeadlessQueueReconciliationPort;
   readonly delivery?: HeadlessDeliveryReconciliationPort;
   readonly control?: HeadlessControlPort;
+  readonly hostShutdown?: HeadlessHostShutdownPort;
 }
 
 export type HeadlessServiceResult =
   | { readonly outcome: "stopped"; readonly exitCode: 0; readonly interrupted: boolean }
   | { readonly outcome: "startup_recovery_failed"; readonly exitCode: 2; readonly reason: string }
-  | { readonly outcome: "shutdown_timeout"; readonly exitCode: 3; readonly interrupted: true };
+  | { readonly outcome: "shutdown_timeout"; readonly exitCode: 3; readonly interrupted: true }
+  | { readonly outcome: "host_shutdown_failed"; readonly exitCode: 4; readonly reason: string };
 
 function boundedReason(value: unknown): string {
   const message = typeof value === "string" ? value : "operation_failed";
@@ -82,10 +98,12 @@ export class HeadlessOrchestratorService {
   readonly #queue: HeadlessQueueReconciliationPort | undefined;
   readonly #delivery: HeadlessDeliveryReconciliationPort | undefined;
   readonly #control: HeadlessControlPort | undefined;
+  readonly #hostShutdown: HeadlessHostShutdownPort | undefined;
   readonly #wake = new AbortController();
   #running = false;
   #stopRequested = false;
   #closed = false;
+  #hostShutdownPending = false;
   #stopPromise: Promise<HeadlessServiceResult> | undefined;
 
   public constructor(runtime: HeadlessRuntimePort, options: HeadlessServiceOptions) {
@@ -98,6 +116,7 @@ export class HeadlessOrchestratorService {
     this.#queue = options.queue;
     this.#delivery = options.delivery;
     this.#control = options.control;
+    this.#hostShutdown = options.hostShutdown;
   }
 
   public get running(): boolean { return this.#running; }
@@ -126,6 +145,7 @@ export class HeadlessOrchestratorService {
             if (!this.#stopRequested) await this.#sleep(delay, this.#wake.signal);
             continue;
           }
+          if (this.#evaluateHostShutdown({})) return this.stop("host_shutdown_triggered");
           if (control.mode === "paused") {
             this.#control.paused();
             this.#event("control", "paused");
@@ -133,9 +153,11 @@ export class HeadlessOrchestratorService {
             continue;
           }
           this.#event("control", "running");
-        }
+        } else if (this.#evaluateHostShutdown({})) return this.stop("host_shutdown_triggered");
+        let queueOutcome: string | undefined;
         if (this.#queue !== undefined) {
           const queue = await this.#queue.reconcile();
+          queueOutcome = queue.outcome;
           this.#event("queue", queue.outcome, queue.message);
           if (queue.outcome !== "synchronized") {
             delay = this.#errorIntervalMs;
@@ -143,8 +165,10 @@ export class HeadlessOrchestratorService {
             continue;
           }
         }
+        let deliveryOutcome: string | undefined;
         if (this.#delivery !== undefined) {
           const delivery = await this.#delivery.reconcile();
+          deliveryOutcome = delivery.outcome;
           this.#event("delivery", delivery.outcome, delivery.message);
           if (!delivery.allowWorkerCycle) {
             if (["rate_limited", "reconciliation_required"].includes(delivery.outcome)) delay = this.#errorIntervalMs;
@@ -154,6 +178,7 @@ export class HeadlessOrchestratorService {
         }
         const result = await this.#runtime.cycle();
         this.#event("cycle", result.outcome, "reason" in result ? result.reason : undefined);
+        if (this.#evaluateHostShutdown({ ...(queueOutcome === undefined ? {} : { queueOutcome }), ...(deliveryOutcome === undefined ? {} : { deliveryOutcome }), cycleOutcome: result.outcome })) return this.stop("host_shutdown_triggered");
       } catch {
         delay = this.#errorIntervalMs;
         this.#event("cycle_error", "contained", "cycle_threw");
@@ -183,15 +208,48 @@ export class HeadlessOrchestratorService {
   }
 
   async #shutdown(): Promise<HeadlessServiceResult> {
+    let hostFailure: string | undefined;
+    if (this.#hostShutdownPending) {
+      const drain = this.#hostShutdown?.beginDrain();
+      if (drain === undefined || drain.outcome === "error") {
+        hostFailure = drain?.message ?? "Host shutdown coordinator is unavailable.";
+        this.#hostShutdownPending = false;
+      } else this.#event("host_shutdown", "draining");
+    }
     const result = await this.#runtime.shutdown();
     this.#running = false;
     if (result.outcome === "timeout") {
+      if (this.#hostShutdownPending) this.#hostShutdown?.failBeforeClose("runtime_drain_timeout");
       this.#event("stopped", "shutdown_timeout");
       return { outcome: "shutdown_timeout", exitCode: 3, interrupted: true };
     }
+    if (this.#hostShutdownPending) {
+      const requested = this.#hostShutdown?.powerOffRequested();
+      if (requested === undefined || requested.outcome === "error") {
+        hostFailure = requested?.message ?? "Host shutdown coordinator is unavailable.";
+        this.#hostShutdown?.failBeforeClose("poweroff_request_persistence_failed");
+        this.#hostShutdownPending = false;
+      } else this.#event("host_shutdown", "poweroff_requested");
+    }
     this.#event("stopped", "success");
     this.#closeOnce();
+    if (this.#hostShutdownPending) {
+      const powered = await this.#hostShutdown!.powerOffAfterClose();
+      this.#emit(Object.freeze({ schemaVersion: HEADLESS_SERVICE_SCHEMA_VERSION, event: "host_shutdown", outcome: powered.outcome, reason: boundedReason(powered.message) }));
+      if (powered.outcome === "failed") return { outcome: "host_shutdown_failed", exitCode: 4, reason: boundedReason(powered.message) };
+    }
+    if (hostFailure !== undefined) return { outcome: "host_shutdown_failed", exitCode: 4, reason: boundedReason(hostFailure) };
     return { outcome: "stopped", exitCode: 0, interrupted: result.interrupted };
+  }
+
+  #evaluateHostShutdown(input: { readonly queueOutcome?: string; readonly deliveryOutcome?: string; readonly cycleOutcome?: string }): boolean {
+    if (this.#hostShutdown === undefined) return false;
+    const value = this.#hostShutdown.evaluate(input);
+    if (value.outcome === "error") { this.#event("host_shutdown", "blocked", value.message); return false; }
+    if (value.outcome !== "triggered") return false;
+    this.#hostShutdownPending = true;
+    this.#event("host_shutdown", "triggered", value.requestOperationId);
+    return true;
   }
 
   #closeOnce(): void {

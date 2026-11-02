@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
-import type { OrchestratorControlRequest, OrchestratorStatusSnapshot, UtcTimestamp } from "@pirx/orchestrator";
+import type { HostShutdownCommand, OrchestratorControlRequest, OrchestratorStatusSnapshot, UtcTimestamp } from "@pirx/orchestrator";
 
 import { createHostAuthorization, HOST_AUTHORIZATION_META_KEY } from "../src/authorization.js";
 import { ObsidianVault } from "../src/obsidian/vaults.js";
@@ -21,6 +21,7 @@ class FakeControl implements OrchestratorControlToolPort {
   readonly snapshot: OrchestratorStatusSnapshot = { schemaVersion: 1, requestedMode: "running", observedState: "running", version: 1, heartbeatAt: now, heartbeatStale: false, activeTask: { id: "task-211", state: "in_progress", issueNumber: 211 }, nextQueuedTask: { id: "task-212", state: "ready", issueNumber: 212, queueOrder: 500 } };
   status() { return { outcome: "success" as const, value: { ...this.snapshot, requestedMode: this.mode, version: this.version } }; }
   request(input: OrchestratorControlRequest) { this.calls.push(input); this.mode = input.action === "pause" ? "paused" : "running"; this.version += 1; return { outcome: "applied" as const, operationId: input.operationId, record: { schemaVersion: 1 as const, requestedMode: this.mode, requestedAt: input.requestedAt, requestedBy: input.requestedBy, reason: input.reason, version: this.version, observedState: "running" as const, heartbeatAt: now }, message: "applied" }; }
+  shutdown(input: HostShutdownCommand) { return { outcome: "applied" as const, operationId: input.operationId, record: { schemaVersion: 1 as const, requestOperationId: input.action === "arm" ? input.operationId : input.requestOperationId, target: "queue_drained" as const, state: input.action === "arm" ? "armed" as const : "cancelled" as const, checkpointBaseline: 0, requestedAt: input.requestedAt, requestedBy: input.requestedBy, reason: input.reason, version: 1 }, message: "applied" }; }
 }
 
 test("MCP reads bounded status and requires exact authorization for pause/resume", async (context) => {
@@ -46,6 +47,13 @@ test("MCP reads bounded status and requires exact authorization for pause/resume
   assert.notEqual(allowed.isError, true);
   assert.equal((allowed.structuredContent as { requestedMode: string }).requestedMode, "paused");
   assert.equal(control.calls.length, 1);
+
+  const shutdownArguments = { action: "arm" as const, operationId: "shutdown-212", target: "queue_drained" as const, reason: "power off after Queue" };
+  const shutdownDenied = await client.callTool({ name: "pirx_orchestrator_shutdown", arguments: shutdownArguments });
+  assert.equal(shutdownDenied.isError, true);
+  const shutdown = await client.callTool({ name: "pirx_orchestrator_shutdown", arguments: shutdownArguments, _meta: { [HOST_AUTHORIZATION_META_KEY]: createHostAuthorization(secret, "pirx_orchestrator_shutdown", shutdownArguments, shutdownArguments.operationId) } });
+  assert.notEqual(shutdown.isError, true);
+  assert.equal((shutdown.structuredContent as { request: { state: string } }).request.state, "armed");
 });
 
 test("unconfigured orchestrator tools remain listed and return controlled results", async (context) => {
@@ -57,6 +65,7 @@ test("unconfigured orchestrator tools remain listed and return controlled result
   context.after(async () => { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); });
   const tools = await client.listTools();
   assert.equal(tools.tools.some((tool) => tool.name === "pirx_orchestrator_status"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "pirx_orchestrator_shutdown"), true);
   const status = await client.callTool({ name: "pirx_orchestrator_status", arguments: {} });
   assert.equal(status.isError, true);
   assert.match(JSON.stringify(status.structuredContent), /unconfigured/u);

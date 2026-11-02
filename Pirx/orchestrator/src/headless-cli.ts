@@ -12,6 +12,7 @@ import { HeadlessDeliveryCoordinator } from "./runtime/headless-delivery.js";
 import { GitHubQueueReconciler, GitHubQueueSynchronizer } from "./runtime/github-queue-sync.js";
 import { HeadlessOrchestratorService, type HeadlessControlPort, type HeadlessDeliveryReconciliationPort, type HeadlessQueueReconciliationPort, type HeadlessServiceEvent } from "./runtime/headless-service.js";
 import { SqliteHeadlessControlPort } from "./runtime/orchestrator-control.js";
+import { LinuxSystemctlPowerOffAdapter, SqliteHeadlessHostShutdownPort } from "./runtime/host-shutdown.js";
 import { ProductionRuntime } from "./runtime/production-runtime.js";
 import { ReleaseMergeCoordinator } from "./runtime/release-merge.js";
 import { ShipmentCycleCoordinator } from "./runtime/shipment-coordinator.js";
@@ -80,6 +81,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
     const service = new HeadlessOrchestratorService(runtime, {
       cycleIntervalMs: config.cycleIntervalMs, errorIntervalMs: config.errorIntervalMs,
       queue, delivery, control: options.control ?? new SqliteHeadlessControlPort(store),
+      hostShutdown: new SqliteHeadlessHostShutdownPort(store, config.databasePath, config.hostPowerOff === undefined ? undefined : new LinuxSystemctlPowerOffAdapter({ timeoutMs: config.hostPowerOff.acceptanceTimeoutMs })),
       emit: (event) => writeEvent(event.event === "cycle_error" || event.outcome.includes("failed") || event.outcome.includes("timeout") ? host.stderr : host.stdout, event),
     });
     const stop = (signal: NodeJS.Signals): void => { void service.stop(signal); };

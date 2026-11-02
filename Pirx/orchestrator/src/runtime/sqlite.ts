@@ -110,7 +110,7 @@ import {
   type WorkerProviderRecoveryMetadata,
 } from "./worker-availability.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 28 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 29 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -765,6 +765,35 @@ const MIGRATIONS: readonly string[] = [
       requested_by TEXT NOT NULL CHECK (length(trim(requested_by)) > 0),
       requested_at TEXT NOT NULL,
       resulting_version INTEGER NOT NULL CHECK (resulting_version > 0)
+    );
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_host_shutdown (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      request_operation_id TEXT NOT NULL UNIQUE CHECK (length(trim(request_operation_id)) > 0),
+      target TEXT NOT NULL CHECK (target IN ('queue_drained', 'next_checkpoint')),
+      state TEXT NOT NULL CHECK (state IN ('armed', 'triggered', 'draining', 'poweroff_requested', 'accepted', 'cancelled', 'failed')),
+      checkpoint_baseline INTEGER NOT NULL CHECK (checkpoint_baseline >= 0),
+      requested_at TEXT NOT NULL,
+      requested_by TEXT NOT NULL CHECK (length(trim(requested_by)) > 0),
+      reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+      version INTEGER NOT NULL CHECK (version > 0),
+      triggered_at TEXT,
+      terminal_at TEXT,
+      terminal_outcome TEXT,
+      CHECK (state NOT IN ('triggered', 'draining', 'poweroff_requested', 'accepted') OR triggered_at IS NOT NULL),
+      CHECK (state NOT IN ('accepted', 'cancelled', 'failed') OR terminal_at IS NOT NULL)
+    );
+    CREATE TABLE IF NOT EXISTS runtime_host_shutdown_commands (
+      operation_id TEXT PRIMARY KEY CHECK (length(trim(operation_id)) > 0),
+      action TEXT NOT NULL CHECK (action IN ('arm', 'cancel')),
+      request_operation_id TEXT NOT NULL CHECK (length(trim(request_operation_id)) > 0),
+      target TEXT CHECK (target IS NULL OR target IN ('queue_drained', 'next_checkpoint')),
+      reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+      requested_by TEXT NOT NULL CHECK (length(trim(requested_by)) > 0),
+      requested_at TEXT NOT NULL,
+      resulting_version INTEGER NOT NULL CHECK (resulting_version > 0),
+      CHECK ((action = 'arm' AND target IS NOT NULL) OR (action = 'cancel' AND target IS NULL))
     );
   `,
 ];
