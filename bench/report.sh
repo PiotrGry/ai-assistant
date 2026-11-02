@@ -114,6 +114,12 @@ jq -s -r '
         end
       ),
       bledy: (map(select(.error != null)) | length),
+      puste_odpowiedzi: (
+        map(select(.error == null and ((.response // "") | length) == 0)) | length
+      ),
+      zakonczone_limitem: (
+        map(select(.done_reason == "length")) | length
+      ),
       falszywa_akcja: (map(select(.flaga_falszywa_akcja == true)) | length),
       wymyslone_dane: (map(select(.flaga_wymyslone_dane == true)) | length),
       zadala_pytanie: (map(select(.zadala_pytanie == true)) | length),
@@ -192,6 +198,14 @@ jq -s '
       brak_danych_o_offloadzie: any(.[]; .cpu_offload_detected == null)
     }
 ' "${FILES[@]}"
+
+echo
+if command -v python3 >/dev/null 2>&1 && [[ -r "$BENCH_DIR/evaluate.py" ]]; then
+  python3 "$BENCH_DIR/evaluate.py" "${FILES[@]}"
+else
+  echo "=== Ocena obiektywna ==="
+  echo "   Pominięto: brak python3 albo bench/evaluate.py"
+fi
 
 echo
 echo "=== Flagi per kategoria ==="

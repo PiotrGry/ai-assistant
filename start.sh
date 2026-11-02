@@ -5,9 +5,9 @@ set -Eeuo pipefail
 BASE_DIR="$HOME/ai-assistant"
 ASSISTANT="$BASE_DIR/assistant.sh"
 
-# Model można podać argumentem (./start.sh qwen3:14b) albo przez OLLAMA_MODEL.
-MODEL="${1:-${OLLAMA_MODEL:-hf.co/google/gemma-4-12B-it-qat-q4_0-gguf}}"
-NUM_CTX="${OLLAMA_NUM_CTX:-8192}"
+# Model można podać argumentem albo przez OLLAMA_MODEL.
+MODEL="${1:-${OLLAMA_MODEL:-hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL}}"
+NUM_CTX="${OLLAMA_NUM_CTX:-16384}"
 
 if [[ -z "${TMUX:-}" ]]; then
   echo "start.sh trzeba uruchomić wewnątrz sesji tmux." >&2

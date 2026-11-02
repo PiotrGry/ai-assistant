@@ -34,7 +34,7 @@ test("agent configuration exposes explicit storage privacy modes", () => {
 });
 
 test("agent configuration defaults to a context window with room for tool results", () => {
-  assert.equal(loadConfig({}).numCtx, 32_768);
+  assert.equal(loadConfig({}).numCtx, 16_384);
   assert.equal(loadConfig({ OLLAMA_NUM_CTX: "8192" }).numCtx, 8_192);
 });
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-MODEL="${OLLAMA_MODEL:-hf.co/google/gemma-4-12B-it-qat-q4_0-gguf}"
-NUM_CTX="${OLLAMA_NUM_CTX:-8192}"
+MODEL="${OLLAMA_MODEL:-hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL}"
+NUM_CTX="${OLLAMA_NUM_CTX:-16384}"
 KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-10m}"
 TEMPERATURE="${OLLAMA_TEMPERATURE:-0.3}"
 

@@ -44,10 +44,10 @@ zwykłego bufora terminala: kółko myszy przewija, przeciągnięcie zaznacza te
 a Cmd+C (macOS) lub Ctrl+Shift+C (Linux/Windows) kopiuje zaznaczenie. `pnpm
 start` pozostaje dotychczasowym interfejsem CLI.
 
-Agent domyślnie używa modelu `gemma4:12b` i Ollamy pod `http://localhost:11434`. Ustawienia można nadpisać zmiennymi:
+Agent domyślnie używa modelu `hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL` i Ollamy pod `http://localhost:11434`. Ustawienia można nadpisać zmiennymi:
 
 - `OLLAMA_MODEL`,
-- `OLLAMA_NUM_CTX` (domyślnie `32768`; przy 8192 prompt systemowy i schematy narzędzi zajmują prawie cały budżet, więc wyniki narzędzi wypadają z kontekstu),
+- `OLLAMA_NUM_CTX` (domyślnie `16384`; 4096 jest zbyt małe dla promptu systemowego i schematów narzędzi MCP),
 - `OLLAMA_KEEP_ALIVE`,
 - `OLLAMA_BASE_URL`,
 - `OLLAMA_TEMPERATURE`,

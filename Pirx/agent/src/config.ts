@@ -109,11 +109,13 @@ export function loadConfig(
     environment.OLLAMA_BASE_URL ?? "http://localhost:11434";
 
   return {
-    model: environment.OLLAMA_MODEL ?? "gemma4:12b",
+    model:
+      environment.OLLAMA_MODEL ??
+      "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL",
 
     numCtx: positiveInteger(
       "OLLAMA_NUM_CTX",
-      environment.OLLAMA_NUM_CTX ?? "32768",
+      environment.OLLAMA_NUM_CTX ?? "16384",
     ),
 
     keepAlive: environment.OLLAMA_KEEP_ALIVE ?? "10m",

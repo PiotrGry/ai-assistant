@@ -134,6 +134,23 @@ Raport rozdziela przebiegi oraz konfiguracje, pokazuje kompletność, p50/p95
 pełnego czasu odpowiedzi, wydajność, wyniki ręczne per kategoria i stabilność
 ocenionych powtórzeń.
 
+Raport uruchamia również deterministyczną ocenę obiektywną dla przypadków,
+których odpowiedź można sprawdzić bez subiektywnego sędziego. Obejmuje ona
+między innymi harmonogramy, logikę, procenty, kod/DevOps i analizę incydentów.
+Wynik nie zastępuje ręcznej oceny tekstu otwartego, ale pozwala porównywać
+modele bez oceniania ich wyłącznie przez heurystyki lub szybkość.
+
+Samą ocenę można uruchomić dla wybranych wyników:
+
+```bash
+python3 bench/evaluate.py bench/results/model_*.jsonl
+python3 bench/evaluate.py --json bench/results/model_*.jsonl
+```
+
+Przypadki otwarte, takie jak redakcja wiadomości i brakujące informacje,
+nadal należy ocenić przez `grade.sh`, ponieważ wymagają oceny znaczenia,
+tonu i tego, czy model dopowiedział niepodane fakty.
+
 Starsze pliki nie zawierają oczekiwanej liczby rekordów, dlatego ich pole
 `kompletny` w raporcie ma wartość `null`.
 
