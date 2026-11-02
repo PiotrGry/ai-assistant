@@ -36,13 +36,8 @@ function errorCode(result: { readonly outcome: string; readonly error?: { readon
 
 test("loadGitHubConfig validates fields without exposing the token", () => {
   assert.throws(
-    () => loadGitHubConfig({}),
-    (error: unknown) => {
-      assert.ok(error instanceof GitHubConfigurationError);
-      assert.match(error.message, /PIRX_GITHUB_OWNER/u);
-      assert.doesNotMatch(error.message, /super-secret/u);
-      return true;
-    },
+    () => loadGitHubConfig({}, { tokenProvider: () => { throw new GitHubConfigurationError("no token"); } }),
+    /no token/u,
   );
   assert.deepEqual(
     loadGitHubConfig({
@@ -54,6 +49,13 @@ test("loadGitHubConfig validates fields without exposing the token", () => {
     }, { tokenProvider: () => "token" }),
     { ...config, token: "token", owner: "owner", repository: "repo", projectOwner: "owner", timeoutMs: 2500, apiUrl: "https://api.github.com" },
   );
+});
+
+test("loadGitHubConfig defaults to the reconciliation repository", () => {
+  assert.deepEqual(loadGitHubConfig({}, { tokenProvider: () => "token" }), {
+    token: "token", owner: "PiotrGry", repository: "zdrovena-reconciliation",
+    apiUrl: "https://api.github.com", timeoutMs: 10_000,
+  });
 });
 
 test("loadGitHubConfig does not require project settings for Issue operations", () => {

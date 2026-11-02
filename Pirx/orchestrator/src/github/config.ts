@@ -93,8 +93,8 @@ export function loadGitHubConfig(
 ): GitHubConfig {
   const timeoutText = env.PIRX_GITHUB_TIMEOUT_MS?.trim() || "10000";
   const apiEndpoint = apiUrl(env.PIRX_GITHUB_API_URL);
-  const owner = required(env, "PIRX_GITHUB_OWNER");
-  const repository = required(env, "PIRX_GITHUB_REPOSITORY");
+  const owner = env.PIRX_GITHUB_OWNER?.trim() || "PiotrGry";
+  const repository = env.PIRX_GITHUB_REPOSITORY?.trim() || "zdrovena-reconciliation";
   const projectOwner = env.PIRX_GITHUB_PROJECT_OWNER?.trim() || undefined;
   const projectNumberText = env.PIRX_GITHUB_PROJECT_NUMBER?.trim();
   const projectNumber =
