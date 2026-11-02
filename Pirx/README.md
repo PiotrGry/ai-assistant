@@ -87,6 +87,10 @@ host CPU and NVIDIA GPU samples in the same local `gpu.sqlite` database. CPU
 utilization is calculated from operating-system counter deltas; its first value
 is deliberately unavailable. CPU collection continues when `nvidia-smi` is
 missing, while GPU collection can continue after a transient CPU-reader error.
+The MCP server uses the same `PIRX_GPU_DB`/XDG path for the always-listed
+read-only `pirx_resource_report` tool. One call returns current values, stale
+flags, bounded averages/peaks, and bucketed CPU/GPU history; it never starts the
+sampler or returns process lists and filesystem paths.
 
 Bezpieczniki pętli narzędziowej są konfigurowalne przez:
 

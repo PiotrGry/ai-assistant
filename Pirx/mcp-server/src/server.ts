@@ -34,6 +34,7 @@ import { registerGitHubShipmentPocTool } from "./tools/github-shipment-poc.js";
 import { registerGitHubShipmentCycleTool } from "./tools/github-shipment-cycle.js";
 import { registerGitHubFailureHandoffPocTool } from "./tools/github-failure-handoff-poc.js";
 import { registerOrchestratorTools, SqliteExecutionObservabilityToolPort, SqliteOrchestratorControlToolPort, type ExecutionObservabilityToolPort, type OrchestratorControlToolPort } from "./tools/orchestrator.js";
+import { registerResourceTools, SqliteResourceReportPort, type ResourceReportPort } from "./tools/resources.js";
 import { CodexCliRunner } from "@pirx/orchestrator";
 import {
   FileGitHubFailureHandoffPocStore,
@@ -58,6 +59,7 @@ export interface McpServerOptions {
   readonly githubFailureHandoffPocStore?: GitHubFailureHandoffPocStore;
   readonly orchestratorControlPort?: OrchestratorControlToolPort;
   readonly executionObservabilityPort?: ExecutionObservabilityToolPort;
+  readonly resourceReportPort?: ResourceReportPort;
 }
 
 export function createMcpServer(options: McpServerOptions = {}): McpServer {
@@ -89,6 +91,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
     authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
     ...(config.orchestratorDatabasePath === undefined ? { configurationError: "PIRX_ORCHESTRATOR_DATABASE is not configured." } : {}),
   });
+  registerResourceTools(server, { port: options.resourceReportPort ?? new SqliteResourceReportPort(config.resourceDatabasePath) });
   // Issue tools are always listed; without configuration they return a controlled
   // `configuration` error naming what is missing instead of silently disappearing.
   let githubConfig = options.githubPocConfig;

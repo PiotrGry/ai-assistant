@@ -15,6 +15,7 @@ export interface GoogleCalendarConfig {
 export interface McpServerConfig {
   readonly obsidianVaultPath: string | undefined;
   readonly orchestratorDatabasePath: string | undefined;
+  readonly resourceDatabasePath: string;
   readonly googleCalendar: GoogleCalendarConfig;
   readonly githubPocIssue: number | undefined;
   readonly githubPocConfigurationError: string | undefined;
@@ -77,6 +78,7 @@ export function loadMcpServerConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): McpServerConfig {
   const googleDirectory = resolve(homedir(), ".config", "pirx", "google-calendar");
+  const dataHome = environment.XDG_DATA_HOME?.trim() || resolve(homedir(), ".local", "share");
   const timeZone =
     environment.PIRX_GOOGLE_CALENDAR_TIMEZONE?.trim() || configuredTimeZone();
 
@@ -94,6 +96,7 @@ export function loadMcpServerConfig(
     obsidianVaultPath:
       optionalPath(environment.PIRX_OBSIDIAN_VAULT) ?? defaultObsidianVault(),
     orchestratorDatabasePath: optionalPath(environment.PIRX_ORCHESTRATOR_DATABASE),
+    resourceDatabasePath: optionalPath(environment.PIRX_GPU_DB) ?? resolve(dataHome, "pirx", "gpu.sqlite"),
     googleCalendar: {
       credentialsFile: resolve(
         environment.PIRX_GOOGLE_CREDENTIALS_FILE?.trim() ||

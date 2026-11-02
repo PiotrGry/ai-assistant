@@ -59,6 +59,11 @@ w sekcji `[Service]` na przykład `Environment=PIRX_GPU_RETENTION_DAYS=14`:
 - `PIRX_GPU_RETENTION_DAYS` (domyślnie `7`),
 - `PIRX_GPU_DB` (domyślnie `~/.local/share/pirx/gpu.sqlite`; Grafana czyta tylko tę ścieżkę).
 
+Lokalny serwer MCP czyta ten sam plik wyłącznie do odczytu przez narzędzie
+`pirx_resource_report`. Jeśli ustawisz `PIRX_GPU_DB`, przekaż tę samą zmienną do
+procesu samplera i MCP; odpowiedź rozróżnia brak danych, nieświeże próbki i
+nieobsługiwaną wersję schematu.
+
 Źródło danych `pirx-gpu` Grafana wczytuje przy starcie, więc po pierwszym
 wdrożeniu uruchom ją ponownie: `./down.sh && ./up.sh`.
 
