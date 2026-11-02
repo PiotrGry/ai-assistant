@@ -48,6 +48,12 @@ async function startScriptedOllama(replies: readonly Record<string, unknown>[]):
       return;
     }
     requests.push(await requestJson(request));
+    const scripted = replies[requests.length - 1];
+    if (typeof scripted?.backendError === "string") {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: scripted.backendError }));
+      return;
+    }
     sendJson(response, {
       model: "pirx-test-model",
       created_at: new Date().toISOString(),
@@ -167,6 +173,57 @@ test("continuation check keeps the original answer when the model has nothing le
   assert.equal(turn.metrics.model_calls, 2);
   assert.equal(turn.metrics.tool_calls, 0);
   assert.equal(ollama.requests.length, 2);
+});
+
+test("backend argument parse failure retries generation once without repeating completed MCP calls", async (context) => {
+  const { agent, ollama } = await createContinuationAgent(context, [
+    { role: "assistant", content: "", tool_calls: [{ function: { name: "hello", arguments: { name: "Piotr" } } }] },
+    { backendError: 'llama-server returned invalid tool call arguments for "pirx_orchestrator_logs": unexpected end of JSON input' },
+    { role: "assistant", content: "Mam już wynik wcześniejszej operacji." },
+    { role: "assistant", content: "GOTOWE" },
+  ]);
+  const turn = await agent.chat("Sprawdź wynik.");
+  assert.equal(turn.content, "Mam już wynik wcześniejszej operacji.");
+  assert.equal(turn.metrics.tool_calls, 1);
+  assert.equal(turn.metrics.model_calls, 4);
+  assert.equal(turn.metrics.input_tokens, null);
+  const retry = ollama.requests[2]?.messages as Array<{ content: string }>;
+  assert.match(retry.at(-1)?.content ?? "", /naprawa formatu/u);
+  assert.ok(turn.messages.every((message) => !message.content.includes("[Pirx: naprawa formatu]")));
+  assert.equal(turn.messages.filter((message) => message.role === "tool").length, 1);
+});
+
+test("argument generation recovery is bounded to one retry per turn, including continuation", async (context) => {
+  const error = { backendError: 'llama-server returned invalid tool call arguments for "pirx_orchestrator_logs": unexpected end of JSON input' };
+  const { agent, ollama } = await createContinuationAgent(context, [
+    { role: "assistant", content: "Sprawdzam." }, error, error,
+  ]);
+  const turn = await agent.chat("Sprawdź logi.");
+  assert.equal(turn.metrics.done_reason, "invalid_tool_arguments");
+  assert.equal(turn.metrics.model_calls, 3);
+  assert.match(turn.content, /Wadliwe wywołanie nie zostało wykonane/u);
+  assert.equal(ollama.requests.length, 3);
+});
+
+test("exhausted argument recovery preserves completed tool evidence in the conversation", async (context) => {
+  const error = { backendError: 'llama-server returned invalid tool call arguments for "pirx_orchestrator_logs": unexpected end of JSON input' };
+  const { agent, ollama } = await createContinuationAgent(context, [
+    { role: "assistant", content: "", tool_calls: [{ function: { name: "hello", arguments: { name: "Piotr" } } }] },
+    error, error,
+  ]);
+  const turn = await agent.chat("Sprawdź wynik.");
+  assert.equal(turn.metrics.done_reason, "invalid_tool_arguments");
+  assert.equal(turn.metrics.tool_calls, 1);
+  assert.equal(turn.metrics.model_calls, 3);
+  assert.equal(ollama.requests.length, 3);
+  assert.equal(turn.messages.filter((message) => message.role === "tool").length, 1);
+  assert.ok(turn.messages.some((message) => message.content.includes("Hello, Piotr!")));
+});
+
+test("unrelated backend failures are not retried", async (context) => {
+  const { agent, ollama } = await createContinuationAgent(context, [{ backendError: "model unavailable" }]);
+  await assert.rejects(agent.chat("Sprawdź logi."), /model unavailable/u);
+  assert.equal(ollama.requests.length, 1);
 });
 
 test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context) => {

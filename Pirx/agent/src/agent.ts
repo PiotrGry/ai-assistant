@@ -19,6 +19,7 @@ import type { OperationRecorder } from "./operation-recorder.js";
 import { readGpuStats, type GpuStats } from "./telemetry.js";
 import { currentTimeSystemContext } from "./time-context.js";
 import { ORCHESTRATION_SYSTEM_CONTEXT } from "./orchestration-context.js";
+import { withToolArgumentRecovery, ToolArgumentGenerationError, TOOL_ARGUMENT_FAILURE_RESPONSE } from "./tool-argument-recovery.js";
 
 type ResponseWithMetrics = ChatResponse;
 
@@ -461,6 +462,12 @@ export class PirxAgent {
       contextEstimates: [],
       contextBuilds: [],
     };
+    const argumentRecoveryBudget = { remaining: 1 };
+    const recordArgumentRecovery = (): void => {
+      totals.modelCalls += 1;
+      // The rejected generation has no backend usage report; do not report partial totals as complete.
+      totals.totalDuration = totals.loadDuration = totals.promptEvalCount = totals.promptEvalDuration = totals.evalCount = totals.evalDuration = null;
+    };
 
     this.#messages.push({ role: "user", content: prompt });
 
@@ -525,6 +532,7 @@ export class PirxAgent {
         };
 
         let response: ResponseWithMetrics;
+        const argumentRecoveryBefore = argumentRecoveryBudget.remaining;
         try {
           this.#modelMayBeLoaded = true;
           if (llmOperation !== undefined) {
@@ -541,10 +549,12 @@ export class PirxAgent {
               createdAt: this.#now().toISOString(),
             });
           }
-          response = (await withTimeout(
-            this.#ollama.chat(request),
-            this.#config.llmTimeoutMs,
-            "Ollama",
+          response = (await withToolArgumentRecovery(
+            request.messages,
+            tools.flatMap((tool) => tool.function.name === undefined ? [] : [tool.function.name]),
+            argumentRecoveryBudget,
+            (retryMessages) => withTimeout(this.#ollama.chat({ ...request, messages: retryMessages }), this.#config.llmTimeoutMs, "Ollama"),
+            recordArgumentRecovery,
           )) as ResponseWithMetrics;
         } catch (error: unknown) {
           if (llmOperation !== undefined) {
@@ -554,9 +564,17 @@ export class PirxAgent {
               payload: {
                 schema_version: 1,
                 wall_duration_ms: performance.now() - llmStartedAt,
+                tool_argument_retries: argumentRecoveryBefore - argumentRecoveryBudget.remaining,
               },
               error: error instanceof Error ? error.message : String(error),
             });
+          }
+          if (error instanceof ToolArgumentGenerationError) {
+            recordArgumentRecovery();
+            finalContent = TOOL_ARGUMENT_FAILURE_RESPONSE;
+            totals.doneReason = "invalid_tool_arguments";
+            this.#messages.push({ role: "assistant", content: finalContent });
+            break;
           }
           throw error;
         }
@@ -568,6 +586,7 @@ export class PirxAgent {
               schema_version: 1,
               ...rawOllamaMetrics(response),
               wall_duration_ms: performance.now() - llmStartedAt,
+              tool_argument_retries: argumentRecoveryBefore - argumentRecoveryBudget.remaining,
             },
           });
         }
@@ -605,18 +624,18 @@ export class PirxAgent {
               : undefined;
           const checkStartedAt = performance.now();
           let check: ResponseWithMetrics;
+          const checkArgumentRecoveryBefore = argumentRecoveryBudget.remaining;
           try {
-            check = (await withTimeout(
-              this.#ollama.chat({
-                ...request,
-                messages: [
+            check = (await withToolArgumentRecovery(
+              [
                   ...messages,
                   withoutHistoricalThinking(response.message),
                   { role: "user", content: CONTINUATION_CHECK_PROMPT },
-                ],
-              }),
-              this.#config.llmTimeoutMs,
-              "Ollama",
+              ],
+              tools.flatMap((tool) => tool.function.name === undefined ? [] : [tool.function.name]),
+              argumentRecoveryBudget,
+              (retryMessages) => withTimeout(this.#ollama.chat({ ...request, messages: retryMessages }), this.#config.llmTimeoutMs, "Ollama"),
+              recordArgumentRecovery,
             )) as ResponseWithMetrics;
           } catch (error: unknown) {
             if (checkOperation !== undefined) {
@@ -626,9 +645,17 @@ export class PirxAgent {
                 payload: {
                   schema_version: 1,
                   wall_duration_ms: performance.now() - checkStartedAt,
+                  tool_argument_retries: checkArgumentRecoveryBefore - argumentRecoveryBudget.remaining,
                 },
                 error: error instanceof Error ? error.message : String(error),
               });
+            }
+            if (error instanceof ToolArgumentGenerationError) {
+              recordArgumentRecovery();
+              finalContent = TOOL_ARGUMENT_FAILURE_RESPONSE;
+              totals.doneReason = "invalid_tool_arguments";
+              this.#messages.push({ role: "assistant", content: finalContent });
+              break;
             }
             throw error;
           }
@@ -640,6 +667,7 @@ export class PirxAgent {
                 schema_version: 1,
                 ...rawOllamaMetrics(check),
                 wall_duration_ms: performance.now() - checkStartedAt,
+                tool_argument_retries: checkArgumentRecoveryBefore - argumentRecoveryBudget.remaining,
               },
             });
           }
