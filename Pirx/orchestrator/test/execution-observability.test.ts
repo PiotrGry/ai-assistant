@@ -29,7 +29,10 @@ const metricAttributes: Readonly<Record<ExecutionMetricName, ExecutionAttributes
   "pirx.task.lifecycle.total": { taskState: "completed", risk: "low" },
   "pirx.attempt.lifecycle.total": { attemptState: "terminal", provider: "claude-code", outcome: "CODE_PUSHED" },
   "pirx.attempt.duration": { provider: "claude-code", outcome: "CODE_PUSHED" },
+  "pirx.task.queue.duration": { risk: "low" },
+  "pirx.attempt.retry.wait.duration": { provider: "claude-code", previousOutcome: "FAILED" },
   "pirx.ci.lifecycle.total": { ciProvider: "github-actions", ciState: "success", workflowName: "Develop Fast Gate" },
+  "pirx.ci.duration": { ciProvider: "github-actions", ciState: "success", workflowName: "Develop Fast Gate" },
   "pirx.worker.cooldown.total": { provider: "claude-code", recoverySource: "provider_reset" },
   "pirx.worker.cooldown.duration": { provider: "claude-code", recoverySource: "provider_reset" },
   "pirx.delivery.lifecycle.total": { deliveryState: "deployed", environment: "production" },
@@ -51,7 +54,7 @@ test("keeps stable Task, Attempt, CI, cooldown, and delivery event contracts", (
 });
 
 test("keeps stable aggregate metric names, units, and bounded labels", () => {
-  assert.equal(EXECUTION_METRIC_NAMES.length, 8);
+  assert.equal(EXECUTION_METRIC_NAMES.length, 11);
   for (const name of EXECUTION_METRIC_NAMES) {
     const definition = EXECUTION_METRIC_DEFINITIONS[name];
     const value = definition.instrument === "counter" ? 1 : 12.5;

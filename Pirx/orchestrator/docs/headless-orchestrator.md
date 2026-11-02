@@ -140,6 +140,21 @@ remains in `deploying` and the runtime Task remains active.
 
 Resource telemetry remains a separate follow-up Task.
 
+## Durable execution observations
+
+At startup and after Queue, delivery, and worker-cycle boundaries, the headless
+service rebuilds an append-only observability projection from runtime SQLite.
+It records bounded Task, Attempt, CI, cooldown, and shipment lifecycle events,
+plus queue, execution, retry-wait, CI, cooldown, and delivery durations in
+seconds. Deterministic signal IDs make replay and restart idempotent.
+
+The projection reads durable timestamps only. It never parses logs, GitHub
+comments, prompts, or model prose and is not an authority for scheduling,
+retry, merge, Release, or shutdown. Missing endpoints produce no invented
+duration. Projection conflict, truncation, malformed time, and storage errors
+are emitted as bounded `observability` events while source runtime state remains
+unchanged.
+
 ## Chat status and pause/resume
 
 Give the local MCP server the same runtime database path and the existing host

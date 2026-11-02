@@ -110,6 +110,7 @@ export {
   type HeadlessDeliveryReconciliationPort,
   type HeadlessHostShutdownEvaluation,
   type HeadlessHostShutdownPort,
+  type HeadlessObservabilityPort,
   type HeadlessRuntimePort,
   type HeadlessQueueReconciliationPort,
   type HeadlessServiceEvent,
@@ -501,6 +502,18 @@ export {
   type ExecutionMetricUnit,
   type ExecutionSignalResult,
 } from "./runtime/execution-observability.js";
+export {
+  EXECUTION_OBSERVABILITY_PROJECTION_LIMITS,
+  EXECUTION_OBSERVABILITY_PROJECTION_SCHEMA_VERSION,
+  ExecutionObservabilityProjector,
+  ExecutionObservabilityRepository,
+  type DurableExecutionEventInput,
+  type DurableExecutionMetricInput,
+  type ExecutionObservabilityProjectionResult,
+  type ExecutionObservabilityWriteResult,
+  type ExecutionSignalSource,
+  type ExecutionSignalSourceKind,
+} from "./runtime/execution-observability-persistence.js";
 export {
   CAPABILITY_VOCABULARY,
   SENSITIVE_CAPABILITIES,

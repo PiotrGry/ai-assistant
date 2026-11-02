@@ -79,6 +79,19 @@ test("contains a cycle exception, uses the error delay, and continues to shutdow
   assert.equal(JSON.stringify(events).includes("provider payload"), false);
 });
 
+test("contains observability projection failure without blocking the work cycle", async () => {
+  const port = runtime();
+  const events: HeadlessServiceEvent[] = [];
+  let service: HeadlessOrchestratorService;
+  service = new HeadlessOrchestratorService(port, { cycleIntervalMs: 100, observability: { reconcile: () => { throw new Error("raw storage detail"); } }, emit: (event) => events.push(event), sleep: async () => { await service.stop("fixture"); } });
+  assert.equal((await service.run()).outcome, "stopped");
+  assert.equal(port.calls.includes("cycle"), true);
+  const observations = events.filter((event) => event.event === "observability");
+  assert.equal(observations.length >= 2, true);
+  assert.equal(observations.every((event) => event.outcome === "storage_error" && event.reason === "projection_threw"), true);
+  assert.equal(JSON.stringify(events).includes("raw storage detail"), false);
+});
+
 test("does not execute stale runtime Queue data when GitHub reconciliation fails", async () => {
   const port = runtime();
   let service: HeadlessOrchestratorService;

@@ -43,9 +43,13 @@ export interface HeadlessHostShutdownPort {
   powerOffAfterClose(): Promise<{ readonly outcome: "accepted" | "failed"; readonly message: string }>;
 }
 
+export interface HeadlessObservabilityPort {
+  reconcile(): { readonly outcome: string; readonly message?: string } | Promise<{ readonly outcome: string; readonly message?: string }>;
+}
+
 export interface HeadlessServiceEvent {
   readonly schemaVersion: typeof HEADLESS_SERVICE_SCHEMA_VERSION;
-  readonly event: "starting" | "recovered" | "control" | "queue" | "delivery" | "cycle" | "cycle_error" | "host_shutdown" | "stopping" | "stopped";
+  readonly event: "starting" | "recovered" | "control" | "queue" | "delivery" | "cycle" | "cycle_error" | "observability" | "host_shutdown" | "stopping" | "stopped";
   readonly outcome: string;
   readonly reason?: string;
 }
@@ -59,6 +63,7 @@ export interface HeadlessServiceOptions {
   readonly delivery?: HeadlessDeliveryReconciliationPort;
   readonly control?: HeadlessControlPort;
   readonly hostShutdown?: HeadlessHostShutdownPort;
+  readonly observability?: HeadlessObservabilityPort;
 }
 
 export type HeadlessServiceResult =
@@ -99,6 +104,7 @@ export class HeadlessOrchestratorService {
   readonly #delivery: HeadlessDeliveryReconciliationPort | undefined;
   readonly #control: HeadlessControlPort | undefined;
   readonly #hostShutdown: HeadlessHostShutdownPort | undefined;
+  readonly #observability: HeadlessObservabilityPort | undefined;
   readonly #wake = new AbortController();
   #running = false;
   #stopRequested = false;
@@ -117,6 +123,7 @@ export class HeadlessOrchestratorService {
     this.#delivery = options.delivery;
     this.#control = options.control;
     this.#hostShutdown = options.hostShutdown;
+    this.#observability = options.observability;
   }
 
   public get running(): boolean { return this.#running; }
@@ -133,6 +140,7 @@ export class HeadlessOrchestratorService {
     if (this.#stopRequested) return this.stop("stop_during_recovery");
     if (recovery.outcome !== "idle") return this.#startupFailure(recovery.outcome === "reconciliation_required" ? recovery.reason : `unexpected_${recovery.outcome}`);
     this.#event("recovered", "success");
+    await this.#reconcileObservability();
 
     while (!this.#stopRequested) {
       let delay = this.#cycleIntervalMs;
@@ -159,6 +167,7 @@ export class HeadlessOrchestratorService {
           const queue = await this.#queue.reconcile();
           queueOutcome = queue.outcome;
           this.#event("queue", queue.outcome, queue.message);
+          await this.#reconcileObservability();
           if (queue.outcome !== "synchronized") {
             delay = this.#errorIntervalMs;
             if (!this.#stopRequested) await this.#sleep(delay, this.#wake.signal);
@@ -170,6 +179,7 @@ export class HeadlessOrchestratorService {
           const delivery = await this.#delivery.reconcile();
           deliveryOutcome = delivery.outcome;
           this.#event("delivery", delivery.outcome, delivery.message);
+          await this.#reconcileObservability();
           if (!delivery.allowWorkerCycle) {
             if (["rate_limited", "reconciliation_required"].includes(delivery.outcome)) delay = this.#errorIntervalMs;
             if (!this.#stopRequested) await this.#sleep(delay, this.#wake.signal);
@@ -178,10 +188,12 @@ export class HeadlessOrchestratorService {
         }
         const result = await this.#runtime.cycle();
         this.#event("cycle", result.outcome, "reason" in result ? result.reason : undefined);
+        await this.#reconcileObservability();
         if (this.#evaluateHostShutdown({ ...(queueOutcome === undefined ? {} : { queueOutcome }), ...(deliveryOutcome === undefined ? {} : { deliveryOutcome }), cycleOutcome: result.outcome })) return this.stop("host_shutdown_triggered");
       } catch {
         delay = this.#errorIntervalMs;
         this.#event("cycle_error", "contained", "cycle_threw");
+        await this.#reconcileObservability();
       }
       if (!this.#stopRequested) await this.#sleep(delay, this.#wake.signal);
     }
@@ -250,6 +262,14 @@ export class HeadlessOrchestratorService {
     this.#hostShutdownPending = true;
     this.#event("host_shutdown", "triggered", value.requestOperationId);
     return true;
+  }
+
+  async #reconcileObservability(): Promise<void> {
+    if (this.#observability === undefined) return;
+    try {
+      const value = await this.#observability.reconcile();
+      this.#event("observability", value.outcome, value.message);
+    } catch { this.#event("observability", "storage_error", "projection_threw"); }
   }
 
   #closeOnce(): void {

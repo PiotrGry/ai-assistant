@@ -110,7 +110,7 @@ import {
   type WorkerProviderRecoveryMetadata,
 } from "./worker-availability.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 29 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 30 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -795,6 +795,43 @@ const MIGRATIONS: readonly string[] = [
       resulting_version INTEGER NOT NULL CHECK (resulting_version > 0),
       CHECK ((action = 'arm' AND target IS NOT NULL) OR (action = 'cancel' AND target IS NULL))
     );
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS runtime_execution_events (
+      signal_id TEXT PRIMARY KEY CHECK (length(trim(signal_id)) BETWEEN 1 AND 256),
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      name TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      attributes_json TEXT NOT NULL CHECK (json_valid(attributes_json)),
+      source_kind TEXT NOT NULL CHECK (source_kind IN ('task', 'attempt', 'ci', 'cooldown', 'delivery')),
+      source_id TEXT NOT NULL CHECK (length(trim(source_id)) BETWEEN 1 AND 512),
+      source_version INTEGER NOT NULL CHECK (source_version > 0),
+      recorded_at TEXT NOT NULL,
+      content_hash TEXT NOT NULL CHECK (length(content_hash) = 64)
+    );
+    CREATE INDEX IF NOT EXISTS runtime_execution_events_time
+      ON runtime_execution_events (occurred_at DESC, signal_id DESC);
+    CREATE INDEX IF NOT EXISTS runtime_execution_events_source
+      ON runtime_execution_events (source_kind, source_id, source_version);
+    CREATE TABLE IF NOT EXISTS runtime_execution_metrics (
+      signal_id TEXT PRIMARY KEY CHECK (length(trim(signal_id)) BETWEEN 1 AND 256),
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      name TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      value REAL NOT NULL CHECK (value >= 0),
+      instrument TEXT NOT NULL CHECK (instrument IN ('counter', 'histogram')),
+      unit TEXT NOT NULL CHECK (unit IN ('1', 's')),
+      attributes_json TEXT NOT NULL CHECK (json_valid(attributes_json)),
+      source_kind TEXT NOT NULL CHECK (source_kind IN ('task', 'attempt', 'ci', 'cooldown', 'delivery')),
+      source_id TEXT NOT NULL CHECK (length(trim(source_id)) BETWEEN 1 AND 512),
+      source_version INTEGER NOT NULL CHECK (source_version > 0),
+      recorded_at TEXT NOT NULL,
+      content_hash TEXT NOT NULL CHECK (length(content_hash) = 64)
+    );
+    CREATE INDEX IF NOT EXISTS runtime_execution_metrics_time
+      ON runtime_execution_metrics (observed_at DESC, signal_id DESC);
+    CREATE INDEX IF NOT EXISTS runtime_execution_metrics_source
+      ON runtime_execution_metrics (source_kind, source_id, source_version);
   `,
 ];
 
