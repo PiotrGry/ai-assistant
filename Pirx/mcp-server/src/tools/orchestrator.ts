@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/server";
+import { existsSync } from "node:fs";
 import * as z from "zod/v4";
 
 import {
@@ -33,6 +34,7 @@ export class SqliteExecutionObservabilityToolPort implements ExecutionObservabil
   readonly #filename: string;
   public constructor(filename: string) { this.#filename = filename; }
   public report(input: ExecutionReportQuery): ExecutionReportResult {
+    if (!existsSync(this.#filename)) return { outcome: "storage_error", message: "Orchestrator runtime database does not exist. Start the configured orchestrator service first." };
     let store: RuntimeSqliteStore | undefined;
     try {
       store = RuntimeSqliteStore.open({ filename: this.#filename, busyTimeoutMs: 1_000 });
@@ -58,6 +60,7 @@ export class SqliteOrchestratorControlToolPort implements OrchestratorControlToo
     return value.outcome === "success" ? value.value : { outcome: "storage_error", operationId: input.operationId, message: value.message };
   }
   #withStore<T>(operation: (store: RuntimeSqliteStore, repository: OrchestratorControlRepository) => StorageResult<T>): StorageResult<T> {
+    if (!existsSync(this.#filename)) return { outcome: "storage_error", message: "Orchestrator runtime database does not exist. Start the configured orchestrator service first." };
     let store: RuntimeSqliteStore | undefined;
     try { store = RuntimeSqliteStore.open({ filename: this.#filename, busyTimeoutMs: 1_000 }); return operation(store, new OrchestratorControlRepository(store)); }
     catch { return { outcome: "storage_error", message: "Orchestrator runtime database is unavailable." }; }

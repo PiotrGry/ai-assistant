@@ -166,6 +166,41 @@ Checkpoints, provider payloads, credentials, or paths.
 
 ## Chat status and pause/resume
 
+### Chat-driven startup on Linux
+
+Install the user-service template from `orchestrator/systemd/pirx-orchestrator.service`
+once. Adjust its WorkingDirectory for the local checkout, and ensure the user
+service PATH resolves the supported Node.js and authenticated Claude/GitHub CLIs.
+The service's `~/.config/pirx/orchestrator.env` must define
+`PIRX_ORCHESTRATOR_CONFIG=/absolute/path/to/orchestrator.json`; this JSON contains
+the repository allowlist, actual reviewed base revision and shared runtime database.
+Do not use the example revisions or paths verbatim.
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp orchestrator/systemd/pirx-orchestrator.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+```
+
+Give the chat `PIRX_ORCHESTRATOR_SERVICE_ENABLED=true` and
+`PIRX_ORCHESTRATOR_DATABASE` pointing to the same runtime SQLite database as
+the daemon. These values are forwarded to the MCP child, including with custom
+system prompts. Ordinary orchestration instructions are added by the agent host.
+
+The host-authorized `pirx_orchestrator_start` tool issues only
+`/usr/bin/systemctl --user start --no-block pirx-orchestrator.service`.
+Repeated starts reuse the same systemd unit. It does not launch an unsupervised
+child, install software, accept arbitrary unit names, reorder Queue or select an
+Issue. Missing enablement, unsupported platforms and service-manager errors are
+explicit outcomes. `start_requested` confirms only that systemd accepted the
+request: the chat must then read status to check heartbeat/Task/Attempt evidence.
+Pause/resume continues to use the existing durable control channel.
+
+After installation, say in chat: “Rozwiąż Issue #462 z kolejki”. Pirx should
+read the Issue and daemon status, request service startup or resume when needed,
+and report the actual runtime state. If another item precedes #462, normal Queue
+ordering wins. Chat must not claim Claude started from startup acknowledgement alone.
+
 Give the local MCP server the same runtime database path and the existing host
 authorization secret:
 

@@ -18,6 +18,7 @@ import { parseOllamaModelNames } from "./ollama-models.js";
 import type { OperationRecorder } from "./operation-recorder.js";
 import { readGpuStats, type GpuStats } from "./telemetry.js";
 import { currentTimeSystemContext } from "./time-context.js";
+import { ORCHESTRATION_SYSTEM_CONTEXT } from "./orchestration-context.js";
 
 type ResponseWithMetrics = ChatResponse;
 
@@ -911,7 +912,7 @@ export class PirxAgent {
     return [
       {
         role: "system",
-        content: `${this.#prompt.content.trimEnd()}\n\n---\n\n${timeContext}`,
+        content: `${this.#prompt.content.trimEnd()}\n\n---\n\n${ORCHESTRATION_SYSTEM_CONTEXT}\n\n${timeContext}`,
       },
       ...this.#messages.slice(1).map(withoutHistoricalThinking),
     ];

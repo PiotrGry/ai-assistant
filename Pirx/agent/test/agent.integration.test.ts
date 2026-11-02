@@ -136,6 +136,25 @@ test("continuation check runs a tool the model only announced, then ends on the 
     message.content === "Pobieram teraz powitanie." && (message.tool_calls?.length ?? 0) === 1));
 });
 
+test("custom-persona chat receives orchestration routing and can inspect the daemon through MCP", async (context) => {
+  const { agent, ollama } = await createContinuationAgent(context, [
+    { role: "assistant", content: "", tool_calls: [{ function: { name: "pirx_orchestrator_status", arguments: {} } }] },
+    { role: "assistant", content: "Odczytałam stan usługi; wynik nie potwierdza uruchomienia workera." },
+    { role: "assistant", content: "GOTOWE" },
+  ]);
+  const turn = await agent.chat("Rozwiąż Issue #462 z kolejki przez Claude.");
+  const messages = ollama.requests[0]?.messages as Array<{ role: string; content: string }>;
+  const system = messages.find((message) => message.role === "system")?.content ?? "";
+  assert.match(system, /Jesteś testową asystentką/u);
+  assert.match(system, /pirx_orchestrator_start/u);
+  assert.match(system, /Claude Code CLI/u);
+  assert.match(system, /nie zmieniaj kolejności/u);
+  const tools = ollama.requests[0]?.tools as Array<{ function: { name: string } }>;
+  assert.ok(tools.some((tool) => tool.function.name === "pirx_orchestrator_start"));
+  assert.equal(turn.metrics.tool_calls, 1);
+  assert.ok(turn.messages.some((message) => message.role === "tool" && message.tool_name === "pirx_orchestrator_status"));
+});
+
 test("continuation check keeps the original answer when the model has nothing left to do", async (context) => {
   const { agent, ollama } = await createContinuationAgent(context, [
     { role: "assistant", content: "Cześć, Piotrze!" },
