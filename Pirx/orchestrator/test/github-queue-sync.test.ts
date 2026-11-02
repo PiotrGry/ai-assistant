@@ -76,6 +76,10 @@ function queueIssue(number: number, order: number, overrides: Partial<GitHubQueu
   return { itemId: `item-${number}`, nodeId: `issue-${number}`, owner: "PiotrGry", repository: "ai-assistant", issueNumber: number, url: `https://github.com/PiotrGry/ai-assistant/issues/${number}`, title: `Task ${number}`, body: body(number), state: "OPEN", createdAt: now, updatedAt: now, status: "Todo", priority: "P0", worker: "Pirx", risk: "High", workType: "Task", queueOrder: order, blockers: [], ...overrides };
 }
 function snapshot(items: readonly GitHubQueueIssue[]): GitHubQueueSnapshot { return { schemaVersion: 1, projectId, synchronizedAt: now, items }; }
+function withoutPlanningMetadata(issue: GitHubQueueIssue): GitHubQueueIssue {
+  const { status: _status, worker: _worker, workType: _workType, ...rest } = issue;
+  return rest;
+}
 
 test("projects one runtime Task per Issue, skips an external blocker, replays, and unqueues stale work", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pirx-queue-sync-"));
@@ -106,5 +110,59 @@ test("rejects duplicate order and malformed planning before any durable Task is 
     assert.equal(sync.synchronize(snapshot([queueIssue(1, 10), queueIssue(2, 10)])).outcome, "invalid_snapshot");
     assert.equal(sync.synchronize(snapshot([queueIssue(1, 10, { body: "missing contract" })])).outcome, "invalid_snapshot");
     const tasks = store.tasks.list(); assert.equal(tasks.outcome, "success"); if (tasks.outcome === "success") assert.equal(tasks.value.length, 0);
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("historical and non-executable items do not reserve or invalidate active Queue Orders", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-queue-history-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  try {
+    const sync = new GitHubQueueSynchronizer(store, { workerCapabilities: ["repository.read"], repositories: ["PiotrGry/ai-assistant"] });
+    const ignored = [
+      queueIssue(123, 190, { state: "CLOSED", status: "Done" }),
+      queueIssue(135, 190, { state: "CLOSED", status: "Done" }),
+      withoutPlanningMetadata(queueIssue(3, 354.5, { state: "CLOSED", body: "historical" })),
+      { ...withoutPlanningMetadata(queueIssue(4, -1)), status: "Done" },
+      queueIssue(5, 190, { worker: "Human" }),
+      queueIssue(6, 190, { workType: "Feature" }),
+      queueIssue(7, 190, { status: "Ready" }),
+      queueIssue(8, 0, { status: "Refinement Required" }),
+    ];
+    for (const items of [[...ignored, queueIssue(462, 190)], [queueIssue(462, 190), ...ignored]]) {
+      const result = sync.synchronize(snapshot(items));
+      assert.equal(result.outcome, "synchronized");
+      if (result.outcome === "synchronized") assert.equal(result.queued, 1);
+    }
+    const tasks = store.tasks.list();
+    assert.equal(tasks.outcome, "success");
+    if (tasks.outcome === "success") assert.deepEqual(tasks.value.map((task) => task.githubReference?.issueNumber), [462]);
+    const selected = store.selection.select({ evaluatedAt: now as UtcTimestamp, worker: { workerId: "pirx", capabilities: ["repository.read"] } });
+    assert.equal(selected.outcome, "selected");
+    if (selected.outcome === "selected") assert.equal(selected.candidate.task.githubReference?.issueNumber, 462);
+    assert.deepEqual(sync.synchronize(snapshot([queueIssue(462, 190, { status: "Done" }), ...ignored])), { outcome: "synchronized", created: 0, updated: 0, queued: 0, unqueued: 1 });
+    assert.equal(store.selection.select({ evaluatedAt: now as UtcTimestamp, worker: { workerId: "pirx", capabilities: ["repository.read"] } }).outcome, "no_runnable_task");
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("active Queue conflicts, invalid orders and incomplete metadata still fail closed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-queue-active-invalid-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  try {
+    const sync = new GitHubQueueSynchronizer(store, { workerCapabilities: ["repository.read"], repositories: ["PiotrGry/ai-assistant"] });
+    const conflict = sync.synchronize(snapshot([queueIssue(1, 10), queueIssue(2, 10, { status: "In Progress" })]));
+    assert.equal(conflict.outcome, "invalid_snapshot");
+    if (conflict.outcome === "invalid_snapshot") {
+      assert.match(conflict.message, /active Pirx work/u);
+      assert.match(conflict.message, /ai-assistant#1/u);
+      assert.match(conflict.message, /ai-assistant#2/u);
+    }
+    for (const order of [0, -1, 354.5, NaN, Infinity]) assert.equal(sync.synchronize(snapshot([queueIssue(1, order)])).outcome, "invalid_snapshot");
+    for (const field of ["worker", "status", "workType"] as const) {
+      const { [field]: _missing, ...incomplete } = queueIssue(1, 10);
+      assert.equal(sync.synchronize(snapshot([incomplete])).outcome, "invalid_snapshot");
+    }
+    const tasks = store.tasks.list();
+    assert.equal(tasks.outcome, "success");
+    if (tasks.outcome === "success") assert.equal(tasks.value.length, 0);
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });

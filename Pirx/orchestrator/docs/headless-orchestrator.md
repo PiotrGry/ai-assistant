@@ -87,6 +87,13 @@ Worker `Pirx`, Work Type `Task`, `Bug`, or `Experiment`, and Status `Todo`, `Ope
 or `In Progress`. A new executable Issue must contain `## Goal`,
 `## Implementation scope`, and checkbox items under `## Acceptance criteria`.
 
+Order validity and uniqueness apply only to active executable Pirx items.
+Closed Issues, Done items, other workers, non-executable Work Types and
+non-executable statuses are filtered first. Their historical Queue Orders may
+be duplicated or fractional without blocking the active Queue. Active items
+with missing planning metadata, invalid orders or duplicate orders still stop
+synchronization before any runtime Task is created.
+
 Priority, Risk, repository allowlist, native `blockedBy` relationships, and the
 Markdown contract are validated before SQLite is changed. Open blockers skip
 only their dependent item. A failed or incomplete GitHub snapshot prevents a

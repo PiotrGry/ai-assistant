@@ -75,12 +75,17 @@ export class GitHubQueueSynchronizer {
     const planned: PlannedTask[] = [];
     for (const issue of snapshot.items) {
       if (issue.queueOrder === undefined) continue;
-      if (!Number.isSafeInteger(issue.queueOrder) || issue.queueOrder <= 0) return failure("invalid_snapshot", `Queue Order must be a positive integer. Issue ${identity(issue)} has Queue Order=${issue.queueOrder}, Issue state=${issue.state}, Project Status=${issue.status ?? "missing"}. Validation currently includes historical Project items.`);
+      // Queue Order can remain on historical and non-executable Project items.
+      // Only active Pirx work participates in execution-order validation.
+      if (issue.state !== "OPEN"
+        || (issue.status !== undefined && !EXECUTABLE_STATUS.has(issue.status))
+        || (issue.worker !== undefined && issue.worker !== "Pirx")
+        || (issue.workType !== undefined && !EXECUTABLE_TYPE.has(issue.workType))) continue;
+      if (issue.worker === undefined || issue.status === undefined || issue.workType === undefined) return failure("invalid_snapshot", `Queued Issue ${identity(issue)} is missing required planning metadata (Worker, Status or Work Type).`);
+      if (!Number.isSafeInteger(issue.queueOrder) || issue.queueOrder <= 0) return failure("invalid_snapshot", `Queue Order must be a positive integer for active Pirx work. Issue ${identity(issue)} has Queue Order=${issue.queueOrder}, Issue state=${issue.state}, Project Status=${issue.status}.`);
       const previous = orders.get(issue.queueOrder);
-      if (previous !== undefined) return failure("invalid_snapshot", `Duplicate Queue Order=${issue.queueOrder}: ${previous} conflicts with ${identity(issue)} (Issue state=${issue.state}, Project Status=${issue.status ?? "missing"}). Validation currently includes historical Project items, including Done/closed Issues; this error does not imply a missing label or milestone.`);
+      if (previous !== undefined) return failure("invalid_snapshot", `Duplicate Queue Order=${issue.queueOrder} among active Pirx work: ${previous} conflicts with ${identity(issue)} (Issue state=${issue.state}, Project Status=${issue.status}).`);
       orders.set(issue.queueOrder, `${identity(issue)} (Issue state=${issue.state}, Project Status=${issue.status ?? "missing"})`);
-      if (issue.worker === undefined || issue.status === undefined || issue.workType === undefined) return failure("invalid_snapshot", "A queued Project item is missing required planning metadata.");
-      if (issue.worker !== "Pirx" || issue.state !== "OPEN" || !EXECUTABLE_STATUS.has(issue.status) || !EXECUTABLE_TYPE.has(issue.workType)) continue;
       if (!this.#repositories.has(`${issue.owner}/${issue.repository}`)) return failure("invalid_snapshot", "A Pirx Queue item targets a repository outside the configured allowlist.");
       const parsed = planning(issue);
       if (parsed === undefined) return failure("invalid_snapshot", `Queued Issue ${identity(issue)} has an invalid planning contract.`);
