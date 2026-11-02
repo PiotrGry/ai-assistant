@@ -27,20 +27,20 @@ async function main(): Promise<void> {
     stopping = true;
     void sampler.stop().finally(() => {
       store.close();
-      process.stdout.write(`GPU sampler stopped (${signal}).\n`);
+      process.stdout.write(`CPU/GPU sampler stopped (${signal}).\n`);
     });
   };
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);
 
   process.stdout.write(
-    `GPU sampler: ${config.databasePath}, every ${config.intervalMs} ms, keeping ${config.retentionMs / DAY_MS} days.\n`,
+    `CPU/GPU sampler: ${config.databasePath}, every ${config.intervalMs} ms, keeping ${config.retentionMs / DAY_MS} days.\n`,
   );
   sampler.start();
 }
 
 main().catch((error: unknown) => {
   const detail = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`GPU sampler failed to start: ${detail}\n`);
+  process.stderr.write(`CPU/GPU sampler failed to start: ${detail}\n`);
   process.exitCode = 1;
 });

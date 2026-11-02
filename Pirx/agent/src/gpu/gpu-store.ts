@@ -1,8 +1,9 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
+import type { CpuReading } from "./cpu.js";
 import type { NvidiaSmiReading } from "./nvidia-smi.js";
 
-export const GPU_STORE_VERSION = 1;
+export const GPU_STORE_VERSION = 2;
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS gpu_samples (
@@ -27,6 +28,17 @@ const SCHEMA = `
     vram_used_mb REAL,
     PRIMARY KEY (sampled_at, pid)
   ) WITHOUT ROWID;
+
+  CREATE TABLE IF NOT EXISTS cpu_samples (
+    sampled_at INTEGER PRIMARY KEY,
+    utilization_percent REAL,
+    logical_cores INTEGER NOT NULL,
+    load_1m REAL NOT NULL,
+    load_5m REAL NOT NULL,
+    load_15m REAL NOT NULL,
+    total_memory_bytes INTEGER NOT NULL,
+    free_memory_bytes INTEGER NOT NULL
+  ) WITHOUT ROWID;
 `;
 
 export class GpuStore {
@@ -34,8 +46,10 @@ export class GpuStore {
   readonly #filename: string;
   readonly #insertSample: StatementSync;
   readonly #insertProcess: StatementSync;
+  readonly #insertCpuSample: StatementSync;
   readonly #deleteProcesses: StatementSync;
   readonly #deleteSamples: StatementSync;
+  readonly #deleteCpuSamples: StatementSync;
   #closed = false;
 
   private constructor(database: DatabaseSync, filename: string) {
@@ -51,8 +65,12 @@ export class GpuStore {
     this.#insertProcess = database.prepare(
       "INSERT INTO gpu_processes (sampled_at, pid, name, vram_used_mb) VALUES (?, ?, ?, ?)",
     );
+    this.#insertCpuSample = database.prepare(
+      "INSERT INTO cpu_samples (sampled_at, utilization_percent, logical_cores, load_1m, load_5m, load_15m, total_memory_bytes, free_memory_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    );
     this.#deleteProcesses = database.prepare("DELETE FROM gpu_processes WHERE sampled_at < ?");
     this.#deleteSamples = database.prepare("DELETE FROM gpu_samples WHERE sampled_at < ?");
+    this.#deleteCpuSamples = database.prepare("DELETE FROM cpu_samples WHERE sampled_at < ?");
   }
 
   static open(filename: string): GpuStore {
@@ -63,6 +81,8 @@ export class GpuStore {
       const { user_version: version } = database.prepare("PRAGMA user_version").get() as { user_version: number };
       if (version === 0) {
         database.exec(`BEGIN IMMEDIATE; ${SCHEMA} PRAGMA user_version = ${GPU_STORE_VERSION}; COMMIT;`);
+      } else if (version === 1) {
+        database.exec(`BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS cpu_samples (sampled_at INTEGER PRIMARY KEY, utilization_percent REAL, logical_cores INTEGER NOT NULL, load_1m REAL NOT NULL, load_5m REAL NOT NULL, load_15m REAL NOT NULL, total_memory_bytes INTEGER NOT NULL, free_memory_bytes INTEGER NOT NULL) WITHOUT ROWID; PRAGMA user_version = ${GPU_STORE_VERSION}; COMMIT;`);
       } else if (version !== GPU_STORE_VERSION) {
         throw new Error(`Unsupported GPU store version: ${version} (expected ${GPU_STORE_VERSION}).`);
       }
@@ -77,7 +97,7 @@ export class GpuStore {
     return this.#filename;
   }
 
-  insertReading(sampledAtMs: number, reading: NvidiaSmiReading): void {
+  insertReading(sampledAtMs: number, reading: NvidiaSmiReading, cpu?: CpuReading): void {
     this.#assertOpen();
     if (!Number.isSafeInteger(sampledAtMs) || sampledAtMs < 0) {
       throw new Error(`GPU sample time must be a non-negative safe integer: ${sampledAtMs}`);
@@ -101,6 +121,7 @@ export class GpuStore {
       for (const process of reading.processes) {
         this.#insertProcess.run(sampledAtMs, process.pid, process.name, process.vramMb);
       }
+      if (cpu !== undefined) this.#insertCpuSample.run(sampledAtMs, cpu.utilizationPercent, cpu.logicalCores, cpu.load1m, cpu.load5m, cpu.load15m, cpu.totalMemoryBytes, cpu.freeMemoryBytes);
     });
   }
 
@@ -108,7 +129,9 @@ export class GpuStore {
     this.#assertOpen();
     return this.#transaction(() => {
       this.#deleteProcesses.run(cutoffMs);
-      return Number(this.#deleteSamples.run(cutoffMs).changes);
+      const gpu = Number(this.#deleteSamples.run(cutoffMs).changes);
+      const cpu = Number(this.#deleteCpuSamples.run(cutoffMs).changes);
+      return gpu + cpu;
     });
   }
 

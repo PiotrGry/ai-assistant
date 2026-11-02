@@ -1,7 +1,8 @@
 import { readNvidiaSmi, type NvidiaSmiReading } from "./nvidia-smi.js";
+import { CpuReader, type CpuReading } from "./cpu.js";
 
 export interface GpuReadingSink {
-  insertReading(sampledAtMs: number, reading: NvidiaSmiReading): void;
+  insertReading(sampledAtMs: number, reading: NvidiaSmiReading, cpu?: CpuReading): void;
   pruneBefore(cutoffMs: number): number;
 }
 
@@ -10,6 +11,7 @@ export interface GpuSamplerOptions {
   readonly retentionMs?: number;
   readonly pruneEveryMs?: number;
   readonly read?: () => Promise<NvidiaSmiReading>;
+  readonly readCpu?: () => CpuReading | Promise<CpuReading>;
   readonly now?: () => number;
   readonly onError?: (error: unknown) => void;
   readonly onSample?: () => void;
@@ -26,12 +28,18 @@ function positiveInteger(name: string, value: number): number {
   return value;
 }
 
+function invoke<T>(read: () => T | Promise<T>): Promise<T> {
+  try { return Promise.resolve(read()); }
+  catch (error: unknown) { return Promise.reject(error); }
+}
+
 export class GpuSampler {
   readonly #sink: GpuReadingSink;
   readonly #intervalMs: number;
   readonly #retentionMs: number;
   readonly #pruneEveryMs: number;
   readonly #read: () => Promise<NvidiaSmiReading>;
+  readonly #readCpu: () => CpuReading | Promise<CpuReading>;
   readonly #now: () => number;
   readonly #onError: (error: unknown) => void;
   readonly #onSample: () => void;
@@ -45,6 +53,8 @@ export class GpuSampler {
     this.#retentionMs = positiveInteger("GPU retention", options.retentionMs ?? DEFAULT_RETENTION_MS);
     this.#pruneEveryMs = positiveInteger("GPU prune interval", options.pruneEveryMs ?? DEFAULT_PRUNE_EVERY_MS);
     this.#read = options.read ?? (() => readNvidiaSmi());
+    const cpuReader = new CpuReader();
+    this.#readCpu = options.readCpu ?? (() => cpuReader.read());
     this.#now = options.now ?? Date.now;
     this.#onError = options.onError ?? (() => undefined);
     this.#onSample = options.onSample ?? (() => undefined);
@@ -82,14 +92,20 @@ export class GpuSampler {
 
   async #sample(): Promise<void> {
     const sampledAt = this.#now();
+    const [gpu, cpu] = await Promise.allSettled([
+      invoke(this.#read),
+      invoke(this.#readCpu),
+    ]);
+    if (gpu.status === "rejected") this.#onError(gpu.reason);
+    if (cpu.status === "rejected") this.#onError(cpu.reason);
+    if (gpu.status === "rejected" && cpu.status === "rejected") return;
     try {
-      const reading = await this.#read();
-      this.#sink.insertReading(sampledAt, reading);
+      this.#sink.insertReading(sampledAt, gpu.status === "fulfilled" ? gpu.value : { gpus: [], processes: [] }, cpu.status === "fulfilled" ? cpu.value : undefined);
     } catch (error: unknown) {
       this.#onError(error);
       return;
     }
-    this.#onSample();
+    if (gpu.status === "fulfilled" && cpu.status === "fulfilled") this.#onSample();
     if (this.#lastPruneAt === undefined || this.#now() - this.#lastPruneAt >= this.#pruneEveryMs) {
       this.#prune();
     }

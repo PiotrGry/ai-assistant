@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { GpuSampler, type GpuReadingSink } from "../src/gpu/gpu-sampler.js";
+import type { CpuReading } from "../src/gpu/cpu.js";
 import type { NvidiaSmiReading } from "../src/gpu/nvidia-smi.js";
 
 const READING: NvidiaSmiReading = {
@@ -21,15 +22,16 @@ const READING: NvidiaSmiReading = {
   ],
   processes: [{ pid: 4242, name: "ollama", vramMb: 7890 }],
 };
+const CPU: CpuReading = { utilizationPercent: 25, logicalCores: 8, load1m: 1, load5m: 0.8, load15m: 0.5, totalMemoryBytes: 16_000, freeMemoryBytes: 4_000 };
 
 class FakeSink implements GpuReadingSink {
-  readonly inserts: Array<readonly [number, NvidiaSmiReading]> = [];
+  readonly inserts: Array<readonly [number, NvidiaSmiReading, CpuReading | undefined]> = [];
   readonly prunes: number[] = [];
   insertError: Error | undefined;
 
-  insertReading(sampledAtMs: number, reading: NvidiaSmiReading): void {
+  insertReading(sampledAtMs: number, reading: NvidiaSmiReading, cpu?: CpuReading): void {
     if (this.insertError !== undefined) throw this.insertError;
-    this.inserts.push([sampledAtMs, reading]);
+    this.inserts.push([sampledAtMs, reading, cpu]);
   }
 
   pruneBefore(cutoffMs: number): number {
@@ -40,11 +42,11 @@ class FakeSink implements GpuReadingSink {
 
 test("writes each reading with its sampling time", async () => {
   const sink = new FakeSink();
-  const sampler = new GpuSampler(sink, { read: async () => READING, now: () => 5_000 });
+  const sampler = new GpuSampler(sink, { read: async () => READING, readCpu: () => CPU, now: () => 5_000 });
 
   await sampler.sampleNow();
 
-  assert.deepEqual(sink.inserts, [[5_000, READING]]);
+  assert.deepEqual(sink.inserts, [[5_000, READING, CPU]]);
 });
 
 test("skips a sample while the previous one is still running", async () => {
@@ -59,6 +61,7 @@ test("skips a sample while the previous one is still running", async () => {
         release = resolve;
       });
     },
+    readCpu: () => CPU,
   });
 
   const first = sampler.sampleNow();
@@ -82,6 +85,7 @@ test("reports read and write errors without stopping later samples", async () =>
       if (failRead) throw new Error("nvidia-smi: command not found");
       return READING;
     },
+    readCpu: () => CPU,
     onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
     onSample: () => samples.push(1),
   });
@@ -94,8 +98,21 @@ test("reports read and write errors without stopping later samples", async () =>
   await sampler.sampleNow();
 
   assert.deepEqual(errors, ["nvidia-smi: command not found", "database is locked"]);
-  assert.equal(sink.inserts.length, 1);
+  assert.equal(sink.inserts.length, 2);
+  assert.deepEqual(sink.inserts[0], [5_000, { gpus: [], processes: [] }, CPU]);
   assert.deepEqual(samples, [1]);
+});
+
+test("persists either resource when the other reader fails", async () => {
+  const gpuSink = new FakeSink();
+  const errors: string[] = [];
+  await new GpuSampler(gpuSink, { now: () => 1_000, read: async () => READING, readCpu: () => { throw new Error("cpu unavailable"); }, onError: (error) => errors.push(String(error)) }).sampleNow();
+  assert.deepEqual(gpuSink.inserts, [[1_000, READING, undefined]]);
+
+  const noSink = new FakeSink();
+  await new GpuSampler(noSink, { now: () => 2_000, read: async () => { throw new Error("gpu unavailable"); }, readCpu: () => { throw new Error("cpu unavailable"); }, onError: (error) => errors.push(String(error)) }).sampleNow();
+  assert.equal(noSink.inserts.length, 0);
+  assert.equal(errors.length, 3);
 });
 
 test("prunes old samples on start and then at most once per prune interval", async () => {
@@ -107,6 +124,7 @@ test("prunes old samples on start and then at most once per prune interval", asy
     pruneEveryMs: 3_600,
     now: () => now,
     read: async () => READING,
+    readCpu: () => CPU,
   });
 
   sampler.start();

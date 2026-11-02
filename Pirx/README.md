@@ -82,6 +82,12 @@ peaks. GPU values are sampled observations, not guaranteed maxima. Missing
 backend fields or unavailable GPU data are reported as unavailable rather than
 being converted to zero or inferred from the machine name.
 
+The standalone `pnpm --filter @pirx/agent gpu:sampler` process stores one-second
+host CPU and NVIDIA GPU samples in the same local `gpu.sqlite` database. CPU
+utilization is calculated from operating-system counter deltas; its first value
+is deliberately unavailable. CPU collection continues when `nvidia-smi` is
+missing, while GPU collection can continue after a transient CPU-reader error.
+
 Bezpieczniki pętli narzędziowej są konfigurowalne przez:
 
 - `PIRX_MAX_TOOL_ITERATIONS` (domyślnie `8`),

@@ -1,5 +1,5 @@
 [Unit]
-Description=Pirx GPU sampler (nvidia-smi every second into gpu.sqlite)
+Description=Pirx CPU/GPU sampler (host counters and nvidia-smi into gpu.sqlite)
 Documentation=file://%h/ai-assistant/Pirx/dashboard/README.md
 
 [Service]

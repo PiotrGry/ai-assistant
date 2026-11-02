@@ -44,13 +44,13 @@ export function createErrorReporter(write: (line: string) => void): ErrorReporte
       const message = error instanceof Error ? error.message : String(error);
       failures += 1;
       if (message !== lastMessage) {
-        write(`GPU sampler error: ${message}`);
+        write(`CPU/GPU sampler error: ${message}`);
         lastMessage = message;
       }
     },
     sample(): void {
       if (failures > 0) {
-        write(`GPU sampler recovered after ${failures} failed samples`);
+        write(`CPU/GPU sampler recovered after ${failures} failed samples`);
       }
       failures = 0;
       lastMessage = undefined;

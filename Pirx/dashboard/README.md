@@ -1,7 +1,7 @@
 # Dashboard Pirxa (Grafana)
 
 Cztery dashboardy tylko do odczytu: wydajność modeli, narzędzia i błędy, rozmowy
-(baza `~/.local/share/pirx/pirx.sqlite`) oraz GPU (baza `~/.local/share/pirx/gpu.sqlite`).
+(baza `~/.local/share/pirx/pirx.sqlite`) oraz zasoby CPU/GPU (baza `~/.local/share/pirx/gpu.sqlite`).
 
 ## Start i stop
 
@@ -33,12 +33,14 @@ docker exec -it pirx-dashboard-grafana-1 grafana cli admin reset-admin-password 
 sops edit grafana.sops.env   # wpisz to samo hasło
 ```
 
-## Wykresy GPU
+## Telemetria CPU/GPU
 
-Serwis użytkownika `pirx-gpu-sampler` co sekundę zapisuje dane z `nvidia-smi`
+Serwis użytkownika `pirx-gpu-sampler` co sekundę zapisuje systemowe wykorzystanie
+CPU, load average i pamięć oraz dane z `nvidia-smi`
 (obciążenie GPU i pamięci, VRAM, temperatura, moc i limit, wentylator, P-state
 oraz procesy liczące na GPU) do `~/.local/share/pirx/gpu.sqlite` i trzyma
-ostatnie 7 dni. Działa, gdy jesteś zalogowany (także w tmux).
+ostatnie 7 dni. CPU jest zapisywane również wtedy, gdy NVIDIA GPU lub
+`nvidia-smi` są niedostępne. Działa, gdy jesteś zalogowany (także w tmux).
 
 ```bash
 cd ~/ai-assistant/Pirx && pnpm build

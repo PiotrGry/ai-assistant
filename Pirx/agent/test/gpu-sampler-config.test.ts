@@ -41,9 +41,9 @@ test("error reporter logs a failure once until the message changes or sampling r
   reporter.error(new Error("database is locked"));
 
   assert.deepEqual(lines, [
-    "GPU sampler error: nvidia-smi: command not found",
-    "GPU sampler error: database is locked",
-    "GPU sampler recovered after 3 failed samples",
-    "GPU sampler error: database is locked",
+    "CPU/GPU sampler error: nvidia-smi: command not found",
+    "CPU/GPU sampler error: database is locked",
+    "CPU/GPU sampler recovered after 3 failed samples",
+    "CPU/GPU sampler error: database is locked",
   ]);
 });
