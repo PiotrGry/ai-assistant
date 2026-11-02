@@ -58,4 +58,7 @@ never executed as code.
 successor and verifies its predecessor, explicit checkpoint reference, latest
 history and checkpoint workspace. They intentionally have different invariants.
 Production Claude uses the assigned path; it never creates another Attempt.
+When an early process failure produced a checkpoint without workspace evidence,
+the assigned successor's current commit is read from matching durable workspace
+ownership. It is never guessed or written back into the historical checkpoint.
 Existing terminal blocked Attempts are not rewritten by deploying a fix.

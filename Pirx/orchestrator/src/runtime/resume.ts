@@ -230,7 +230,13 @@ export function buildAssignedResumeContext(store: RuntimeSqliteStore, taskId: st
   const predecessor = history.value.find((item) => item.id === attempt.value.predecessorAttemptId);
   if (history.value.at(-1)?.id !== attemptId || predecessor?.state !== "terminal" || predecessor.id !== checkpoint.value.previousAttemptId || attempt.value.checkpointReference !== checkpoint.value.id) return failure("invalid_checkpoint", "CHECKPOINT_NOT_LATEST_ATTEMPT", "Assigned successor, predecessor and latest Checkpoint do not match.");
   if (checkpoint.value.repository !== undefined && (checkpoint.value.branch !== attempt.value.branch || checkpoint.value.worktree !== attempt.value.worktree || checkpoint.value.currentCommit !== attempt.value.currentCommit)) return failure("invalid_checkpoint", "WORKSPACE_REFERENCE_STALE", "Assigned successor workspace does not match its Checkpoint.", "workspace");
-  return buildContext(task.value, checkpoint.value);
+  const built = buildContext(task.value, checkpoint.value);
+  if (built.outcome !== "ready" || built.context.currentCommit !== undefined || attempt.value.currentCommit === undefined) return built;
+  // Early process failures can precede checkpoint workspace evidence. The assigned
+  // successor still has a verified durable worktree revision; never invent it.
+  const ownership = store.workspaces.getByTaskAttempt(taskId, attemptId);
+  if (ownership.outcome !== "success" || ownership.value.state !== "active" || ownership.value.currentRevision !== attempt.value.currentCommit || ownership.value.assignedBranch !== attempt.value.branch || ownership.value.worktreePath !== attempt.value.worktree || (task.value.githubReference !== undefined && ownership.value.repository !== `${task.value.githubReference.owner}/${task.value.githubReference.repository}`)) return failure("invalid_checkpoint", "WORKSPACE_REFERENCE_STALE", "Assigned current commit has no matching durable workspace ownership.", "currentCommit");
+  return { outcome: "ready", context: Object.freeze({ ...built.context, currentCommit: ownership.value.currentRevision }) };
 }
 
 interface ResumeTransactionDecision {

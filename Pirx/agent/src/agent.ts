@@ -325,7 +325,6 @@ async function withTimeout<T>(
 }
 export class PirxAgent {
   readonly #config: AgentConfig;
-  readonly #ollama: Ollama;
   readonly #mcp: PirxMcpClient;
   readonly #hooks: AgentHooks;
   readonly #now: () => Date;
@@ -347,10 +346,6 @@ export class PirxAgent {
     this.#prompt = prompt;
     this.#hooks = hooks;
     this.#now = dependencies.now ?? (() => new Date());
-    this.#ollama = new Ollama({
-      host: config.baseUrl,
-      fetch: boundedFetch(config.llmTimeoutMs),
-    });
     this.#mcp = new PirxMcpClient(
       config.mcpServerEntry,
       config.toolTimeoutMs,
@@ -500,7 +495,8 @@ export class PirxAgent {
       if (remaining <= 0) throw new Error("Turn execution budget exhausted before model invocation.");
       const timeout = Math.min(this.#config.llmTimeoutMs, remaining);
       modelInvocations += 1;
-      const response = await withTimeout(this.#ollama.chat({ ...request, messages: [...build.messages] }), timeout, "Ollama") as ResponseWithMetrics;
+      const client = new Ollama({ host: this.#config.baseUrl, fetch: boundedFetch(timeout) });
+      const response = await withTimeout(client.chat({ ...request, messages: [...build.messages] }), timeout, "Ollama") as ResponseWithMetrics;
       this.#contextEstimator.observe(model, contextSections(build.messages, tools), response.prompt_eval_count);
       this.#lastContextTokens = response.prompt_eval_count;
       if (response.prompt_eval_count !== undefined && response.prompt_eval_count > build.estimate.inputBudgetTokens) {

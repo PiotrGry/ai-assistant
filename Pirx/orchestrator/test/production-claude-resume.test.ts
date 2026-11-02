@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -7,7 +7,7 @@ import { RuntimeSqliteStore, createTask, transitionAttempt, transitionTask, crea
 import { ProductionClaudeWorker } from "../src/claude/production-worker.js";
 
 test("production Claude resumes an assigned successor from its predecessor checkpoint without creating another Attempt", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pirx-production-resume-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pirx-production-resume-")));
   const worktree = join(root, "worktree"); await mkdir(worktree);
   const store = RuntimeSqliteStore.open({ filename: join(root, "runtime.sqlite") });
   const t0 = "2026-11-02T12:00:00.000Z" as never;
@@ -47,6 +47,10 @@ test("production Claude resumes an assigned successor from its predecessor check
     const result = await worker.execute(request.value, new AbortController().signal);
     assert.equal(result.outcome, "BLOCKED");
     assert.equal(calls, 1);
+    assert.equal(store.attempts.recordProgress(successor.attempt.id, { state: "running", startedAt: successor.attempt.startedAt }, { currentCommit: "deadbeef" }, t3).outcome, "success");
+    const unownedRevision = buildAssignedResumeContext(store, made.value.id, successor.attempt.id);
+    assert.equal(unownedRevision.outcome, "invalid_checkpoint");
+    if (unownedRevision.outcome === "invalid_checkpoint") assert.equal(unownedRevision.reason, "WORKSPACE_REFERENCE_STALE");
     const history = store.attempts.listByTask(made.value.id);
     assert.equal(history.outcome, "success"); if (history.outcome === "success") assert.equal(history.value.length, 2);
   } finally { store.close(); await rm(root, { recursive: true, force: true }); }

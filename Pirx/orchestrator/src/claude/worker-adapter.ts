@@ -119,7 +119,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
       workerProfile = profile.value;
     }
     const input = this.#inputSource.create(value);
-    if (!input.ok) return { ...failure("invalid_input", value.correlationId, "Claude input could not be built from durable state.", "binding_mismatch"), diagnostic: createWorkerFailureDiagnostic("binding_mismatch", { stage: "worker_contract", ...(input.violations[0] === undefined ? {} : { field: input.violations[0].field }) }) };
+    if (!input.ok) return { ...failure("invalid_input", value.correlationId, "Claude input could not be built from durable state.", "binding_mismatch"), diagnostic: createWorkerFailureDiagnostic("binding_mismatch", { stage: "worker_contract", ...(input.violations[0] === undefined ? {} : { field: input.violations[0].field, violationCode: input.violations[0].code }) }) };
     if (input.value.taskId !== value.taskId || input.value.attemptId !== value.attemptId || input.value.correlationId !== value.correlationId || input.value.workspace.worktree !== value.workspace.worktree || input.value.workspace.branch !== value.workspace.branch) return failure("invalid_input", value.correlationId, "Claude input is not bound to the assigned worker request.");
     let prompt: string;
     try { prompt = this.#promptRenderer.render(input.value); } catch { return failure("invalid_input", value.correlationId, "Claude prompt rendering failed before process invocation."); }

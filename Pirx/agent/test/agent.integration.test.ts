@@ -49,6 +49,11 @@ async function startScriptedOllama(replies: readonly Record<string, unknown>[]):
     }
     requests.push(await requestJson(request));
     const scripted = replies[requests.length - 1];
+    if (scripted?.stall === true) {
+      const captured = requests.at(-1)!;
+      response.on("close", () => { captured.transportClosed = true; });
+      return;
+    }
     if (typeof scripted?.backendError === "string") {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: scripted.backendError }));
@@ -269,6 +274,19 @@ test("backend failure after MCP keeps evidence in the turn and in the next reque
   assert.ok(first.messages.some((message) => message.role === "tool" && message.content.includes("Hello, Evidence!")));
   await agent.chat("Co wcześniej wykonano?");
   assert.ok((ollama.requests[2]!.messages as Array<{ role: string; content: string }>).some((message) => message.role === "tool" && message.content.includes("Hello, Evidence!")));
+});
+
+test("turn deadline aborts the actual backend request even when the configured LLM timeout is longer", async (context) => {
+  const { agent, ollama } = await createContinuationAgent(context, [
+    { role: "assistant", content: "", tool_calls: [{ function: { name: "hello", arguments: { name: "Before deadline" } } }] },
+    { stall: true },
+  ], { continuationCheck: false, maxTurnDurationMs: 300, llmTimeoutMs: 5000 });
+  const turn = await agent.chat("Sprawdź stan.");
+  assert.equal(turn.metrics.done_reason, "partial_turn_error");
+  assert.equal(ollama.requests.length, 2);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(ollama.requests[1]!.transportClosed, true);
+  assert.ok(turn.messages.some((message) => message.content.includes("Hello, Before deadline!")));
 });
 
 test("malformed arguments never become a default empty MCP request", async (context) => {
