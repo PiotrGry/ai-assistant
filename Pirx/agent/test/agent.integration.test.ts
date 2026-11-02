@@ -226,6 +226,23 @@ test("unrelated backend failures are not retried", async (context) => {
   assert.equal(ollama.requests.length, 1);
 });
 
+test("textual tool markup after the tool budget is exhausted is never presented as execution", async (context) => {
+  const calls = Array.from({ length: 8 }, (_, index) => ({ role: "assistant", content: "", tool_calls: [{ function: { name: "hello", arguments: { name: `test-${index}` } } }] }));
+  const { agent, ollama } = await createContinuationAgent(context, [
+    ...calls,
+    { role: "assistant", content: "<tool_call><function=pirx_orchestrator_diagnostic><parameter=sequence>480</parameter></function></tool_call>" },
+  ]);
+  const turn = await agent.chat("Sprawdź wynik.");
+  assert.equal(turn.metrics.tool_calls, 8);
+  assert.equal(turn.metrics.done_reason, "tool_iteration_limit");
+  assert.match(turn.content, /Ta akcja nie została wykonana/u);
+  assert.equal(turn.content.includes("<tool_call>"), false);
+  assert.equal(ollama.requests.length, 9);
+  const final = ollama.requests[8]!;
+  assert.equal(final.tools, undefined);
+  assert.match((final.messages as Array<{ content: string }>).at(-1)!.content, /limit narzędzi/u);
+});
+
 test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context) => {
   const requests: Record<string, unknown>[] = [];
   const ollama = createServer(async (request, response) => {

@@ -494,6 +494,7 @@ export class PirxAgent {
         totals.contextBuilds.push(contextBuild);
         totals.contextEstimates.push(contextBuild.estimate);
         const messages = [...contextBuild.messages];
+        if (!mayExecuteTools) messages.push({ role: "user", content: "[Pirx: limit narzędzi] Limit odczytów w tej turze został osiągnięty. Podsumuj wyłącznie potwierdzone wyniki, blocker i następny krok. Nie generuj kolejnych wywołań narzędzi ani znaczników XML/JSON udających wywołanie. Nie twierdź, że niewykonana akcja została wykonana." });
         const llmOperationSequence = operationSequence;
         operationSequence += 1;
         const llmOperation =
@@ -683,8 +684,15 @@ export class PirxAgent {
         }
 
         if (toolCalls.length === 0) {
-          this.#messages.push(response.message);
-          finalContent = response.message.content;
+          const textToolCall = /<\/?(?:tool_call|function(?:=|\s|>)|parameter(?:=|\s|>))/iu.test(response.message.content);
+          if (textToolCall) {
+            finalContent = "Model zapisał wywołanie narzędzia jako tekst zamiast wykonać poprawne wywołanie. Ta akcja nie została wykonana. Wyniki wcześniejszych narzędzi są zachowane; nie potwierdzam rozpoczęcia ani zakończenia pracy na podstawie tego tekstu.";
+            totals.doneReason = mayExecuteTools ? "text_tool_call_rejected" : "tool_iteration_limit";
+            this.#messages.push({ role: "assistant", content: finalContent });
+          } else {
+            this.#messages.push(response.message);
+            finalContent = response.message.content;
+          }
           break;
         }
 

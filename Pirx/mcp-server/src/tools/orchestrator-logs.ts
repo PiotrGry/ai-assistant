@@ -41,14 +41,35 @@ export class SystemdOrchestratorLogsPort implements OrchestratorLogsPort {
 }
 
 export function registerOrchestratorLogTool(server: McpServer, port: OrchestratorLogsPort): void {
+  // Keep long journalctl cursors on the host. The model only copies short session handles.
+  const cursors = new Map<string, string>();
+  const handles = new Map<string, string>();
+  let cursorSequence = 0;
+  const handle = (cursor: string): string => {
+    const existing = handles.get(cursor);
+    if (existing !== undefined) return existing;
+    const id = `log${++cursorSequence}`;
+    cursors.set(id, cursor); handles.set(cursor, id);
+    if (cursors.size > 4096) {
+      const oldest = cursors.entries().next().value!;
+      cursors.delete(oldest[0]); handles.delete(oldest[1]);
+    }
+    return id;
+  };
   server.registerTool("pirx_orchestrator_logs", {
     title: "Read Pirx daemon journal",
-    description: "Read the daemon's own systemd journal, newest first. Follow nextBeforeCursor as beforeCursor for older entries. Only pirx-orchestrator.service is accessible. Returns sanitized complete messages and timestamps; no shell or arbitrary unit access.",
+    description: "Read the daemon's own systemd journal, newest first. Copy the short nextBeforeCursor handle exactly as beforeCursor for older entries; handles expire on MCP restart. Stop once the blocker is known. Only pirx-orchestrator.service is accessible. Returns sanitized complete messages and timestamps; no shell or arbitrary unit access.",
     inputSchema: z.object({ limit: z.number().int().min(1).max(100).optional(), beforeCursor: z.string().max(2048).regex(CURSOR).optional() }).strict(),
     outputSchema: z.union([z.object({ outcome: z.literal("success"), entries: z.array(z.object({ cursor: z.string(), timestamp: z.string(), message: z.string(), priority: z.string().optional() })), nextBeforeCursor: z.string().optional() }), z.object({ outcome: z.enum(["unavailable", "invalid_request", "unsupported_platform", "invalid_data"]), message: z.string() })]),
     annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
   }, async (input) => {
-    const result = await port.read(input.limit ?? 20, input.beforeCursor);
+    const cursor = input.beforeCursor === undefined ? undefined : cursors.get(input.beforeCursor);
+    const read: OrchestratorLogsResult = input.beforeCursor !== undefined && cursor === undefined
+      ? { outcome: "invalid_request", message: "Unknown or expired log cursor. Omit beforeCursor to restart from the latest entries; copy nextBeforeCursor exactly from this MCP session." }
+      : await port.read(input.limit ?? 10, cursor);
+    const result: OrchestratorLogsResult = read.outcome === "success"
+      ? { ...read, entries: read.entries.map((entry) => ({ ...entry, cursor: handle(entry.cursor) })), ...(read.nextBeforeCursor === undefined ? {} : { nextBeforeCursor: handle(read.nextBeforeCursor) }) }
+      : read;
     return { content: [{ type: "text" as const, text: JSON.stringify(result) }], structuredContent: result, ...(result.outcome === "success" ? {} : { isError: true }) };
   });
 }

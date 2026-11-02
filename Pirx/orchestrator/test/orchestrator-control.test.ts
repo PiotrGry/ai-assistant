@@ -18,6 +18,25 @@ const t0 = "2026-10-30T12:00:00.000Z" as UtcTimestamp;
 const t1 = "2026-10-30T12:01:00.000Z" as UtcTimestamp;
 const t2 = "2026-10-30T12:05:00.000Z" as UtcTimestamp;
 
+test("status keeps the last meaningful execution result after idle cycles and restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-control-last-result-"));
+  const filename = join(directory, "runtime.sqlite");
+  let store = RuntimeSqliteStore.open({ filename });
+  try {
+    const control = new SqliteHeadlessControlPort(store, () => t1);
+    control.observe({ schemaVersion: 1, event: "cycle", outcome: "failed", reason: "Worker identity or workspace binding did not match.", details: { taskId: "gh-462", attemptId: "attempt-2" } });
+    for (let i = 0; i < 20; i++) control.observe({ schemaVersion: 1, event: "cycle", outcome: "idle", reason: "no_runnable_task" });
+    store.close(); store = RuntimeSqliteStore.open({ filename });
+    const status = new OrchestratorControlRepository(store).status(t2, 120_000);
+    assert.equal(status.outcome, "success");
+    if (status.outcome !== "success") return;
+    assert.equal(status.value.lastCycleOutcome, "idle");
+    const cycles = status.value.diagnostics?.filter((item) => item.event === "cycle");
+    assert.deepEqual(cycles?.map((item) => item.outcome), ["idle", "failed"]);
+    assert.deepEqual(cycles?.[1]?.details, { taskId: "gh-462", attemptId: "attempt-2" });
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("preserves complete source diagnostics across restart and paginates without losing details", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pirx-full-diagnostic-"));
   const filename = join(directory, "runtime.sqlite");

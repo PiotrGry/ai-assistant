@@ -225,6 +225,8 @@ Status also contains the latest durable diagnostic for each service event type:
 sequence, recording time, source event, outcome, full sanitized reason and
 structured result details. Queue, delivery, worker cycle and observability
 results are recorded before the next heartbeat can replace their status.
+The most recent non-idle worker cycle is also included, so subsequent idle
+ticks do not hide the last execution failure or its Task/Attempt identifiers.
 Diagnostics survive restart in `runtime_orchestrator_diagnostics` (schema 31).
 Known diagnostic reasons are not cut to 256 characters. For long records use
 `pirx_orchestrator_diagnostic` with the sequence and follow every `nextOffset`;
@@ -238,7 +240,11 @@ The daemon also emits JSON events to systemd journal. Read them with
 with `journalctl --user -u pirx-orchestrator.service -f`.
 Chat can read the same service journal through `pirx_orchestrator_logs`.
 It returns complete sanitized messages, timestamps, priorities and opaque cursors,
-newest first. Follow `nextBeforeCursor` to retrieve older entries. The executable,
+newest first. Follow `nextBeforeCursor` to retrieve older entries.
+The returned cursors are short MCP-session handles; the full journal cursor stays
+on the host. Unknown or expired handles fail explicitly; restart reading without
+`beforeCursor` after an MCP restart. Each call defaults to ten entries.
+The executable,
 unit and arguments are fixed; no arbitrary command or system-unit input is
 accepted. Unsupported platform, malformed entries, access failure and oversized
 command output produce explicit errors. Journal retention is managed by systemd;

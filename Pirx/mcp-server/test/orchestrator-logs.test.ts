@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import test from "node:test";
-import { SystemdOrchestratorLogsPort } from "../src/tools/orchestrator-logs.js";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
+import { McpServer } from "@modelcontextprotocol/server";
+import { SystemdOrchestratorLogsPort, registerOrchestratorLogTool } from "../src/tools/orchestrator-logs.js";
 const realExecute = promisify(execFile);
 function entry(n: number, message = "Queue rejected") { return JSON.stringify({ __CURSOR: `s=test;i=${n}`, __REALTIME_TIMESTAMP: "1793631600000000", MESSAGE: message, PRIORITY: "3" }); }
 test("journal is fixed-scope, redacted and paginated without duplicating boundary entries", async () => {
@@ -32,4 +34,29 @@ test("journal reports unsupported, unavailable and malformed data explicitly", a
   assert.equal(result.outcome, "unavailable"); assert.equal(JSON.stringify(result).includes("private"), false);
   const malformed = (async () => ({ stdout: '{}', stderr: "" })) as unknown as typeof realExecute;
   assert.equal((await new SystemdOrchestratorLogsPort({ platform: "linux", execute: malformed }).read(10)).outcome, "invalid_data");
+});
+
+test("MCP uses short session cursor handles and rejects guessed handles before journal access", async (context) => {
+  const raw = "s=long-journal-cursor;i=1234;b=boot;t=timestamp";
+  const received: Array<string | undefined> = [];
+  const server = new McpServer({ name: "logs-test", version: "1" });
+  registerOrchestratorLogTool(server, { async read(_limit, cursor) {
+    received.push(cursor);
+    return { outcome: "success", entries: [{ cursor: raw, timestamp: "2026-11-02T12:00:00.000Z", message: "evidence" }], ...(cursor === undefined ? { nextBeforeCursor: raw } : {}) };
+  } });
+  const client = new Client({ name: "test", version: "1" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(b), client.connect(a)]);
+  context.after(async () => { await client.close(); await server.close(); });
+  const first = await client.callTool({ name: "pirx_orchestrator_logs", arguments: {} });
+  const value = first.structuredContent as { nextBeforeCursor: string; entries: Array<{ cursor: string }> };
+  assert.match(value.nextBeforeCursor, /^log\d+$/u);
+  assert.equal(value.entries[0]!.cursor, value.nextBeforeCursor);
+  assert.equal(JSON.stringify(first).includes(raw), false);
+  const next = await client.callTool({ name: "pirx_orchestrator_logs", arguments: { beforeCursor: value.nextBeforeCursor } });
+  assert.notEqual(next.isError, true);
+  assert.deepEqual(received, [undefined, raw]);
+  const guessed = await client.callTool({ name: "pirx_orchestrator_logs", arguments: { beforeCursor: "log999" } });
+  assert.equal(guessed.isError, true);
+  assert.equal(received.length, 2);
 });
