@@ -33,7 +33,7 @@ import { registerGitHubActionsWatchTool } from "./tools/github-actions.js";
 import { registerGitHubShipmentPocTool } from "./tools/github-shipment-poc.js";
 import { registerGitHubShipmentCycleTool } from "./tools/github-shipment-cycle.js";
 import { registerGitHubFailureHandoffPocTool } from "./tools/github-failure-handoff-poc.js";
-import { registerOrchestratorTools, SqliteOrchestratorControlToolPort, type OrchestratorControlToolPort } from "./tools/orchestrator.js";
+import { registerOrchestratorTools, SqliteExecutionObservabilityToolPort, SqliteOrchestratorControlToolPort, type ExecutionObservabilityToolPort, type OrchestratorControlToolPort } from "./tools/orchestrator.js";
 import { CodexCliRunner } from "@pirx/orchestrator";
 import {
   FileGitHubFailureHandoffPocStore,
@@ -57,6 +57,7 @@ export interface McpServerOptions {
   readonly githubFailureHandoffPocGateway?: GitHubFailureHandoffPocGateway;
   readonly githubFailureHandoffPocStore?: GitHubFailureHandoffPocStore;
   readonly orchestratorControlPort?: OrchestratorControlToolPort;
+  readonly executionObservabilityPort?: ExecutionObservabilityToolPort;
 }
 
 export function createMcpServer(options: McpServerOptions = {}): McpServer {
@@ -84,6 +85,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   registerCalendarTools(server, calendar);
   registerOrchestratorTools(server, {
     port: options.orchestratorControlPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteOrchestratorControlToolPort(config.orchestratorDatabasePath)),
+    observabilityPort: options.executionObservabilityPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteExecutionObservabilityToolPort(config.orchestratorDatabasePath)),
     authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
     ...(config.orchestratorDatabasePath === undefined ? { configurationError: "PIRX_ORCHESTRATOR_DATABASE is not configured." } : {}),
   });

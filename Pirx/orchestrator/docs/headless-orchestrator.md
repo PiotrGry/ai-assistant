@@ -155,6 +155,15 @@ duration. Projection conflict, truncation, malformed time, and storage errors
 are emitted as bounded `observability` events while source runtime state remains
 unchanged.
 
+`pirx_execution_report` exposes this projection to normal Pirx chat as one
+read-only bounded query. With no window it reports the preceding 24 hours; a
+caller may instead supply canonical UTC `from` and `to` values for a window of
+at most 180 days. The response contains recent normalized lifecycle events,
+count/minimum/average/p50/p95/maximum duration summaries, repeated normalized
+Attempt and CI failures, coverage counts, and explicit missing/truncated-data
+notices. It does not read GitHub, start work, or return raw logs, prompts,
+Checkpoints, provider payloads, credentials, or paths.
+
 ## Chat status and pause/resume
 
 Give the local MCP server the same runtime database path and the existing host

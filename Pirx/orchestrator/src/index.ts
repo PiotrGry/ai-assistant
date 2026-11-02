@@ -515,6 +515,19 @@ export {
   type ExecutionSignalSourceKind,
 } from "./runtime/execution-observability-persistence.js";
 export {
+  EXECUTION_DURATION_METRIC_NAMES,
+  EXECUTION_REPORT_LIMITS,
+  EXECUTION_REPORT_SCHEMA_VERSION,
+  ExecutionObservabilityQueryService,
+  type ExecutionDurationMetricName,
+  type ExecutionFailurePattern,
+  type ExecutionLatencySummary,
+  type ExecutionReport,
+  type ExecutionReportQuery,
+  type ExecutionReportRecentEvent,
+  type ExecutionReportResult,
+} from "./runtime/execution-observability-query.js";
+export {
   CAPABILITY_VOCABULARY,
   SENSITIVE_CAPABILITIES,
   evaluateCapabilities,

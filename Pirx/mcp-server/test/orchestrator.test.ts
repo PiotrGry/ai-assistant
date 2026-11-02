@@ -5,16 +5,16 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
-import type { HostShutdownCommand, OrchestratorControlRequest, OrchestratorStatusSnapshot, UtcTimestamp } from "@pirx/orchestrator";
+import type { ExecutionReportQuery, HostShutdownCommand, OrchestratorControlRequest, OrchestratorStatusSnapshot, UtcTimestamp } from "@pirx/orchestrator";
 
 import { createHostAuthorization, HOST_AUTHORIZATION_META_KEY } from "../src/authorization.js";
 import { ObsidianVault } from "../src/obsidian/vaults.js";
 import { createMcpServer } from "../src/server.js";
-import type { OrchestratorControlToolPort } from "../src/tools/orchestrator.js";
+import type { ExecutionObservabilityToolPort, OrchestratorControlToolPort } from "../src/tools/orchestrator.js";
 
 const now = "2026-10-30T13:00:00.000Z" as UtcTimestamp;
 
-class FakeControl implements OrchestratorControlToolPort {
+class FakeControl implements OrchestratorControlToolPort, ExecutionObservabilityToolPort {
   calls: OrchestratorControlRequest[] = [];
   mode: "running" | "paused" = "running";
   version = 1;
@@ -22,6 +22,7 @@ class FakeControl implements OrchestratorControlToolPort {
   status() { return { outcome: "success" as const, value: { ...this.snapshot, requestedMode: this.mode, version: this.version } }; }
   request(input: OrchestratorControlRequest) { this.calls.push(input); this.mode = input.action === "pause" ? "paused" : "running"; this.version += 1; return { outcome: "applied" as const, operationId: input.operationId, record: { schemaVersion: 1 as const, requestedMode: this.mode, requestedAt: input.requestedAt, requestedBy: input.requestedBy, reason: input.reason, version: this.version, observedState: "running" as const, heartbeatAt: now }, message: "applied" }; }
   shutdown(input: HostShutdownCommand) { return { outcome: "applied" as const, operationId: input.operationId, record: { schemaVersion: 1 as const, requestOperationId: input.action === "arm" ? input.operationId : input.requestOperationId, target: "queue_drained" as const, state: input.action === "arm" ? "armed" as const : "cancelled" as const, checkpointBaseline: 0, requestedAt: input.requestedAt, requestedBy: input.requestedBy, reason: input.reason, version: 1 }, message: "applied" }; }
+  report(input: ExecutionReportQuery) { return { outcome: "success" as const, report: { schemaVersion: 1 as const, window: { from: input.from, to: input.to }, coverage: { eventsAvailable: 1, eventsScanned: 1, metricsAvailable: 1, metricsScanned: 1 }, partial: false, notices: [], recentEvents: [{ name: "pirx.task.lifecycle" as const, occurredAt: now, attributes: { correlationId: "task:211", taskId: "task-211", taskState: "in_progress" } }], latency: [{ name: "pirx.attempt.duration" as const, count: 1, minimumSeconds: 60, averageSeconds: 60, p50Seconds: 60, p95Seconds: 60, maximumSeconds: 60 }], repeatedFailures: [] } }; }
 }
 
 test("MCP reads bounded status and requires exact authorization for pause/resume", async (context) => {
@@ -29,7 +30,7 @@ test("MCP reads bounded status and requires exact authorization for pause/resume
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const control = new FakeControl();
   const secret = "orchestrator-test-secret";
-  const server = createMcpServer({ environment: {}, obsidianVault: new ObsidianVault(root), orchestratorControlPort: control, githubAuthorizationSecret: secret });
+  const server = createMcpServer({ environment: {}, obsidianVault: new ObsidianVault(root), orchestratorControlPort: control, executionObservabilityPort: control, githubAuthorizationSecret: secret });
   const client = new Client({ name: "pirx-orchestrator-test", version: "0.1.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   context.after(async () => { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); });
@@ -38,6 +39,11 @@ test("MCP reads bounded status and requires exact authorization for pause/resume
   assert.notEqual(status.isError, true);
   assert.equal((status.structuredContent as { snapshot: { activeTask: { issueNumber: number } } }).snapshot.activeTask.issueNumber, 211);
   assert.equal(JSON.stringify(status.structuredContent).includes("prompt"), false);
+
+  const report = await client.callTool({ name: "pirx_execution_report", arguments: { from: "2026-10-30T12:00:00.000Z", to: now } });
+  assert.notEqual(report.isError, true);
+  assert.equal((report.structuredContent as { report: { latency: Array<{ p95Seconds: number }> } }).report.latency[0]?.p95Seconds, 60);
+  assert.equal(JSON.stringify(report.structuredContent).includes("stdout"), false);
 
   const arguments_ = { action: "pause" as const, reason: "operator review", operationId: "pause-211" };
   const denied = await client.callTool({ name: "pirx_orchestrator_control", arguments: arguments_ });
@@ -66,7 +72,11 @@ test("unconfigured orchestrator tools remain listed and return controlled result
   const tools = await client.listTools();
   assert.equal(tools.tools.some((tool) => tool.name === "pirx_orchestrator_status"), true);
   assert.equal(tools.tools.some((tool) => tool.name === "pirx_orchestrator_shutdown"), true);
+  assert.equal(tools.tools.some((tool) => tool.name === "pirx_execution_report"), true);
   const status = await client.callTool({ name: "pirx_orchestrator_status", arguments: {} });
   assert.equal(status.isError, true);
   assert.match(JSON.stringify(status.structuredContent), /unconfigured/u);
+  const report = await client.callTool({ name: "pirx_execution_report", arguments: {} });
+  assert.equal(report.isError, true);
+  assert.match(JSON.stringify(report.structuredContent), /unconfigured/u);
 });

@@ -2,9 +2,12 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
 import {
+  ExecutionObservabilityQueryService,
   OrchestratorControlRepository,
   HostShutdownRepository,
   RuntimeSqliteStore,
+  type ExecutionReportQuery,
+  type ExecutionReportResult,
   type HostShutdownCommand,
   type HostShutdownCommandResult,
   type OrchestratorControlRequest,
@@ -20,6 +23,26 @@ export interface OrchestratorControlToolPort {
   status(now: UtcTimestamp, staleAfterMs: number): StorageResult<OrchestratorStatusSnapshot>;
   request(input: OrchestratorControlRequest): OrchestratorControlRequestResult;
   shutdown(input: HostShutdownCommand): HostShutdownCommandResult;
+}
+
+export interface ExecutionObservabilityToolPort {
+  report(input: ExecutionReportQuery): ExecutionReportResult;
+}
+
+export class SqliteExecutionObservabilityToolPort implements ExecutionObservabilityToolPort {
+  readonly #filename: string;
+  public constructor(filename: string) { this.#filename = filename; }
+  public report(input: ExecutionReportQuery): ExecutionReportResult {
+    let store: RuntimeSqliteStore | undefined;
+    try {
+      store = RuntimeSqliteStore.open({ filename: this.#filename, busyTimeoutMs: 1_000 });
+      return new ExecutionObservabilityQueryService(store).query(input);
+    } catch {
+      return { outcome: "storage_error", message: "Orchestrator runtime database is unavailable." };
+    } finally {
+      try { store?.close(); } catch { /* preserve bounded query result */ }
+    }
+  }
 }
 
 export class SqliteOrchestratorControlToolPort implements OrchestratorControlToolPort {
@@ -64,10 +87,33 @@ const shutdownOutputSchema = z.union([
   z.object({ outcome: z.enum(["applied", "replayed"]), operationId: z.string(), request: hostShutdownSchema, message: z.string() }),
   z.object({ outcome: z.enum(["authorization_required", "unconfigured", "conflict", "invalid_request", "not_found", "not_cancellable", "unavailable"]), operationId: z.string(), message: z.string() }),
 ]);
+const reportInputSchema = z.object({
+  from: z.iso.datetime({ offset: false }).optional(),
+  to: z.iso.datetime({ offset: false }).optional(),
+  recentEventLimit: z.number().int().min(1).max(50).optional(),
+  sourceRowLimit: z.number().int().min(1).max(10_000).optional(),
+}).strict().refine((value) => (value.from === undefined) === (value.to === undefined), { message: "from and to must be supplied together" });
+const reportOutputSchema = z.union([
+  z.object({
+    outcome: z.literal("success"),
+    configured: z.literal(true),
+    report: z.object({
+      schemaVersion: z.literal(1),
+      window: z.object({ from: z.string(), to: z.string() }),
+      coverage: z.object({ eventsAvailable: z.number().int().nonnegative(), eventsScanned: z.number().int().nonnegative(), metricsAvailable: z.number().int().nonnegative(), metricsScanned: z.number().int().nonnegative() }),
+      partial: z.boolean(),
+      notices: z.array(z.string()),
+      recentEvents: z.array(z.object({ name: z.string(), occurredAt: z.string(), attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])) })),
+      latency: z.array(z.object({ name: z.string(), count: z.number().int().positive(), minimumSeconds: z.number().nonnegative(), averageSeconds: z.number().nonnegative(), p50Seconds: z.number().nonnegative(), p95Seconds: z.number().nonnegative(), maximumSeconds: z.number().nonnegative() })),
+      repeatedFailures: z.array(z.object({ kind: z.enum(["attempt", "ci"]), outcome: z.string(), provider: z.string(), workflowName: z.string().optional(), count: z.number().positive(), lastObservedAt: z.string() })),
+    }),
+  }),
+  z.object({ outcome: z.enum(["invalid_request", "invalid_data", "unconfigured", "unavailable"]), configured: z.boolean(), message: z.string() }),
+]);
 
 function structured(value: unknown, isError = false) { return { content: [{ type: "text" as const, text: JSON.stringify(value) }], structuredContent: value, ...(isError ? { isError: true } : {}) }; }
 
-export function registerOrchestratorTools(server: McpServer, options: { readonly port: OrchestratorControlToolPort | undefined; readonly authorizationSecret: string | undefined; readonly configurationError?: string; readonly now?: () => UtcTimestamp }): void {
+export function registerOrchestratorTools(server: McpServer, options: { readonly port: OrchestratorControlToolPort | undefined; readonly observabilityPort: ExecutionObservabilityToolPort | undefined; readonly authorizationSecret: string | undefined; readonly configurationError?: string; readonly now?: () => UtcTimestamp }): void {
   const now = options.now ?? (() => new Date().toISOString() as UtcTimestamp);
   server.registerTool("pirx_orchestrator_status", {
     title: "Read Pirx orchestrator status",
@@ -79,6 +125,21 @@ export function registerOrchestratorTools(server: McpServer, options: { readonly
     if (options.port === undefined) return structured({ outcome: "unconfigured", configured: false, message: options.configurationError ?? "PIRX_ORCHESTRATOR_DATABASE is not configured." }, true);
     const value = options.port.status(now(), input.staleAfterMs ?? 120_000);
     return value.outcome === "success" ? structured({ outcome: "success", configured: true, snapshot: value.value }) : structured({ outcome: "unavailable", configured: true, message: value.message }, true);
+  });
+
+  server.registerTool("pirx_execution_report", {
+    title: "Read Pirx execution report",
+    description: "Read a bounded report of normalized lifecycle outcomes, latency, and repeated failures. This never starts work, mutates orchestration, or reads raw logs and prompts.",
+    inputSchema: reportInputSchema,
+    outputSchema: reportOutputSchema,
+    annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+  }, async (input) => {
+    if (options.observabilityPort === undefined) return structured({ outcome: "unconfigured", configured: false, message: options.configurationError ?? "PIRX_ORCHESTRATOR_DATABASE is not configured." }, true);
+    const to = (input.to ?? now()) as UtcTimestamp;
+    const from = (input.from ?? new Date(Date.parse(to) - 86_400_000).toISOString()) as UtcTimestamp;
+    const value = options.observabilityPort.report({ from, to, ...(input.recentEventLimit === undefined ? {} : { recentEventLimit: input.recentEventLimit }), ...(input.sourceRowLimit === undefined ? {} : { sourceRowLimit: input.sourceRowLimit }) });
+    if (value.outcome === "success") return structured({ outcome: "success", configured: true, report: value.report });
+    return structured({ outcome: value.outcome === "storage_error" ? "unavailable" : value.outcome, configured: true, message: value.message }, true);
   });
 
   server.registerTool("pirx_orchestrator_control", {
