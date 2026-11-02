@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -152,7 +152,7 @@ test("executes new and resumed input end to end through the capability-aware por
       const result = await allowed.execute(request(mode, value.worktree), new AbortController().signal);
       assert.equal(result.outcome, "allowed");
       if (result.outcome === "allowed") assert.equal(result.value.outcome, "CODE_PUSHED");
-      assert.equal(observed.value?.cwd, value.worktree);
+      assert.equal(observed.value?.cwd, await realpath(value.worktree));
       assert.equal(observed.value?.shell, false);
       assert.equal(observed.value?.env.PIRX_SECRET, undefined);
     }
@@ -188,7 +188,9 @@ test("bounds timeout, cancellation, and output overflow using request limits", a
     assert.equal(cancelled.outcome, "cancelled");
     assert.equal("diagnostic" in cancelled ? cancelled.diagnostic.code : undefined, "cancellation");
     const overflowAdapter = await adapter(value, "new", "overflow");
-    const overflowRequest = { ...request("new", value.worktree), limits: { timeoutMs: 2_000, maxOutputBytes: 1_024, maxErrorBytes: 1_024 } };
+    // Process startup can exceed two seconds when the complete integration suite saturates the host.
+    // Keep this test focused on output bounding; timeout behavior is covered immediately above.
+    const overflowRequest = { ...request("new", value.worktree), limits: { timeoutMs: 10_000, maxOutputBytes: 1_024, maxErrorBytes: 1_024 } };
     const overflow = await overflowAdapter.run(overflowRequest, new AbortController().signal);
     assert.equal(overflow.outcome, "invalid_output");
     assert.equal("diagnostic" in overflow ? overflow.diagnostic.code : undefined, "invalid_structured_output");
