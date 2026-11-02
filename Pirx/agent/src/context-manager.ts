@@ -28,7 +28,8 @@ export interface ContextSectionEstimate {
 
 export interface ContextEstimate {
   readonly policyVersion: string;
-  readonly estimator: "characters_divided_by_4_ceiling";
+  readonly estimator: "characters_divided_by_4_ceiling" | "calibrated_characters";
+  readonly calibrationFactor?: number;
   readonly budget: ContextBudget;
   readonly inputBudgetTokens: number;
   readonly sections: readonly ContextSectionEstimate[];
@@ -123,6 +124,31 @@ export function assertContextFits(estimate: ContextEstimate): void {
   }
 }
 
+/** Conservative per-model correction; observations can increase, never silently reduce, the reserve. */
+export class ModelContextEstimator {
+  readonly #factors = new Map<string, number>();
+  public estimate(model: string, sections: readonly ContextSectionInput[], budget: ContextBudget): ContextEstimate {
+    const base = estimateContext(sections, budget);
+    const factor = this.#factors.get(model) ?? 1.5;
+    const estimates = base.sections.map((section) => ({ ...section, estimatedTokens: Math.ceil(section.estimatedTokens * factor) }));
+    const total = estimates.reduce((sum, section) => sum + section.estimatedTokens, 0);
+    return { ...base, policyVersion: "context-calibrated-v2", estimator: "calibrated_characters", calibrationFactor: factor, sections: estimates, estimatedInputTokens: total, fits: total <= base.inputBudgetTokens, overBudgetTokens: Math.max(0, total - base.inputBudgetTokens) };
+  }
+  public observe(model: string, sections: readonly ContextSectionInput[], actualTokens: number | undefined): void {
+    if (actualTokens === undefined || !Number.isFinite(actualTokens) || actualTokens <= 0) return;
+    const base = sections.reduce((sum, section) => sum + estimateTextTokens(section.text), 0);
+    if (base <= 0) return;
+    this.#factors.set(model, Math.max(this.#factors.get(model) ?? 1.5, actualTokens / base * 1.15));
+  }
+}
+
+function contentOf(message: unknown): string {
+  return typeof message === "object" && message !== null && "content" in message && typeof message.content === "string" ? message.content : "";
+}
+function isConfirmation(message: unknown): boolean {
+  return /^(?:tak|yes|ok(?:ay)?|zgoda|zrob to|zrób to|dalej|kontynuuj|continue|do it|teraz)[.!\s]*$/iu.test(contentOf(message).trim());
+}
+
 function hasToolCalls(value: unknown): boolean {
   return (
     typeof value === "object" &&
@@ -172,27 +198,35 @@ export function selectMessagesForContext<T extends { readonly role: string }>(
       message.role !== "system" && index !== currentRequestIndex,
   );
   const groups = messageGroups(history);
-  const protectedMessages = [...systemMessages, ...currentRequest];
+  const anchors: T[] = [];
+  if (currentRequest.length > 0 && isConfirmation(currentRequest[0])) {
+    const intentIndex = messages.findLastIndex((message, index) => index < currentRequestIndex && message.role === "user" && !isConfirmation(message));
+    if (intentIndex < 0) throw new Error("Brakuje kontekstu potwierdzenia. Podaj numer Issue i działanie, którego dotyczy zgoda.");
+    anchors.push(messages[intentIndex]!);
+    const proposal = messages.findLastIndex((message, index) => index > intentIndex && index < currentRequestIndex && message.role === "assistant");
+    if (proposal >= 0) {
+      anchors.push(messages[proposal]!);
+      if (hasToolCalls(messages[proposal])) for (let index = proposal + 1; index < currentRequestIndex && messages[index]?.role === "tool"; index++) anchors.push(messages[index]!);
+    }
+  }
+  const protectedMessages = [...systemMessages, ...anchors, ...currentRequest];
   const protectedEstimate = estimate(protectedMessages);
   assertContextFits(protectedEstimate);
 
   let selectedHistory: T[][] = [];
-  let omittedMessageCount = 0;
   for (let index = groups.length - 1; index >= 0; index -= 1) {
     const candidateGroups = groups.slice(index);
-    const candidate = [
+    const candidate = [...new Set([
       ...systemMessages,
+      ...anchors,
       ...candidateGroups.flat(),
       ...currentRequest,
-    ];
+    ])];
     const candidateEstimate = estimate(candidate);
     if (candidateEstimate.fits) {
       selectedHistory = candidateGroups;
       continue;
     }
-    omittedMessageCount = groups
-      .slice(0, index + 1)
-      .reduce((total, group) => total + group.length, 0);
     break;
   }
 
@@ -202,6 +236,7 @@ export function selectMessagesForContext<T extends { readonly role: string }>(
   ];
   const selectedMessageSet = new Set<T>([
     ...systemMessages,
+    ...anchors,
     ...selectedMessages,
   ]);
   const finalMessages = messages.filter((message) =>
@@ -210,6 +245,6 @@ export function selectMessagesForContext<T extends { readonly role: string }>(
   return {
     messages: finalMessages,
     estimate: estimate(finalMessages),
-    omittedMessageCount,
+    omittedMessageCount: messages.length - finalMessages.length,
   };
 }

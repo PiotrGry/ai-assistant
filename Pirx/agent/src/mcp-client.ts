@@ -9,6 +9,7 @@ import {
 } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import type { Tool } from "ollama";
+import { modelToolSchema } from "./model-tool-schema.js";
 
 import { toolResultToText } from "./tool-result.js";
 import {
@@ -141,7 +142,7 @@ export class PirxMcpClient {
           function: {
             name: tool.name,
             description: tool.description ?? "",
-            parameters: tool.inputSchema,
+            parameters: modelToolSchema(tool.inputSchema),
           },
         }) as Tool,
     );
@@ -193,6 +194,7 @@ export class PirxMcpClient {
     name: string,
     arguments_: Record<string, unknown>,
     authorization?: Pick<HostToolAuthorization, "operationId">,
+    maximumResultCharacters: number = this.#maxToolResultCharacters,
   ): Promise<ToolExecution> {
     if (this.#client === undefined || this.#unavailableReason !== undefined) {
       const reason = this.#unavailableReason ?? "brak aktywnego połączenia";
@@ -234,7 +236,7 @@ export class PirxMcpClient {
       );
 
       return {
-        text: toolResultToText(result, this.#maxToolResultCharacters),
+        text: toolResultToText(result, Math.max(256, Math.min(this.#maxToolResultCharacters, maximumResultCharacters))),
         isError: result.isError === true,
         serverUnavailable: false,
       };

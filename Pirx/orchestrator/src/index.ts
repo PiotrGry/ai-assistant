@@ -459,6 +459,7 @@ export {
   RESUME_CONTEXT_LIMITS,
   RESUME_CONTEXT_SCHEMA_VERSION,
   buildResumeContext,
+  buildAssignedResumeContext,
   startResumedAttempt,
   type ResumeContext,
   type ResumeContextResult,

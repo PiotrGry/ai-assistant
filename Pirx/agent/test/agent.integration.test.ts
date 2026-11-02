@@ -62,7 +62,7 @@ async function startScriptedOllama(replies: readonly Record<string, unknown>[]):
       done_reason: "stop",
       total_duration: 1_000_000,
       load_duration: 0,
-      prompt_eval_count: 1,
+      prompt_eval_count: typeof scripted?.backendPromptTokens === "number" ? scripted.backendPromptTokens : 1,
       prompt_eval_duration: 1_000_000,
       eval_count: 1,
       eval_duration: 1_000_000,
@@ -86,6 +86,7 @@ async function startScriptedOllama(replies: readonly Record<string, unknown>[]):
 async function createContinuationAgent(
   context: TestContext,
   replies: readonly Record<string, unknown>[],
+  overrides: Partial<AgentConfig> = {},
 ): Promise<{ readonly agent: PirxAgent; readonly ollama: ScriptedOllama }> {
   const ollama = await startScriptedOllama(replies);
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "pirx-continuation-test-"));
@@ -94,7 +95,7 @@ async function createContinuationAgent(
   const pirxDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
   const agent = await PirxAgent.create({
     model: "pirx-test-model",
-    numCtx: 8_192,
+    numCtx: 32_768,
     keepAlive: "1m",
     baseUrl: ollama.baseUrl,
     temperature: 0,
@@ -107,6 +108,7 @@ async function createContinuationAgent(
     llmTimeoutMs: 120_000,
     toolTimeoutMs: 30_000,
     continuationCheck: true,
+    ...overrides,
   });
   context.after(async () => {
     await agent.close();
@@ -132,7 +134,7 @@ test("continuation check runs a tool the model only announced, then ends on the 
   assert.equal(ollama.requests.length, 4);
   const check = ollama.requests[1]?.messages as Array<{ role: string; content: string }>;
   assert.equal(check.at(-2)?.content, "Pobieram teraz powitanie.");
-  assert.equal(check.at(-1)?.role, "user");
+  assert.equal(check.at(-1)?.role, "system");
   assert.match(check.at(-1)?.content ?? "", /kontynuacja/u);
   assert.ok(Array.isArray(ollama.requests[1]?.tools));
   const afterTool = ollama.requests[2]?.messages as Array<{ content: string }>;
@@ -243,6 +245,93 @@ test("textual tool markup after the tool budget is exhausted is never presented 
   assert.match((final.messages as Array<{ content: string }>).at(-1)!.content, /limit narzędzi/u);
 });
 
+test("backend failure after MCP keeps evidence in the turn and in the next request", async (context) => {
+  const { agent, ollama } = await createContinuationAgent(context, [
+    { role: "assistant", content: "", tool_calls: [{ function: { name: "hello", arguments: { name: "Evidence" } } }] },
+    { backendError: "temporary backend outage" },
+    { role: "assistant", content: "Widzę wcześniejszy wynik." },
+  ], { continuationCheck: false });
+  const first = await agent.chat("Wykonaj operację.");
+  assert.equal(first.metrics.done_reason, "partial_turn_error");
+  assert.equal(first.metrics.model_calls, 2);
+  assert.ok(first.messages.some((message) => message.role === "tool" && message.content.includes("Hello, Evidence!")));
+  await agent.chat("Co wcześniej wykonano?");
+  assert.ok((ollama.requests[2]!.messages as Array<{ role: string; content: string }>).some((message) => message.role === "tool" && message.content.includes("Hello, Evidence!")));
+});
+
+test("malformed arguments never become a default empty MCP request", async (context) => {
+  const { agent } = await createContinuationAgent(context, [
+    { role: "assistant", content: "", tool_calls: [{ function: { name: "pirx_orchestrator_status", arguments: '{"broken":' } }] },
+    { role: "assistant", content: "Argumenty były niepoprawne." },
+  ], { continuationCheck: false });
+  const turn = await agent.chat("Sprawdź stan.");
+  assert.equal(turn.metrics.tool_calls, 0);
+  assert.ok(turn.messages.some((message) => message.role === "tool" && message.content.includes("Nie wykonano wywołania")));
+});
+
+test("backend-reported context overflow cannot execute the generated tool call", async (context) => {
+  const { agent, ollama } = await createContinuationAgent(context, [
+    { role: "assistant", content: "", backendPromptTokens: 32_000, tool_calls: [{ function: { name: "hello", arguments: { name: "Must not execute" } } }] },
+  ], { continuationCheck: false });
+  await assert.rejects(agent.chat("Sprawdź stan."), /context exceeds input budget|context budget/iu);
+  assert.equal(ollama.requests.length, 1);
+});
+
+test("one model response cannot bypass the per-turn call budget", async (context) => {
+  const { agent, ollama } = await createContinuationAgent(context, [
+    { role: "assistant", content: "", tool_calls: Array.from({ length: 12 }, (_, index) => ({ function: { name: "hello", arguments: { name: `Call-${index}` } } })) },
+    { role: "assistant", content: "Wykonano tylko trzy operacje." },
+  ], { maxToolCalls: 3, continuationCheck: false });
+  const turn = await agent.chat("Sprawdź operacje.");
+  assert.equal(turn.metrics.tool_calls, 3);
+  assert.ok(turn.messages.some((message) => message.role === "tool" && message.content.includes("budżet")));
+  assert.equal(ollama.requests[1]!.tools, undefined);
+});
+
+test("tool output budget stops additional calls while retaining a bounded result", async (context) => {
+  const { agent } = await createContinuationAgent(context, [
+    { role: "assistant", content: "", tool_calls: [{ function: { name: "hello", arguments: { name: "a".repeat(5000) } } }, { function: { name: "hello", arguments: { name: "Not executed" } } }] },
+    { role: "assistant", content: "Wynik jest ograniczony." },
+  ], { maxTurnToolResultCharacters: 512, continuationCheck: false });
+  const turn = await agent.chat("Sprawdź wynik.");
+  assert.equal(turn.metrics.tool_calls, 1);
+  const results = turn.messages.filter((message) => message.role === "tool");
+  assert.ok(results[0]!.content.length <= 512);
+  assert.match(results[1]!.content, /budżet/u);
+});
+
+test("failure in operation recording after MCP cannot erase its result", async (context) => {
+  const { agent, ollama } = await createContinuationAgent(context, [
+    { role: "assistant", content: "", tool_calls: [{ function: { name: "hello", arguments: { name: "Recorded" } } }, { function: { name: "hello", arguments: { name: "Pending" } } }] },
+    { role: "assistant", content: "Stan zachowany." },
+  ], { continuationCheck: false });
+  const recorder: OperationRecorder = { start: (input) => ({ id: input.kind }), finish: (handle) => { if (handle.id === "mcp") throw new Error("storage fixture failure"); } };
+  const first = await agent.chat("Wykonaj operację.", { sessionId: "s", turnId: "t", operationRecorder: recorder });
+  assert.equal(first.metrics.done_reason, "partial_turn_error");
+  assert.ok(first.messages.some((message) => message.role === "tool" && message.content.includes("Hello, Recorded!")));
+  assert.equal(first.messages.filter((message) => message.role === "tool").length, 2);
+  await agent.chat("Co zostało wykonane?");
+  assert.ok((ollama.requests[1]!.messages as Array<{ content: string }>).some((message) => message.content.includes("Hello, Recorded!")));
+});
+
+test("continuation and JSON recovery record the exact budgeted request", async (context) => {
+  const { agent, ollama } = await createContinuationAgent(context, [
+    { role: "assistant", content: "Sprawdzam." },
+    { backendError: 'llama-server returned invalid tool call arguments for "pirx_orchestrator_logs": unexpected end of JSON input' },
+    { role: "assistant", content: "GOTOWE" },
+  ]);
+  const builds: ContextBuildInput[] = [];
+  let sequence = 0;
+  const recorder: OperationRecorder = { start: () => ({ id: `op-${sequence++}` }), finish: () => undefined, recordContextBuild: (_handle, input) => { builds.push(input); } };
+  const turn = await agent.chat("Sprawdź stan.", { sessionId: "s", turnId: "t", operationRecorder: recorder });
+  assert.equal(builds.length, 3);
+  assert.equal(turn.metrics.context_builds.length, ollama.requests.length);
+  for (let index = 0; index < builds.length; index++) {
+    assert.ok(builds[index]!.estimatedInputTokens <= builds[index]!.budgetTokens);
+    assert.equal((builds[index]!.selected.messages as unknown[]).length, (ollama.requests[index]!.messages as unknown[]).length);
+  }
+});
+
 test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context) => {
   const requests: Record<string, unknown>[] = [];
   const ollama = createServer(async (request, response) => {
@@ -315,7 +404,7 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
   const pirxDirectory = resolve(testDirectory, "..", "..", "..");
   const config: AgentConfig = {
     model: "pirx-test-model",
-    numCtx: 8_192,
+    numCtx: 32_768,
     keepAlive: "1m",
     baseUrl: `http://127.0.0.1:${address.port}`,
     temperature: 0,
@@ -387,7 +476,7 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
   assert.ok(turn.metrics.turn_duration_ms >= 0);
   assert.equal(requests.length, 2);
   assert.equal(contextBuilds.length, 2);
-  assert.equal(contextBuilds[0]?.input.policyVersion, "context-estimate-v1");
+  assert.equal(contextBuilds[0]?.input.policyVersion, "context-calibrated-v2");
   assert.equal(contextBuilds[1]?.input.omitted["message_count"], 0);
   assert.equal("messages" in turn.metrics.context_builds[0]!, false);
   assert.ok((turn.metrics.context_builds[1]?.selected_message_count ?? 0) >= 4);
@@ -490,7 +579,7 @@ test("po limicie agent finalizuje bez wykonania kolejnej akcji", async (context)
   const pirxDirectory = resolve(testDirectory, "..", "..", "..");
   const config: AgentConfig = {
     model: "pirx-test-model",
-    numCtx: 8_192,
+    numCtx: 32_768,
     keepAlive: "1m",
     baseUrl: `http://127.0.0.1:${address.port}`,
     temperature: 0,
@@ -584,7 +673,7 @@ test("agent blocks repeated identical tool calls without removing loop guards", 
   const pirxDirectory = resolve(testDirectory, "..", "..", "..");
   const config: AgentConfig = {
     model: "pirx-test-model",
-    numCtx: 8_192,
+    numCtx: 32_768,
     keepAlive: "1m",
     baseUrl: `http://127.0.0.1:${address.port}`,
     temperature: 0,
@@ -644,7 +733,7 @@ test("LLM timeout aborts a stalled Ollama request and rolls back the turn", asyn
   const pirxDirectory = resolve(testDirectory, "..", "..", "..");
   const config: AgentConfig = {
     model: "pirx-test-model",
-    numCtx: 8_192,
+    numCtx: 32_768,
     keepAlive: "1m",
     baseUrl: `http://127.0.0.1:${address.port}`,
     temperature: 0,

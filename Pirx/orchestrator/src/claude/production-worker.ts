@@ -1,6 +1,6 @@
 import type { RuntimeSqliteStore } from "../runtime/sqlite.js";
 import { createClaudeCodeInput, type ClaudeInputResult, type ClaudeCodeInput } from "../runtime/claude-input.js";
-import { buildResumeContext } from "../runtime/resume.js";
+import { buildAssignedResumeContext } from "../runtime/resume.js";
 import type { WorkerPort, WorkerRequest, WorkerResult } from "../runtime/worker-contract.js";
 import { createWorkerFailureDiagnostic, WorkerFailureError } from "../runtime/worker-diagnostic.js";
 import { ClaudeCodeProcessAdapter, type ClaudeStructuredRunner } from "./worker-adapter.js";
@@ -70,8 +70,9 @@ export class ProductionClaudeWorker implements WorkerPort {
       });
     }
     const checkpoint = this.#store.checkpoints.get(request.resumeContextReference);
-    const resume = buildResumeContext(this.#store, request.taskId, { check: () => ({ repository: "present", branch: "present", worktree: "present", currentCommit: "present" }) });
-    if (checkpoint.outcome !== "success" || resume.outcome !== "ready" || checkpoint.value.id !== request.resumeContextReference) return invalidInput();
+    const resume = buildAssignedResumeContext(this.#store, request.taskId, request.attemptId);
+    if (resume.outcome !== "ready") return { ok: false, violations: [{ code: "binding_mismatch", field: resume.field ?? resume.reason, message: resume.message }] };
+    if (checkpoint.outcome !== "success" || checkpoint.value.id !== request.resumeContextReference) return invalidInput();
     return createClaudeCodeInput({
       task: task.value, attempt: attempt.value, workerId: request.workerId, provider: request.provider,
       repository: request.repository, workspace: request.workspace,

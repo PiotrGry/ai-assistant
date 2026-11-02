@@ -10,6 +10,7 @@ import {
   HostShutdownRepository,
   RuntimeSqliteStore,
   createTask,
+  transitionTask,
   type TaskId,
   type UtcTimestamp,
 } from "../src/index.js";
@@ -17,6 +18,25 @@ import {
 const t0 = "2026-10-30T12:00:00.000Z" as UtcTimestamp;
 const t1 = "2026-10-30T12:01:00.000Z" as UtcTimestamp;
 const t2 = "2026-10-30T12:05:00.000Z" as UtcTimestamp;
+
+test("one status read identifies the queued blocked Task without searching journal history", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-control-attention-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  try {
+    const task = createTask({ id: "attention-task" as TaskId, githubReference: { owner: "PiotrGry", repository: "ai-assistant", issueNumber: 462 }, goal: "Fix assigned bug", scope: "test", acceptanceCriteria: ["fixed"], priority: 1, risk: "low", requiredCapabilities: ["repository.read"], createdAt: t0 });
+    assert.equal(task.ok, true); if (!task.ok) return;
+    assert.equal(store.tasks.create(task.value).outcome, "success");
+    const blocked = transitionTask(task.value, "ready", { type: "block", reason: "binding mismatch" }, t1);
+    assert.equal(blocked.ok, true); if (!blocked.ok) return;
+    assert.equal(store.tasks.update(blocked.value, { state: "ready", updatedAt: task.value.updatedAt }).outcome, "success");
+    assert.equal(store.selection.synchronize({ taskId: task.value.id, queueOrder: 10, dependencyState: "known", blockers: [], synchronizedAt: t1 }).outcome, "success");
+    const status = new OrchestratorControlRepository(store).status(t2, 120_000);
+    assert.equal(status.outcome, "success"); if (status.outcome !== "success") return;
+    assert.equal(status.value.attentionRequired?.task.issueNumber, 462);
+    assert.equal(status.value.attentionRequired?.task.state, "blocked");
+    assert.equal(status.value.attentionRequired?.reason, "binding mismatch");
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
 
 test("status keeps the last meaningful execution result after idle cycles and restart", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pirx-control-last-result-"));

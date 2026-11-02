@@ -54,6 +54,7 @@ export interface OrchestratorStatusSnapshot {
   readonly activeRelease?: OrchestratorEntitySummary;
   readonly hostShutdown?: OrchestratorHostShutdownSummary;
   readonly diagnostics?: readonly OrchestratorDiagnostic[];
+  readonly attentionRequired?: { readonly task: OrchestratorEntitySummary; readonly attempt?: OrchestratorEntitySummary; readonly reason: string; readonly nextAction: "inspect_blocker" };
 }
 
 export interface OrchestratorDiagnostic { readonly sequence: number; readonly recordedAt: string; readonly event: string; readonly outcome: string; readonly reason?: string; readonly details?: unknown; }
@@ -177,7 +178,11 @@ export class OrchestratorControlRepository {
           const parsed = diagnosticContext(JSON.parse(row.diagnostic_json)) as HeadlessServiceEvent;
           return { sequence: row.sequence, recordedAt: row.recorded_at, event: parsed.event, outcome: parsed.outcome, ...(parsed.reason === undefined ? {} : { reason: parsed.reason }), ...(parsed.details === undefined ? {} : { details: parsed.details }) };
         });
-        return { outcome: "success", value: Object.freeze({ ...snapshot, diagnostics }) };
+        const attention = this.#store.database.prepare("SELECT t.id, t.state, t.github_issue_number AS issue_number, t.blocking_reason, s.queue_order FROM runtime_tasks t JOIN runtime_task_selection s ON s.task_id = t.id WHERE t.state IN ('blocked','failed') AND s.queue_order IS NOT NULL ORDER BY s.queue_order, t.updated_at DESC LIMIT 1").get() as Record<string, unknown> | undefined;
+        const attentionTask = summary(attention, { issue: true, queue: true });
+        const attentionAttempt = attentionTask === undefined ? undefined : summary(this.#store.database.prepare("SELECT id, state, ordinal, result FROM runtime_attempts WHERE task_id = ? ORDER BY ordinal DESC LIMIT 1").get(attentionTask.id) as Record<string, unknown> | undefined, { ordinal: true, result: true });
+        const attentionRequired = attentionTask === undefined ? undefined : { task: attentionTask, ...(attentionAttempt === undefined ? {} : { attempt: attentionAttempt }), reason: String(diagnosticContext(attention?.blocking_reason ?? "Task requires reconciliation.")), nextAction: "inspect_blocker" as const };
+        return { outcome: "success", value: Object.freeze({ ...snapshot, diagnostics, ...(attentionRequired === undefined ? {} : { attentionRequired }) }) };
       } catch { return { outcome: "storage_error", message: "Orchestrator status snapshot could not be read." }; }
     });
   }

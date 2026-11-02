@@ -6,8 +6,30 @@ import {
   CONTEXT_POLICY_VERSION,
   estimateContext,
   estimateTextTokens,
+  ModelContextEstimator,
   selectMessagesForContext,
 } from "../src/context-manager.js";
+
+test("calibrates conservatively from backend usage and isolates model profiles", () => {
+  const estimator = new ModelContextEstimator();
+  const sections = [{ name: "history" as const, text: "a".repeat(400) }];
+  const budget = { contextWindowTokens: 300, maxOutputTokens: 50, safetyMarginTokens: 20 };
+  assert.equal(estimator.estimate("model-a", sections, budget).estimatedInputTokens, 150);
+  estimator.observe("model-a", sections, 220);
+  assert.equal(estimator.estimate("model-a", sections, budget).fits, false);
+  assert.equal(estimator.estimate("model-b", sections, budget).estimatedInputTokens, 150);
+  estimator.observe("model-a", sections, 1);
+  assert.equal(estimator.estimate("model-a", sections, budget).fits, false);
+});
+
+test("confirmation cannot outlive its original goal and proposed action", () => {
+  const messages = [{ role: "system", content: "rules" }, { role: "user", content: "Resolve issue #462. " + "detail ".repeat(100) }, { role: "assistant", content: "Do you confirm?" }, { role: "user", content: "tak" }];
+  const estimate = (items: typeof messages) => estimateContext([{ name: "history", text: JSON.stringify(items) }], { contextWindowTokens: 70, maxOutputTokens: 10, safetyMarginTokens: 0 });
+  assert.throws(() => selectMessagesForContext(messages, (items) => estimate([...items])), /exceeds input budget/u);
+  assert.throws(() => selectMessagesForContext([{ role: "user", content: "tak" }], (items) => estimate([...items])), /Brakuje kontekstu potwierdzenia/u);
+  const large = selectMessagesForContext(messages, (items) => estimateContext([{ name: "history", text: JSON.stringify(items) }], { contextWindowTokens: 1000, maxOutputTokens: 10, safetyMarginTokens: 0 }));
+  assert.ok(JSON.stringify(large.messages).includes("#462"));
+});
 
 test("context estimate reports section sizes and reserves output plus margin", () => {
   const estimate = estimateContext(

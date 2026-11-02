@@ -25,7 +25,7 @@ export async function withToolArgumentRecovery<T>(
     budget.remaining -= 1;
     onRecovery();
     return withToolArgumentRecovery([...messages, {
-      role: "user",
+      role: "system",
       content: `[Pirx: naprawa formatu] Backend odrzucił niepoprawny JSON argumentów narzędzia ${match[1]}. To wywołanie nie zostało wykonane. Wygeneruj poprawne, kompletne argumenty zgodne ze schematem. Użyj wyłącznie potrzebnych pól i krótkiego wywołania. Nie kopiuj treści logów do argumentów, nie wymyślaj kursora i nie powtarzaj wcześniejszych zakończonych operacji. Jeżeli masz już potrzebne informacje, odpowiedz bez narzędzia.`,
     }], toolNames, budget, execute, onRecovery);
   }

@@ -84,8 +84,8 @@ function contractDiagnostic(value: unknown, field: string | undefined, code: "wo
   });
 }
 
-function failure(outcome: "invalid_request" | "invalid_input", requestId: string, text: string, code: "binding_mismatch" | "permission_denied" | "adapter_failure" = "binding_mismatch"): ClaudeCodeProcessResult {
-  return { outcome, requestId, message: text.slice(0, 256), exitCode: null, durationMs: 0, diagnostic: createWorkerFailureDiagnostic(code) };
+function failure(outcome: "invalid_request" | "invalid_input", requestId: string, text: string, code: "binding_mismatch" | "permission_denied" | "adapter_failure" = "binding_mismatch") {
+  return { outcome, requestId, message: text.slice(0, 256), exitCode: null, durationMs: 0, diagnostic: createWorkerFailureDiagnostic(code) } as const;
 }
 export class ClaudeCodeProcessAdapter implements WorkerPort {
   readonly #runner: ClaudeStructuredRunner;
@@ -119,7 +119,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
       workerProfile = profile.value;
     }
     const input = this.#inputSource.create(value);
-    if (!input.ok) return failure("invalid_input", value.correlationId, "Claude input could not be built from durable state.", "binding_mismatch");
+    if (!input.ok) return { ...failure("invalid_input", value.correlationId, "Claude input could not be built from durable state.", "binding_mismatch"), diagnostic: createWorkerFailureDiagnostic("binding_mismatch", { stage: "worker_contract", ...(input.violations[0] === undefined ? {} : { field: input.violations[0].field }) }) };
     if (input.value.taskId !== value.taskId || input.value.attemptId !== value.attemptId || input.value.correlationId !== value.correlationId || input.value.workspace.worktree !== value.workspace.worktree || input.value.workspace.branch !== value.workspace.branch) return failure("invalid_input", value.correlationId, "Claude input is not bound to the assigned worker request.");
     let prompt: string;
     try { prompt = this.#promptRenderer.render(input.value); } catch { return failure("invalid_input", value.correlationId, "Claude prompt rendering failed before process invocation."); }

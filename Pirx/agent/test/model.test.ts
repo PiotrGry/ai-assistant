@@ -77,7 +77,7 @@ test("switches runtime model only after Ollama validates it", async (context) =>
   await writeFile(promptFile, "Jesteś testową asystentką.", "utf8");
   const config: AgentConfig = {
     model: "alpha",
-    numCtx: 8_192,
+    numCtx: 32_768,
     keepAlive: "1m",
     baseUrl: `http://127.0.0.1:${address.port}`,
     temperature: 0,

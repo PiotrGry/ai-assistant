@@ -216,6 +216,23 @@ export function buildResumeContext(store: RuntimeSqliteStore, taskId: string, wo
   return buildContext(task.value, checkpoint.value);
 }
 
+/** Build input for an already-created successor; never prepare or create another Attempt. */
+export function buildAssignedResumeContext(store: RuntimeSqliteStore, taskId: string, attemptId: string): ResumeContextResult {
+  const task = store.tasks.get(taskId);
+  if (task.outcome !== "success") return storageFailure("task", task);
+  const attempt = store.attempts.get(attemptId);
+  if (attempt.outcome !== "success") return storageFailure("attempt", attempt);
+  if (task.value.state !== "in_progress" || attempt.value.state !== "running" || attempt.value.taskId !== taskId || attempt.value.predecessorAttemptId === undefined || attempt.value.checkpointReference === undefined) return failure("blocked", "TASK_NOT_RESUMABLE", "Assigned successor is not a running checkpointed Attempt of this Task.");
+  const checkpoint = store.checkpoints.latestByTask(taskId);
+  if (checkpoint.outcome !== "success") return storageFailure("checkpoint", checkpoint);
+  const history = store.attempts.listByTask(taskId);
+  if (history.outcome !== "success") return storageFailure("attempt", history);
+  const predecessor = history.value.find((item) => item.id === attempt.value.predecessorAttemptId);
+  if (history.value.at(-1)?.id !== attemptId || predecessor?.state !== "terminal" || predecessor.id !== checkpoint.value.previousAttemptId || attempt.value.checkpointReference !== checkpoint.value.id) return failure("invalid_checkpoint", "CHECKPOINT_NOT_LATEST_ATTEMPT", "Assigned successor, predecessor and latest Checkpoint do not match.");
+  if (checkpoint.value.repository !== undefined && (checkpoint.value.branch !== attempt.value.branch || checkpoint.value.worktree !== attempt.value.worktree || checkpoint.value.currentCommit !== attempt.value.currentCommit)) return failure("invalid_checkpoint", "WORKSPACE_REFERENCE_STALE", "Assigned successor workspace does not match its Checkpoint.", "workspace");
+  return buildContext(task.value, checkpoint.value);
+}
+
 interface ResumeTransactionDecision {
   readonly kind: "decision";
   readonly result: ResumeContextResult;

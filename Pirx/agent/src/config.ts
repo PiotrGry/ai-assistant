@@ -25,6 +25,9 @@ export interface AgentConfig {
 
   readonly maxToolIterations: number;
   readonly maxRepeatedToolCalls: number;
+  readonly maxToolCalls?: number;
+  readonly maxTurnDurationMs?: number;
+  readonly maxTurnToolResultCharacters?: number;
   readonly continuationCheck?: boolean;
 
   readonly llmTimeoutMs: number;
@@ -182,6 +185,9 @@ export function loadConfig(
       "PIRX_MAX_REPEATED_TOOL_CALLS",
       environment.PIRX_MAX_REPEATED_TOOL_CALLS ?? "3",
     ),
+    maxToolCalls: positiveInteger("PIRX_MAX_TOOL_CALLS", environment.PIRX_MAX_TOOL_CALLS ?? "8"),
+    maxTurnDurationMs: positiveInteger("PIRX_MAX_TURN_DURATION_MS", environment.PIRX_MAX_TURN_DURATION_MS ?? "180000"),
+    maxTurnToolResultCharacters: positiveInteger("PIRX_MAX_TURN_TOOL_RESULT_CHARACTERS", environment.PIRX_MAX_TURN_TOOL_RESULT_CHARACTERS ?? "24000"),
 
     continuationCheck: booleanFlag(
       "PIRX_CONTINUATION_CHECK",

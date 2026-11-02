@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 
-import { Ollama, type ChatResponse, type Message, type Tool } from "ollama";
+import { Ollama, type ChatRequest, type ChatResponse, type Message, type Tool } from "ollama";
 
 import type { AgentConfig, SystemPrompt } from "./config.js";
 import { loadSystemPrompt } from "./config.js";
 import type { SqliteActionLedger } from "./action-ledger.js";
 import { toolTarget } from "./mcp-authorization.js";
 import {
-  estimateContext,
+  ModelContextEstimator,
   selectMessagesForContext,
   type ContextBuild,
   type ContextEstimate,
@@ -15,7 +15,7 @@ import {
 } from "./context-manager.js";
 import { PirxMcpClient, type ToolExecution } from "./mcp-client.js";
 import { parseOllamaModelNames } from "./ollama-models.js";
-import type { OperationRecorder } from "./operation-recorder.js";
+import type { OperationRecorder, OperationHandle } from "./operation-recorder.js";
 import { readGpuStats, type GpuStats } from "./telemetry.js";
 import { currentTimeSystemContext } from "./time-context.js";
 import { ORCHESTRATION_SYSTEM_CONTEXT } from "./orchestration-context.js";
@@ -251,13 +251,13 @@ function secondsFromNanoseconds(value: number | null): number | null {
   return value === null ? null : value / 1_000_000_000;
 }
 
-function normalizeArguments(value: unknown): Record<string, unknown> {
+function normalizeArguments(value: unknown): Record<string, unknown> | undefined {
   if (typeof value === "string") {
     try {
       const parsed: unknown = JSON.parse(value);
       return normalizeArguments(parsed);
     } catch {
-      return {};
+      return undefined;
     }
   }
 
@@ -265,7 +265,7 @@ function normalizeArguments(value: unknown): Record<string, unknown> {
     return value as Record<string, unknown>;
   }
 
-  return {};
+  return undefined;
 }
 
 function numericMetric(value: unknown): number | null {
@@ -331,6 +331,7 @@ export class PirxAgent {
   #mcpFailureReported = false;
   #lastContextTokens: number | undefined;
   #modelMayBeLoaded = false;
+  readonly #contextEstimator = new ModelContextEstimator();
 
   private constructor(
     config: AgentConfig,
@@ -463,6 +464,14 @@ export class PirxAgent {
       contextBuilds: [],
     };
     const argumentRecoveryBudget = { remaining: 1 };
+    const deadline = turnStartedAt + (this.#config.maxTurnDurationMs ?? 180_000);
+    const maximumCalls = this.#config.maxToolCalls ?? 8;
+    const maximumResultCharacters = this.#config.maxTurnToolResultCharacters ?? 24_000;
+    let toolRequests = 0;
+    let resultCharacters = 0;
+    let modelInvocations = 0;
+    let toolMayHaveExecuted = false;
+    const toolBudgetAvailable = (): boolean => toolRequests < maximumCalls && resultCharacters + 256 <= maximumResultCharacters && performance.now() < deadline;
     const recordArgumentRecovery = (): void => {
       totals.modelCalls += 1;
       // The rejected generation has no backend usage report; do not report partial totals as complete.
@@ -471,30 +480,56 @@ export class PirxAgent {
 
     this.#messages.push({ role: "user", content: prompt });
 
+    const executeModel = async (source: Message[], tools: readonly Tool[], request: ChatRequest & { stream: false }, operation: OperationHandle | undefined, recalibrated = false): Promise<ResponseWithMetrics> => {
+      const build = selectMessagesForContext(source, (selected) => this.#contextEstimator.estimate(model, contextSections(selected, tools), {
+        contextWindowTokens: this.#config.numCtx,
+        maxOutputTokens: this.#config.maxOutputTokens ?? 1536,
+        safetyMarginTokens: this.#config.contextSafetyMarginTokens ?? 512,
+      }));
+      totals.contextBuilds.push(build);
+      totals.contextEstimates.push(build.estimate);
+      if (operation !== undefined) {
+        const references = contextBuildReferences(source, build.messages);
+        context.operationRecorder?.recordContextBuild?.(operation, { policyVersion: build.estimate.policyVersion, estimatedInputTokens: build.estimate.estimatedInputTokens, budgetTokens: build.estimate.inputBudgetTokens, selected: references.selected, omitted: references.omitted, createdAt: this.#now().toISOString() });
+      }
+      const remaining = Math.floor(deadline - performance.now());
+      if (remaining <= 0) throw new Error("Turn execution budget exhausted before model invocation.");
+      const timeout = Math.min(this.#config.llmTimeoutMs, remaining);
+      modelInvocations += 1;
+      const response = await withTimeout(this.#ollama.chat({ ...request, messages: [...build.messages] }), timeout, "Ollama") as ResponseWithMetrics;
+      this.#contextEstimator.observe(model, contextSections(build.messages, tools), response.prompt_eval_count);
+      this.#lastContextTokens = response.prompt_eval_count;
+      if (response.prompt_eval_count !== undefined && response.prompt_eval_count > build.estimate.inputBudgetTokens) {
+        // A possibly shifted/truncated prompt must not authorize tool execution.
+        addMetrics(totals, response);
+        if (recalibrated) throw new Error("Model input still exceeds the reserved context budget after recalibration; no generated tool call was executed.");
+        return executeModel(source, tools, request, operation, true);
+      }
+      return response;
+    };
+
+    let finalContent: string | undefined;
     try {
-      let finalContent: string | undefined;
 
       for (
         let iteration = 0;
         iteration <= this.#config.maxToolIterations;
         iteration += 1
       ) {
-        const mayExecuteTools = iteration < this.#config.maxToolIterations;
+        const mayExecuteTools = iteration < this.#config.maxToolIterations && toolBudgetAvailable();
         const tools = mayExecuteTools ? this.#mcp.ollamaTools : [];
         const messagesForModel = this.#messagesForModel();
         const budget = {
           contextWindowTokens: this.#config.numCtx,
-          maxOutputTokens: this.#config.maxOutputTokens ?? 0,
-          safetyMarginTokens: this.#config.contextSafetyMarginTokens ?? 0,
+          maxOutputTokens: this.#config.maxOutputTokens ?? 1536,
+          safetyMarginTokens: this.#config.contextSafetyMarginTokens ?? 512,
         };
         const contextBuild = selectMessagesForContext(
           messagesForModel,
-          (messages) => estimateContext(contextSections(messages, tools), budget),
+          (messages) => this.#contextEstimator.estimate(model, contextSections(messages, tools), budget),
         );
-        totals.contextBuilds.push(contextBuild);
-        totals.contextEstimates.push(contextBuild.estimate);
         const messages = [...contextBuild.messages];
-        if (!mayExecuteTools) messages.push({ role: "user", content: "[Pirx: limit narzędzi] Limit odczytów w tej turze został osiągnięty. Podsumuj wyłącznie potwierdzone wyniki, blocker i następny krok. Nie generuj kolejnych wywołań narzędzi ani znaczników XML/JSON udających wywołanie. Nie twierdź, że niewykonana akcja została wykonana." });
+        if (!mayExecuteTools) messages.push({ role: "system", content: "[Pirx: limit narzędzi] Limit odczytów w tej turze został osiągnięty. Podsumuj wyłącznie potwierdzone wyniki, blocker i następny krok. Nie generuj kolejnych wywołań narzędzi ani znaczników XML/JSON udających wywołanie. Nie twierdź, że niewykonana akcja została wykonana." });
         const llmOperationSequence = operationSequence;
         operationSequence += 1;
         const llmOperation =
@@ -511,7 +546,7 @@ export class PirxAgent {
                   schema_version: 1,
                   model,
                   iteration,
-                  context_estimate: totals.contextEstimates.at(-1),
+                  context_estimate: contextBuild.estimate,
                 },
               })
             : undefined;
@@ -525,9 +560,7 @@ export class PirxAgent {
           options: {
             num_ctx: this.#config.numCtx,
             temperature: this.#config.temperature,
-            ...(this.#config.maxOutputTokens !== undefined
-              ? { num_predict: this.#config.maxOutputTokens }
-              : {}),
+            num_predict: this.#config.maxOutputTokens ?? 1536,
           },
           ...(tools.length > 0 ? { tools: [...tools] } : {}),
         };
@@ -536,25 +569,11 @@ export class PirxAgent {
         const argumentRecoveryBefore = argumentRecoveryBudget.remaining;
         try {
           this.#modelMayBeLoaded = true;
-          if (llmOperation !== undefined) {
-            const references = contextBuildReferences(
-              messagesForModel,
-              contextBuild.messages,
-            );
-            context.operationRecorder?.recordContextBuild?.(llmOperation, {
-              policyVersion: contextBuild.estimate.policyVersion,
-              estimatedInputTokens: contextBuild.estimate.estimatedInputTokens,
-              budgetTokens: contextBuild.estimate.inputBudgetTokens,
-              selected: references.selected,
-              omitted: references.omitted,
-              createdAt: this.#now().toISOString(),
-            });
-          }
           response = (await withToolArgumentRecovery(
             request.messages,
             tools.flatMap((tool) => tool.function.name === undefined ? [] : [tool.function.name]),
             argumentRecoveryBudget,
-            (retryMessages) => withTimeout(this.#ollama.chat({ ...request, messages: retryMessages }), this.#config.llmTimeoutMs, "Ollama"),
+            (retryMessages) => executeModel(retryMessages, tools, request, llmOperation),
             recordArgumentRecovery,
           )) as ResponseWithMetrics;
         } catch (error: unknown) {
@@ -631,11 +650,11 @@ export class PirxAgent {
               [
                   ...messages,
                   withoutHistoricalThinking(response.message),
-                  { role: "user", content: CONTINUATION_CHECK_PROMPT },
+                  { role: "system", content: CONTINUATION_CHECK_PROMPT },
               ],
               tools.flatMap((tool) => tool.function.name === undefined ? [] : [tool.function.name]),
               argumentRecoveryBudget,
-              (retryMessages) => withTimeout(this.#ollama.chat({ ...request, messages: retryMessages }), this.#config.llmTimeoutMs, "Ollama"),
+              (retryMessages) => executeModel(retryMessages, tools, request, checkOperation),
               recordArgumentRecovery,
             )) as ResponseWithMetrics;
           } catch (error: unknown) {
@@ -712,7 +731,18 @@ export class PirxAgent {
 
         for (const call of toolCalls) {
           const name = call.function.name;
+          if (!toolBudgetAvailable()) {
+            this.#messages.push({ role: "tool", tool_name: name, content: "Nie wykonano tego wywołania: budżet liczby operacji, czasu lub wyników tej tury został wyczerpany. Podsumuj znane wyniki." });
+            continue;
+          }
+          toolRequests += 1;
           const arguments_ = normalizeArguments(call.function.arguments);
+          if (arguments_ === undefined) {
+            const execution = { text: "Nie wykonano wywołania: argumenty muszą być poprawnym obiektem JSON zgodnym ze schematem narzędzia. Nie zastąpiono ich pustym obiektem.", isError: true, serverUnavailable: false };
+            this.#hooks.onToolResult?.(name, execution, 0);
+            this.#messages.push({ role: "tool", tool_name: name, content: execution.text });
+            continue;
+          }
           const fingerprint = JSON.stringify({ name, arguments: arguments_ });
           const repeatedToolCallCount = (repeatedToolCalls.get(fingerprint) ?? 0) + 1;
           repeatedToolCalls.set(fingerprint, repeatedToolCallCount);
@@ -794,11 +824,15 @@ export class PirxAgent {
           this.#hooks.onToolCall?.(name, arguments_);
 
           const toolStartedAt = performance.now();
+          toolMayHaveExecuted = true;
           const execution = await this.#mcp.callTool(
             name,
             arguments_,
             actionPlan === undefined ? undefined : { operationId: actionPlan.mutationId },
+            Math.min(this.#config.maxToolResultCharacters ?? 12_000, maximumResultCharacters - resultCharacters),
           );
+          resultCharacters += execution.text.length;
+          this.#messages.push({ role: "tool", tool_name: name, content: execution.text });
           const toolDurationMs = performance.now() - toolStartedAt;
           if (mcpOperation !== undefined) {
             context.operationRecorder?.finish(mcpOperation, {
@@ -839,11 +873,6 @@ export class PirxAgent {
             execution,
             toolDurationMs,
           );
-          this.#messages.push({
-            role: "tool",
-            tool_name: name,
-            content: execution.text,
-          });
 
           if (execution.serverUnavailable && !this.#mcpFailureReported) {
             this.#mcpFailureReported = true;
@@ -857,6 +886,24 @@ export class PirxAgent {
         this.#messages.push({ role: "assistant", content: finalContent });
         totals.doneReason = "unexpected_loop_end";
       }
+
+    } catch (error) {
+      const partial = toolMayHaveExecuted || this.#messages.slice(checkpoint).some((message) => message.role === "tool");
+      if (!partial) {
+        this.#messages.splice(checkpoint);
+        throw error;
+      }
+      const lastCallIndex = this.#messages.findLastIndex((message) => message.role === "assistant" && (message.tool_calls?.length ?? 0) > 0);
+      if (lastCallIndex >= checkpoint) {
+        const calls = this.#messages[lastCallIndex]!.tool_calls ?? [];
+        const replies = this.#messages.slice(lastCallIndex + 1).filter((message) => message.role === "tool").length;
+        for (const call of calls.slice(replies)) this.#messages.push({ role: "tool", tool_name: call.function.name, content: "Brak potwierdzonego wyniku tego wywołania. Sprawdź stan przed ewentualnym ponowieniem; błąd tury nie cofa zewnętrznych operacji." });
+      }
+      finalContent = "Nie udało się zakończyć odpowiedzi po wykonaniu części operacji. Ich wyniki pozostają zapisane w rozmowie. Nie ponawiam wykonanych działań i nie potwierdzam zakończenia zadania. Możesz kontynuować od zachowanego stanu.";
+      this.#messages.push({ role: "assistant", content: finalContent });
+      totals.doneReason = "partial_turn_error";
+      recordArgumentRecovery();
+    }
 
       const gpuAfter = await readGpuStats();
       return {
@@ -886,7 +933,7 @@ export class PirxAgent {
             totals.evalDuration,
           ),
           done_reason: totals.doneReason,
-          model_calls: totals.modelCalls,
+          model_calls: modelInvocations,
           tool_calls: totals.toolCalls,
           context_estimates: totals.contextEstimates,
           context_builds: totals.contextBuilds.map((build) => ({
@@ -898,10 +945,6 @@ export class PirxAgent {
           gpu_after: gpuAfter,
         },
       };
-    } catch (error) {
-      this.#messages.splice(checkpoint);
-      throw error;
-    }
   }
 
   async modelStatus(): Promise<unknown> {
