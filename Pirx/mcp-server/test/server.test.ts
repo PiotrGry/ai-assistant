@@ -120,6 +120,7 @@ test("server exposes complete tools with safe annotations", async (context) => {
       "pirx_orchestrator_start",
       "pirx_orchestrator_status",
       "pirx_resource_report",
+    "pirx_task_history",
       "system_info",
     ],
   );
