@@ -4,7 +4,7 @@ import { Ollama, type ChatRequest, type ChatResponse, type Message, type Tool } 
 
 import type { AgentConfig, SystemPrompt } from "./config.js";
 import { loadSystemPrompt } from "./config.js";
-import type { SqliteActionLedger } from "./action-ledger.js";
+import type { ActionPlan, SqliteActionLedger } from "./action-ledger.js";
 import { toolTarget } from "./mcp-authorization.js";
 import {
   ModelContextEstimator,
@@ -768,48 +768,42 @@ export class PirxAgent {
           const mcpOperationSequence = operationSequence;
           operationSequence += 1;
 
-          const actionPlan =
-            context.actionLedger !== undefined &&
-            context.sessionId !== undefined &&
-            context.turnId !== undefined &&
-            !this.#mcp.isReadOnlyTool(name)
-              ? context.actionLedger.plan({
-                  sessionId: context.sessionId,
-                  turnId: context.turnId,
+          let actionPlan: ActionPlan | undefined;
+          if (!this.#mcp.isReadOnlyTool(name)) {
+            const { actionLedger: ledger, sessionId, turnId } = context;
+            if (ledger === undefined || sessionId === undefined || turnId === undefined) {
+              this.#messages.push({ role: "tool", tool_name: name, content: "Nie wykonano zapisu: trwały rejestr operacji jest niedostępny." });
+              continue;
+            }
+
+            try {
+              actionPlan = ledger.plan({
+                  sessionId: sessionId,
+                  turnId: turnId,
                   sequence: mcpOperationSequence,
                   target: toolTarget(name, arguments_),
                   toolName: name,
                   arguments: arguments_,
                   authorization: {
                     source: "user_prompt",
-                    turn_id: context.turnId,
+                    turn_id: turnId,
                   },
-                })
-              : undefined;
-
-          if (actionPlan?.alreadySucceeded === true) {
-            this.#messages.push({
-              role: "tool",
-              tool_name: name,
-              content:
-                "Operacja ma już zapisane potwierdzenie sukcesu i nie została wykonana ponownie.",
-            });
-            continue;
+                });
+              if (!actionPlan.alreadySucceeded && !actionPlan.requiresReconciliation) ledger.start(actionPlan);
+            } catch {
+              this.#messages.push({ role: "tool", tool_name: name, content: "Nie wykonano zapisu: nie udało się utrwalić zamiaru w rejestrze operacji." });
+              continue;
+            }
+            if (actionPlan.alreadySucceeded) {
+              this.#messages.push({ role: "tool", tool_name: name, content: "Operacja ma już zapisane potwierdzenie sukcesu i nie została wykonana ponownie." });
+              continue;
+            }
+            if (actionPlan.requiresReconciliation) {
+              this.#messages.push({ role: "tool", tool_name: name, content: "Wynik poprzedniej próby operacji jest niepewny. Najpierw sprawdź aktualny stan zewnętrzny; operacji nie wykonano ponownie." });
+              continue;
+            }
           }
 
-          if (actionPlan?.requiresReconciliation === true) {
-            this.#messages.push({
-              role: "tool",
-              tool_name: name,
-              content:
-                "Wynik poprzedniej próby operacji jest niepewny. Najpierw sprawdź aktualny stan zewnętrzny; operacji nie wykonano ponownie.",
-            });
-            continue;
-          }
-
-          actionPlan === undefined
-            ? undefined
-            : context.actionLedger?.start(actionPlan);
           const mcpOperation =
             actionPlan === undefined &&
             context.operationRecorder !== undefined &&
