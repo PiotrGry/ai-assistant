@@ -78,6 +78,7 @@ export interface ClaudeSpawnOptions {
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
   readonly shell: false;
+  readonly detached?: boolean;
   readonly stdio: ["ignore", "pipe", "pipe"];
 }
 export type ClaudeSpawn = (file: string, args: readonly string[], options: ClaudeSpawnOptions) => ChildProcess;
@@ -238,6 +239,7 @@ export class ClaudeCodeCliRunner {
   private readonly environment: NodeJS.ProcessEnv;
   private readonly additionalEnvironment: Readonly<Record<string, string | undefined>> | undefined;
   private readonly requestIdFactory: () => string;
+  private readonly ownsProcessGroup: boolean;
   private readonly spawnProcess: ClaudeSpawn;
   private readonly terminationGraceMs: number;
 
@@ -247,6 +249,7 @@ export class ClaudeCodeCliRunner {
     this.environment = options.environment ?? process.env;
     this.additionalEnvironment = options.additionalEnvironment;
     this.requestIdFactory = options.requestIdFactory ?? randomUUID;
+    this.ownsProcessGroup = process.platform !== "win32" && options.spawnProcess === undefined;
     this.spawnProcess = options.spawnProcess ?? ((file, args, spawnOptions) => spawn(file, [...args], spawnOptions));
     this.terminationGraceMs = boundedInteger(options.terminationGraceMs, CLAUDE_TERMINATION_GRACE_MS, 5_000) ?? CLAUDE_TERMINATION_GRACE_MS;
   }
@@ -334,17 +337,25 @@ export class ClaudeCodeCliRunner {
     let terminationTimer: NodeJS.Timeout | undefined;
     let trigger: "timeout" | "cancelled" | "invalid_output" | undefined;
     let child: ChildProcess;
+    const isolatedGroup = this.ownsProcessGroup;
+    const signalChild = (signal: NodeJS.Signals): void => {
+      try {
+        if (isolatedGroup && child.pid !== undefined) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch { /* The process or its group may already have exited. */ }
+    };
     const terminate = (): void => {
       if (terminationStarted) return;
       terminationStarted = true;
-      try { child.kill("SIGTERM"); } catch { /* already exited */ }
-      terminationTimer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* already exited */ } }, this.terminationGraceMs);
+      signalChild("SIGTERM");
+      terminationTimer = setTimeout(() => signalChild("SIGKILL"), this.terminationGraceMs);
     };
     try {
       child = this.spawnProcess(this.executable, input.arguments, {
         cwd: input.workingDirectory,
         env: buildEnvironment(this.environment, this.additionalEnvironment),
         shell: false,
+        ...(isolatedGroup ? { detached: true } : {}),
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error: unknown) {
@@ -384,11 +395,13 @@ export class ClaudeCodeCliRunner {
       };
       // A spawned child can emit error (e.g. a failed kill) while still running; only close proves it exited.
       child.on("error", (error: Error) => { spawnError ??= error as NodeJS.ErrnoException; if (child.pid === undefined) settle(); });
-      child.once("close", (code: number | null) => { exitCode = code; settle(); });
+      child.once("close", (code: number | null) => {
+        exitCode = code;
+        if (terminationStarted && isolatedGroup && child.pid !== undefined) signalChild("SIGKILL");
+        settle();
+      });
+      if (input.signal?.aborted) onAbort();
     });
-    if (trigger !== undefined) return failure(trigger, input.requestId, input.startedAt, exitCode);
-    if (spawnError !== undefined) return failure(spawnError.code === "ENOENT" ? "claude_not_installed" : "process_error", input.requestId, input.startedAt, exitCode);
-    if (exitCode === null) return failure("unknown", input.requestId, input.startedAt, exitCode);
     const stdout = Buffer.concat(stdoutChunks).toString("utf8");
     const stderr = Buffer.concat(stderrChunks).toString("utf8");
     let parsed: unknown;
@@ -396,20 +409,23 @@ export class ClaudeCodeCliRunner {
       const result = failure(...args);
       const envelope = isRecord(parsed) ? parsed : {};
       const evidence = [envelope.subtype, envelope.errors, envelope.error, envelope.message, stderr].filter((value) => value !== undefined && value !== "").map((value) => typeof value === "string" ? value : JSON.stringify(value)).join("\n");
-      return { ...result, diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, { ...result.diagnostic, stage: "process", ...(evidence ? { providerMessage: evidence } : {}) }) };
+      return { ...result, diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, { ...result.diagnostic, stage: "process", ...(evidence ? { providerMessage: evidence } : {}), ...(outputLimitExceeded ? { providerMessageTruncated: true } : {}) }) };
     };
+    if (trigger !== undefined) return failed(trigger, input.requestId, input.startedAt, exitCode);
+    if (spawnError !== undefined) return failure(spawnError.code === "ENOENT" ? "claude_not_installed" : "process_error", input.requestId, input.startedAt, exitCode);
+    if (exitCode === null) return failed("unknown", input.requestId, input.startedAt, exitCode);
     try { parsed = JSON.parse(stdout); }
     catch { return failed(explicitFailureCode(undefined, stderr) ?? (exitCode !== 0 ? "process_error" : "invalid_output"), input.requestId, input.startedAt, exitCode, exitCode !== 0 ? undefined : "malformed_cli_envelope"); }
     const explicit = explicitFailure(parsed, stderr);
     if (explicit !== undefined) return failed(explicit.outcome, input.requestId, input.startedAt, exitCode, diagnosticCode(explicit.outcome), explicit.providerRecovery);
     if (exitCode !== 0) return failed("process_error", input.requestId, input.startedAt, exitCode);
-    if (!isRecord(parsed) || parsed.type !== "result" || parsed.subtype !== "success" || parsed.is_error !== false) return failure("invalid_output", input.requestId, input.startedAt, exitCode, "malformed_cli_envelope");
+    if (!isRecord(parsed) || parsed.type !== "result" || parsed.subtype !== "success" || parsed.is_error !== false) return failed("invalid_output", input.requestId, input.startedAt, exitCode, "malformed_cli_envelope");
     if (input.structuredOutput === true) {
-      if (parsed.structured_output === undefined) return failure("invalid_output", input.requestId, input.startedAt, exitCode, "missing_structured_output");
-      if (!isRecord(parsed.structured_output)) return failure("invalid_output", input.requestId, input.startedAt, exitCode, "invalid_structured_output");
+      if (parsed.structured_output === undefined) return failed("invalid_output", input.requestId, input.startedAt, exitCode, "missing_structured_output");
+      if (!isRecord(parsed.structured_output)) return failed("invalid_output", input.requestId, input.startedAt, exitCode, "invalid_structured_output");
       return { outcome: "success", requestId: input.requestId, structuredOutput: parsed.structured_output, durationMs: Math.max(0, Date.now() - input.startedAt), exitCode: 0 } as unknown as ClaudeRoundTripResult;
     }
-    if (!validateStructuredOutput(parsed.structured_output, input.requestId)) return failure("invalid_output", input.requestId, input.startedAt, exitCode);
+    if (!validateStructuredOutput(parsed.structured_output, input.requestId)) return failed("invalid_output", input.requestId, input.startedAt, exitCode);
     return { outcome: "success", requestId: input.requestId, acknowledgement: parsed.structured_output.acknowledgement, durationMs: Math.max(0, Date.now() - input.startedAt), exitCode: 0 };
   }
 }

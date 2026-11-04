@@ -35,6 +35,8 @@ export function buildWorkerFailureDiagnosticSchema(): unknown {
       schemaVersion: { type: "integer", const: WORKER_DIAGNOSTIC_SCHEMA_VERSION },
       code: { enum: [...WORKER_FAILURE_CODES] },
       message: { type: "string", minLength: 1, maxLength: 256 },
+      correlationId: { type: "string", minLength: 1, maxLength: 128 },
+      providerMessageTruncated: { type: "boolean" },
       providerMessage: { type: "string", minLength: 1, maxLength: 2048 },
       exitCode: { type: "integer", minimum: 0, maximum: 255 },
       durationMs: { type: "integer", minimum: 0, maximum: 300_000 },
@@ -66,6 +68,8 @@ export interface WorkerFailureDiagnostic {
   readonly code: WorkerFailureCode;
   readonly message: string;
   readonly providerMessage?: string;
+  readonly providerMessageTruncated?: boolean;
+  readonly correlationId?: string;
   readonly exitCode?: number;
   readonly durationMs?: number;
   readonly stage?: "process" | "cli_envelope" | "structured_output" | "worker_contract" | "git_state";
@@ -124,11 +128,17 @@ export function createWorkerFailureDiagnostic(code: WorkerFailureCode, details: 
   try {
     providerRecovery = code !== "quota_exhausted" ? undefined : normalizeWorkerProviderRecoveryMetadata(details.providerRecovery);
   } catch { providerRecovery = undefined; }
+  const correlationId = safeText(details.correlationId, 128);
+  const providerMessage = details.providerMessage
+    ? String(diagnosticContext(details.providerMessage)).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/gu, "")
+    : undefined;
   return Object.freeze({
     schemaVersion: WORKER_DIAGNOSTIC_SCHEMA_VERSION,
     code,
     message: MESSAGES[code],
-    ...(details.providerMessage ? { providerMessage: String(diagnosticContext(details.providerMessage)).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/gu, "").slice(0, 2048) } : {}),
+    ...(providerMessage ? { providerMessage: providerMessage.slice(0, 2048) } : {}),
+    ...(details.providerMessageTruncated || (providerMessage?.length ?? 0) > 2048 ? { providerMessageTruncated: true } : {}),
+    ...(correlationId === undefined ? {} : { correlationId }),
     ...(exitCode === undefined ? {} : { exitCode }),
     ...(durationMs === undefined ? {} : { durationMs }),
     ...(stage === undefined ? {} : { stage }),
@@ -164,9 +174,11 @@ export function validateWorkerFailureDiagnostic(value: unknown): WorkerFailureDi
   if (value.violationCode !== undefined && violationCode === undefined) return undefined;
   if ((value.stage !== undefined && stage === undefined) || (value.field !== undefined && field === undefined) || (value.receivedType !== undefined && receivedType === undefined) || (value.fieldNames !== undefined && fieldNames === undefined) || (value.payloadLength !== undefined && payloadLength === undefined) || (value.payloadDigest !== undefined && payloadDigest === undefined) || (value.providerRecovery !== undefined && (providerRecovery === undefined || value.code !== "quota_exhausted"))) return undefined;
   if (value.providerMessage !== undefined && (typeof value.providerMessage !== "string" || value.providerMessage.length === 0 || value.providerMessage.length > 2048)) return undefined;
-  const allowed = new Set(["providerMessage", "schemaVersion", "code", "message", "exitCode", "durationMs", "stage", "field", "violationCode", "receivedType", "fieldNames", "payloadLength", "payloadDigest", "providerRecovery"]);
+  if (value.providerMessageTruncated !== undefined && typeof value.providerMessageTruncated !== "boolean") return undefined;
+  if (value.correlationId !== undefined && safeText(value.correlationId, 128) === undefined) return undefined;
+  const allowed = new Set(["correlationId", "providerMessageTruncated", "providerMessage", "schemaVersion", "code", "message", "exitCode", "durationMs", "stage", "field", "violationCode", "receivedType", "fieldNames", "payloadLength", "payloadDigest", "providerRecovery"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) return undefined;
-  return Object.freeze({ schemaVersion: 1, code: value.code as WorkerFailureCode, message: value.message, ...(value.providerMessage === undefined ? {} : { providerMessage: String(diagnosticContext(value.providerMessage)) }), ...(exitCode === undefined ? {} : { exitCode }), ...(durationMs === undefined ? {} : { durationMs }), ...(stage === undefined ? {} : { stage }), ...(field === undefined ? {} : { field }), ...(violationCode === undefined ? {} : { violationCode }), ...(receivedType === undefined ? {} : { receivedType }), ...(fieldNames === undefined ? {} : { fieldNames }), ...(payloadLength === undefined ? {} : { payloadLength }), ...(payloadDigest === undefined ? {} : { payloadDigest }), ...(providerRecovery === undefined ? {} : { providerRecovery }) });
+  return Object.freeze({ schemaVersion: 1, code: value.code as WorkerFailureCode, message: value.message, ...(typeof value.correlationId === "string" ? { correlationId: value.correlationId } : {}), ...(value.providerMessageTruncated === true ? { providerMessageTruncated: true } : {}), ...(value.providerMessage === undefined ? {} : { providerMessage: String(diagnosticContext(value.providerMessage)) }), ...(exitCode === undefined ? {} : { exitCode }), ...(durationMs === undefined ? {} : { durationMs }), ...(stage === undefined ? {} : { stage }), ...(field === undefined ? {} : { field }), ...(violationCode === undefined ? {} : { violationCode }), ...(receivedType === undefined ? {} : { receivedType }), ...(fieldNames === undefined ? {} : { fieldNames }), ...(payloadLength === undefined ? {} : { payloadLength }), ...(payloadDigest === undefined ? {} : { payloadDigest }), ...(providerRecovery === undefined ? {} : { providerRecovery }) });
 }
 
 export class WorkerFailureError extends Error {

@@ -214,7 +214,7 @@ test("persists bounded worker diagnostics and replays them after restart", async
   const value = await storeFixture();
   try {
     const input = request(value.store);
-    const diagnostic = createWorkerFailureDiagnostic("timeout", { durationMs: 30_000 });
+    const diagnostic = createWorkerFailureDiagnostic("timeout", { durationMs: 30_000, correlationId: input.correlationId });
     const worker: WorkerPort = {
       execute: async () => ({
         ...result(input, "FAILED"),
