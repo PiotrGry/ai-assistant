@@ -17,7 +17,7 @@ test("chat forwards runtime configuration to the real MCP child and can pause/re
   const store = RuntimeSqliteStore.open({ filename });
   const at = new Date().toISOString();
   new OrchestratorControlRepository(store).heartbeat("paused", at);
-  new OrchestratorControlRepository(store).recordDiagnostic({ schemaVersion: 1, event: "queue", outcome: "invalid_snapshot", reason: "Duplicate Queue Order=10 on closed Issues #48 and #189", details: { provider: "github", affectedIssues: [48, 189] } }, at);
+  new OrchestratorControlRepository(store).recordDiagnostic({ schemaVersion: 1, event: "queue", outcome: "invalid_snapshot", reason: "Duplicate Queue Order=10 on closed Issues #48 and #189", details: { provider: "github", affectedIssues: [48, 189], correlationId: "correlation-243", token: "secret-value", context: 'quote " slash \\ unicode Ż😀 '.repeat(80) } }, at);
   const saved = process.env.PIRX_ORCHESTRATOR_DATABASE;
   const savedConfig = process.env.PIRX_CHAT_CONFIG;
   const configFile = join(root, "chat.json");
@@ -40,6 +40,28 @@ test("chat forwards runtime configuration to the real MCP child and can pause/re
   const diagnostic = await client.callTool("pirx_orchestrator_diagnostic", { sequence: 1 });
   assert.equal(diagnostic.isError, false);
   assert.deepEqual(JSON.parse(JSON.parse(diagnostic.text).diagnostic.text).details.affectedIssues, [48, 189]);
+  const smallStatus = await client.callTool("pirx_orchestrator_status", {}, undefined, 256);
+  assert.ok(smallStatus.text.length <= 256);
+  const summary = JSON.parse(smallStatus.text);
+  assert.equal(summary.truncated, true);
+  assert.equal(summary.snapshot.diagnostics[0].sequence, 1);
+  assert.equal(summary.snapshot.diagnostics[0].details.correlationId, "correlation-243");
+  const expected = JSON.parse(diagnostic.text).diagnostic.text as string;
+  assert.ok(!expected.includes("secret-value"));
+  let offset = 0;
+  let collected = "";
+  do {
+    const page = await client.callTool("pirx_orchestrator_diagnostic", { sequence: 1, offset }, undefined, 256);
+    assert.ok(page.text.length <= 256);
+    const chunk = JSON.parse(page.text).diagnostic as { offset: number; text: string; nextOffset?: number };
+    assert.equal(chunk.offset, offset);
+    collected += chunk.text;
+    if (chunk.nextOffset === undefined) break;
+    assert.equal(chunk.nextOffset, offset + chunk.text.length);
+    assert.ok(chunk.nextOffset > offset);
+    offset = chunk.nextOffset;
+  } while (true);
+  assert.equal(collected, expected);
   for (const action of ["pause", "resume"] as const) {
     const result = await client.callTool("pirx_orchestrator_control", { action, reason: "chat integration regression", operationId: `chat-${action}` }, { operationId: `chat-${action}` });
     assert.equal(result.isError, false, result.text);

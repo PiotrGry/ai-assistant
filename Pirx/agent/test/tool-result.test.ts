@@ -98,3 +98,33 @@ test("rejects an unsafe result budget", () => {
     /maxCharacters must be an integer/u,
   );
 });
+
+test("retains bounded diagnostic references even without correlation metadata", () => {
+  const diagnostics = [
+    { sequence: 1, event: "cycle", outcome: "failed", details: { correlationId: "x".repeat(500) } },
+    { sequence: 2, event: "queue", outcome: "failed" },
+  ];
+  const text = toolResultToText({ structuredContent: { outcome: "success", snapshot: { diagnostics, extra: "x".repeat(500) } } }, 256, "pirx_orchestrator_status");
+  const parsed = JSON.parse(text);
+  assert.ok(text.length <= 256);
+  assert.equal(parsed.truncated, true);
+  assert.deepEqual(parsed.snapshot.diagnostics.map((item: { sequence: number }) => item.sequence), [1, 2]);
+});
+
+test("shortened final diagnostic page provides a cursor and preserves every character", () => {
+  const original = '\\"Ż😀'.repeat(200);
+  let offset = 0;
+  let collected = "";
+  while (offset < original.length) {
+    const input = { outcome: "success", diagnostic: { sequence: 1, offset, totalCharacters: original.length, text: original.slice(offset) } };
+    const text = toolResultToText({ structuredContent: input }, 256, "pirx_orchestrator_diagnostic");
+    const page = JSON.parse(text).diagnostic as { text: string; nextOffset?: number };
+    assert.ok(text.length <= 256);
+    collected += page.text;
+    if (page.nextOffset === undefined) break;
+    assert.equal(page.nextOffset, offset + page.text.length);
+    assert.ok(page.nextOffset > offset);
+    offset = page.nextOffset;
+  }
+  assert.equal(collected, original);
+});

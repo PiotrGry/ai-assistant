@@ -236,7 +236,7 @@ export class PirxMcpClient {
       );
 
       return {
-        text: toolResultToText(result, Math.max(256, Math.min(this.#maxToolResultCharacters, maximumResultCharacters))),
+        text: toolResultToText(result, Math.max(256, Math.min(this.#maxToolResultCharacters, maximumResultCharacters)), name),
         isError: result.isError === true,
         serverUnavailable: false,
       };

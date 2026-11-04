@@ -13,6 +13,77 @@ export interface McpToolResultLike {
 const TEXT_FIELD_LIMITS = [2_000, 1_000, 500, 300, 150, 80];
 const MAX_ARRAY_REDUCTIONS = 10;
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined;
+}
+
+function summarizeDiagnosticResult(value: unknown, maxCharacters: number, toolName: string | undefined): string | undefined {
+  const result = record(value);
+  if (result?.outcome !== "success") return undefined;
+  const serialized = JSON.stringify(value);
+  if (serialized.length <= maxCharacters) return serialized;
+
+  if (toolName === "pirx_orchestrator_diagnostic") {
+    const page = record(result.diagnostic);
+    if (page === undefined || !Number.isSafeInteger(page.sequence) || !Number.isSafeInteger(page.offset)
+      || !Number.isSafeInteger(page.totalCharacters) || typeof page.text !== "string") return undefined;
+    const offset = page.offset as number;
+    const total = page.totalCharacters as number;
+    const text = page.text;
+    if (offset < 0 || total < offset || text.length > total - offset) return undefined;
+    const make = (length: number): string => JSON.stringify({
+      outcome: "success", truncated: true,
+      diagnostic: { sequence: page.sequence, offset, totalCharacters: total, text: text.slice(0, length),
+        ...(offset + length < total ? { nextOffset: offset + length } : {}) },
+    });
+    let low = 0;
+    let high = text.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (make(middle).length <= maxCharacters) low = middle;
+      else high = middle - 1;
+    }
+    const summary = make(low);
+    return summary.length <= maxCharacters && (low > 0 || text.length === 0) ? summary : undefined;
+  }
+
+  if (toolName === "pirx_orchestrator_status") {
+    const snapshot = record(result.snapshot);
+    if (snapshot === undefined || !Array.isArray(snapshot.diagnostics)) return undefined;
+    const diagnostics = snapshot.diagnostics;
+    const summary: Record<string, unknown> = { outcome: "success", truncated: true, snapshot: { diagnostics: [] } };
+    const compactSnapshot = summary.snapshot as { diagnostics: Record<string, unknown>[]; [key: string]: unknown };
+    for (const item of diagnostics) {
+      const diagnostic = record(item);
+      if (diagnostic === undefined || !Number.isSafeInteger(diagnostic.sequence)) continue;
+      const compact: Record<string, unknown> = { sequence: diagnostic.sequence };
+      const details = record(diagnostic.details);
+      if (typeof details?.correlationId === "string") compact.details = { correlationId: details.correlationId };
+      for (const key of ["event", "outcome"]) {
+        if (typeof diagnostic[key] === "string") compact[key] = diagnostic[key];
+      }
+      compactSnapshot.diagnostics.push(compact);
+      if (JSON.stringify(summary).length > maxCharacters) {
+        delete compact.event;
+        delete compact.outcome;
+        if (JSON.stringify(summary).length > maxCharacters) delete compact.details;
+        if (JSON.stringify(summary).length > maxCharacters) {
+          compactSnapshot.diagnostics.pop();
+          break;
+        }
+      }
+    }
+    for (const key of ["observedState", "requestedMode"]) {
+      if (typeof snapshot[key] !== "string") continue;
+      compactSnapshot[key] = snapshot[key];
+      if (JSON.stringify(summary).length > maxCharacters) delete compactSnapshot[key];
+    }
+    return JSON.stringify(summary);
+  }
+  return undefined;
+}
+
 function shortenStrings(value: unknown, limit: number): unknown {
   if (typeof value === "string") {
     return value.length <= limit
@@ -193,14 +264,18 @@ function reduceText(body: string, maxCharacters: number): string {
 export function toolResultToText(
   result: McpToolResultLike,
   maxCharacters = 12_000,
+  toolName?: string,
 ): string {
   if (!Number.isSafeInteger(maxCharacters) || maxCharacters < 256) {
     throw new Error(`maxCharacters must be an integer >= 256: ${maxCharacters}`);
   }
   let body: string;
+  const prefix = result.isError === true ? "Błąd narzędzia: " : "";
+  const bodyBudget = Math.max(1, maxCharacters - prefix.length);
 
   if (result.structuredContent !== undefined && result.structuredContent !== null) {
-    body = summarizeStructured(result.structuredContent, maxCharacters);
+    body = summarizeDiagnosticResult(result.structuredContent, bodyBudget, toolName)
+      ?? summarizeStructured(result.structuredContent, bodyBudget);
   } else {
     body = (result.content ?? [])
       .filter(
@@ -215,6 +290,5 @@ export function toolResultToText(
     body = "Narzędzie nie zwróciło treści.";
   }
 
-  const prefix = result.isError === true ? "Błąd narzędzia: " : "";
-  return prefix + reduceText(body, Math.max(1, maxCharacters - prefix.length));
+  return prefix + reduceText(body, bodyBudget);
 }
