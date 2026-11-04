@@ -39,7 +39,12 @@ export function registerGitHubShipmentCycleTool(server: McpServer, options: { re
     const authorization = verifyHostAuthorization(options.authorizationSecret, context.mcpReq._meta, "github_shipment_cycle", input);
     if (authorization === undefined) return structured({ outcome: "worker_authentication_required", taskId: input.taskId, attemptId: input.attemptId, eventId: input.eventId, message: "This shipment mutation requires host authorization for the exact cycle arguments." }, true);
     if (options.config === undefined || options.transport === undefined) return structured({ outcome: "unknown", taskId: input.taskId, attemptId: input.attemptId, eventId: input.eventId, message: options.configurationError ?? "GitHub shipment cycle is unavailable because GitHub is not configured." }, true);
-    const queue = new GitHubWriteQueue(); const store = RuntimeSqliteStore.open({ environment: options.environment });
+    let store: RuntimeSqliteStore;
+    try { store = RuntimeSqliteStore.open({ environment: options.environment }); }
+    catch (error: unknown) {
+      return structured({ outcome: "unconfigured", taskId: input.taskId, attemptId: input.attemptId, eventId: input.eventId, message: error instanceof Error ? error.message : "Runtime SQLite could not be opened." }, true);
+    }
+    const queue = new GitHubWriteQueue();
     try {
       const github = new GitHubPullRequestGateway(options.transport, options.config, queue);
       const actions = new GitHubActionsGateway(options.transport, options.config);

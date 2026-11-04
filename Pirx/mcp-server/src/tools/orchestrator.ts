@@ -7,6 +7,7 @@ import {
   OrchestratorControlRepository,
   HostShutdownRepository,
   RuntimeSqliteStore,
+  RuntimeStorageError,
   type ExecutionReportQuery,
   type ExecutionReportResult,
   type OrchestratorDiagnosticChunk,
@@ -72,7 +73,7 @@ export class SqliteOrchestratorControlToolPort implements OrchestratorControlToo
     if (!existsSync(this.#filename)) return { outcome: "storage_error", message: "Orchestrator runtime database does not exist. Start the configured orchestrator service first." };
     let store: RuntimeSqliteStore | undefined;
     try { store = RuntimeSqliteStore.open({ filename: this.#filename, busyTimeoutMs: 1_000 }); return operation(store, new OrchestratorControlRepository(store)); }
-    catch { return { outcome: "storage_error", message: "Orchestrator runtime database is unavailable." }; }
+    catch (error: unknown) { return { outcome: "storage_error", message: error instanceof RuntimeStorageError ? error.message : "Orchestrator runtime database is unavailable." }; }
     finally { try { store?.close(); } catch { /* preserve bounded operation result */ } }
   }
 }

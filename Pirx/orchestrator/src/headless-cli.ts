@@ -43,7 +43,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
   let runtime: ProductionRuntime | undefined;
   try {
     const config = await loadHeadlessOrchestratorConfig(host.env);
-    const store = RuntimeSqliteStore.open({ filename: config.databasePath });
+    const store = RuntimeSqliteStore.open({ filename: config.databasePath, environment: host.env });
     const worker = new ProductionClaudeWorker({ store, repositories: config.repositories });
     runtime = new ProductionRuntime(store, {
       workerId: config.workerId, provider: config.provider, workerCapabilities: config.workerCapabilities,
