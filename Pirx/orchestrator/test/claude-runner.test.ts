@@ -43,6 +43,16 @@ if (mode === "signal") { process.kill(process.pid, "SIGTERM"); }
 if (mode === "stdout-limit") { process.stdout.write("x".repeat(100000)); setInterval(() => {}, 1000); }
 if (mode === "stderr-limit") { process.stderr.write("x".repeat(100000)); setInterval(() => {}, 1000); }
 if (mode === "hang") { process.on("SIGTERM", () => {}); setInterval(() => {}, 1000); }
+if (mode === "missing-output") { process.stderr.write("provider fixture token=never-expose"); emit({ type: "result", subtype: "success", is_error: false }); }
+if (mode === "process-tree") {
+  require("node:child_process").spawn(process.execPath, ["-e", \`
+    const fs = require("node:fs");
+    process.on("SIGTERM", () => {});
+    fs.writeFileSync(process.env.PIRX_CHILD_READY, "ready");
+    setTimeout(() => fs.writeFileSync(process.env.PIRX_CHILD_ESCAPED, "escaped"), 650);
+  \`], { stdio: "ignore" });
+  setInterval(() => {}, 1000);
+}
 if (mode === "delay") setTimeout(() => emit(envelope({ requestId, acknowledgement: "hello world acknowledged" })), 1000);
 `;
 
@@ -227,4 +237,32 @@ test("returns unknown when a child exits by signal and rejects invalid bounds", 
   } finally {
     await rm(value.root, { recursive: true, force: true });
   }
+});
+
+test("cancellation terminates the Claude subprocess group", { skip: process.platform === "win32" }, async () => {
+  const value = await fixture();
+  try {
+    const ready = join(value.root, "child-ready");
+    const escaped = join(value.root, "child-escaped");
+    const controller = new AbortController();
+    const execution = runner(value, "process-tree", undefined, { PIRX_CHILD_READY: ready, PIRX_CHILD_ESCAPED: escaped }).run({ signal: controller.signal, timeoutMs: 5_000 });
+    for (let i = 0; i < 150 && !existsSync(ready); i++) await delay(10);
+    const childStarted = existsSync(ready);
+    controller.abort();
+    assert.equal((await execution).outcome, "cancelled");
+    assert.equal(childStarted, true);
+    await delay(750);
+    assert.equal(existsSync(escaped), false);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("missing structured output preserves sanitized provider evidence", async () => {
+  const value = await fixture();
+  try {
+    const result = await runner(value, "missing-output").runStructured({ requestId: "missing-output", cwd: value.root, prompt: "fixture", responseSchema: {} });
+    assert.equal(result.outcome, "invalid_output");
+    assert.equal(result.diagnostic.code, "missing_structured_output");
+    assert.match(result.diagnostic.providerMessage ?? "", /provider fixture/u);
+    assert.doesNotMatch(result.diagnostic.providerMessage ?? "", /never-expose/u);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
 });

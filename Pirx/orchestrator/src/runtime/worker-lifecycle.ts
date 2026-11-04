@@ -1,6 +1,7 @@
 import { createCheckpoint, type Checkpoint, type CheckpointInput } from "./checkpoint.js";
 import { transitionAttempt, transitionTask, type AttemptSnapshot, type TaskSnapshot, type UtcTimestamp } from "./task-domain.js";
 import { invokeWorker, validateWorkerRequest, type WorkerPort, type WorkerRequest, type WorkerResult } from "./worker-contract.js";
+import { createWorkerFailureDiagnostic } from "./worker-diagnostic.js";
 import type { RuntimeSqliteStore } from "./sqlite.js";
 
 const INVOCATION_STARTED = "worker invocation started";
@@ -97,7 +98,25 @@ export class WorkerLifecycleCoordinator {
     const progress = this.#store.attempts.recordProgress(attempt.id, { state: "running", startedAt: attempt.startedAt }, { progress: INVOCATION_STARTED }, this.#now());
     if (progress.outcome !== "success") return { outcome: progress.outcome === "conflict" ? "conflict" : "storage_error", taskId: value.taskId, attemptId: value.attemptId, message: message(progress.message) };
     const invoked = await invokeWorker(this.#worker, value, signal);
-    const workerResult: WorkerResult = invoked.ok ? safeWorkerResult(invoked.value) : { kind: "worker_result", schemaVersion: 1, taskId: value.taskId, attemptId: value.attemptId, correlationId: value.correlationId, outcome: signal.aborted ? "CANCELLED" : "UNKNOWN", reason: signal.aborted ? "Worker execution was cancelled." : "Worker did not return a valid normalized result." };
+    const failure = invoked.ok ? undefined : invoked.violations[0];
+    const normalized: WorkerResult = invoked.ok
+      ? safeWorkerResult(invoked.value)
+      : {
+          kind: "worker_result",
+          schemaVersion: 1,
+          taskId: value.taskId,
+          attemptId: value.attemptId,
+          correlationId: value.correlationId,
+          outcome: signal.aborted ? "CANCELLED" : "UNKNOWN",
+          reason: signal.aborted ? "Worker execution was cancelled." : "Worker did not return a valid normalized result.",
+          diagnostic: createWorkerFailureDiagnostic(signal.aborted ? "cancellation" : "worker_contract_mismatch", {
+            stage: "worker_contract",
+            ...(failure === undefined ? {} : { field: failure.field, violationCode: failure.code }),
+          }),
+        };
+    const workerResult = normalized.outcome !== "CODE_PUSHED" && normalized.diagnostic !== undefined
+      ? { ...normalized, diagnostic: createWorkerFailureDiagnostic(normalized.diagnostic.code, { ...normalized.diagnostic, correlationId: value.correlationId }) }
+      : normalized;
     const recorded = this.#recordTerminal(value, workerResult);
     if (recorded.outcome !== "success") return { outcome: recorded.outcome === "conflict" ? "conflict" : "storage_error", taskId: value.taskId, attemptId: value.attemptId, message: message(recorded.message) };
     const terminal = recorded.value;
