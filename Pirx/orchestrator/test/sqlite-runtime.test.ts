@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtemp, rm } from "node:fs/promises";
+import { link, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -203,4 +203,26 @@ test("migration failure rolls back without advancing the runtime schema", async 
     check.close();
     await rm(fixture.directory, { recursive: true, force: true });
   }
+});
+
+test("requires a runtime path and rejects conflicting paths and aliases to chat SQLite before writing", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-runtime-path-"));
+  const chat = join(directory, "chat.sqlite");
+  const runtime = join(directory, "runtime.sqlite");
+  const alias = join(directory, "alias.sqlite");
+  const environment = { PIRX_STORAGE_FILE: chat, PIRX_ORCHESTRATOR_DATABASE: runtime };
+  try {
+    const chatBytes = Buffer.from("existing chat database fixture");
+    await writeFile(chat, chatBytes);
+    await link(chat, alias);
+    assert.throws(() => RuntimeSqliteStore.open({ environment: { PIRX_STORAGE_FILE: chat } }), /explicit runtime SQLite path/u);
+    assert.throws(() => RuntimeSqliteStore.open({ filename: alias, environment }), /conflicts/u);
+    assert.throws(() => RuntimeSqliteStore.open({ environment: { ...environment, PIRX_ORCHESTRATOR_DATABASE: alias } }), /identifies the Pirx chat database/u);
+    const daemon = RuntimeSqliteStore.open({ filename: runtime, environment });
+    const shipment = RuntimeSqliteStore.open({ environment });
+    assert.equal(daemon.filename, shipment.filename);
+    daemon.close();
+    shipment.close();
+    assert.deepEqual(await readFile(chat), chatBytes);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

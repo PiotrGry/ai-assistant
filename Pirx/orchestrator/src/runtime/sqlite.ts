@@ -1,8 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import {
   deserializeAttempt,
@@ -266,12 +266,56 @@ function busyTimeout(value: number | undefined): number {
   if (!Number.isSafeInteger(result) || result < 0 || result > 120_000) throw new RuntimeStorageError("invalid_configuration", "SQLite busy timeout must be an integer from 0 to 120000 ms.");
   return result;
 }
-function storageFilename(environment: NodeJS.ProcessEnv): string {
-  const configured = environment.PIRX_STORAGE_FILE?.trim();
-  if (configured !== undefined && configured.length > 0) return resolve(configured);
-  const dataHome = environment.XDG_DATA_HOME?.trim() || join(homedir(), ".local", "share");
-  return join(dataHome, "pirx", "pirx.sqlite");
+function canonicalStoragePath(filename: string): string {
+  const absolute = resolve(filename);
+  try {
+    return realpathSync(absolute);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    try {
+      if (lstatSync(absolute).isSymbolicLink()) {
+        throw new RuntimeStorageError("invalid_configuration", "A SQLite path points to an unresolved symbolic link.");
+      }
+    } catch (missing: unknown) {
+      if ((missing as NodeJS.ErrnoException).code !== "ENOENT") throw missing;
+    }
+    return join(canonicalStoragePath(dirname(absolute)), basename(absolute));
+  }
 }
+
+function sameStorageFile(first: string, second: string): boolean {
+  if (first === second) return true;
+  try {
+    const left = statSync(first, { bigint: true });
+    const right = statSync(second, { bigint: true });
+    return left.dev === right.dev && left.ino === right.ino;
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function storageFilename(environment: NodeJS.ProcessEnv, filename?: string): string {
+  const configured = environment.PIRX_ORCHESTRATOR_DATABASE?.trim();
+  const selected = filename ?? configured;
+  if (!selected) throw new RuntimeStorageError("invalid_configuration", "Set PIRX_ORCHESTRATOR_DATABASE or configure an explicit runtime SQLite path.");
+  try {
+    const runtime = canonicalStoragePath(selected);
+    if (configured && runtime !== canonicalStoragePath(configured)) {
+      throw new RuntimeStorageError("invalid_configuration", "The explicit runtime SQLite path conflicts with PIRX_ORCHESTRATOR_DATABASE.");
+    }
+    const dataHome = environment.XDG_DATA_HOME?.trim() || join(homedir(), ".local", "share");
+    const chat = canonicalStoragePath(environment.PIRX_STORAGE_FILE?.trim() || join(dataHome, "pirx", "pirx.sqlite"));
+    if (sameStorageFile(runtime, chat)) {
+      throw new RuntimeStorageError("invalid_configuration", "The runtime SQLite path identifies the Pirx chat database. Configure separate paths.");
+    }
+    return runtime;
+  } catch (error: unknown) {
+    if (error instanceof RuntimeStorageError) throw error;
+    throw new RuntimeStorageError("invalid_configuration", "The runtime and chat SQLite paths could not be verified.");
+  }
+}
+
 export function defaultRuntimeStoragePath(environment: NodeJS.ProcessEnv = process.env): string {
   return storageFilename(environment);
 }
@@ -2754,7 +2798,7 @@ export class RuntimeSqliteStore {
 
   public static open(options: RuntimeSqliteStoreOptions = {}): RuntimeSqliteStore {
     if (options.filename !== undefined && options.filename.trim().length === 0) throw new RuntimeStorageError("invalid_configuration", "SQLite filename must not be empty.");
-    const filename = resolve(options.filename?.trim() ?? storageFilename(options.environment ?? process.env));
+    const filename = storageFilename(options.environment ?? process.env, options.filename?.trim());
     const timeout = busyTimeout(options.busyTimeoutMs);
     let database: DatabaseSync | undefined;
     try {
