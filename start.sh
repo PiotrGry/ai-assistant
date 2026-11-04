@@ -28,9 +28,10 @@ fi
 ADA_PANE="$(tmux display-message -p '#{pane_id}')"
 
 # uruchom Adę w aktualnym pane
+[[ "$NUM_CTX" =~ ^[1-9][0-9]*$ ]] || { echo "OLLAMA_NUM_CTX musi być dodatnią liczbą całkowitą." >&2; exit 1; }
 tmux send-keys \
   -t "$ADA_PANE" \
-  "OLLAMA_MODEL=$MODEL OLLAMA_NUM_CTX=$NUM_CTX $ASSISTANT" \
+  "$(printf 'OLLAMA_MODEL=%q OLLAMA_NUM_CTX=%q %q' "$MODEL" "$NUM_CTX" "$ASSISTANT")" \
   Enter
 
 sleep 1

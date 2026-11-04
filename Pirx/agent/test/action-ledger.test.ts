@@ -121,3 +121,22 @@ test("unknown outcome requires reconciliation before any retry", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+
+test("unresolved mutation survives a new turn, session and SQLite reopen", async () => {
+  const { directory, store } = await createStore();
+  const filename = store.filename;
+  const ledger = new SqliteActionLedger(store);
+  const plan = ledger.plan(input);
+  ledger.start(plan);
+  ledger.finish(plan, "unknown");
+  store.close();
+  const reopened = SqliteStore.open({ filename });
+  try {
+    const retry = new SqliteActionLedger(reopened).plan({ ...input, sessionId: "new-session", turnId: "new-turn", arguments: { ...input.arguments, correlationId: "new-correlation", confirmed: true } });
+    assert.equal(retry.mutationId, plan.mutationId);
+    assert.equal(retry.requiresReconciliation, true);
+    assert.equal(retry.operationId, "");
+    assert.equal(reopened.count("operations"), 1);
+  } finally { reopened.close(); await rm(directory, { recursive: true, force: true }); }
+});

@@ -8,7 +8,7 @@ datasources:
     isDefault: true
     editable: false
     jsonData:
-      # The plugin adds _pragma=query_only(1) itself; no mode=ro because WAL readers need the -shm file.
+      # Consistent read-only snapshot; exporter merges WAL pages using SQLite backup.
       path: /var/lib/pirx/pirx.sqlite
 
   - name: Pirx GPU
@@ -18,5 +18,5 @@ datasources:
     isDefault: false
     editable: false
     jsonData:
-      # Written every second by the pirx-gpu-sampler user service.
+      # Exported every 30 seconds from the GPU sampler database.
       path: /var/lib/pirx/gpu.sqlite

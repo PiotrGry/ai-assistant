@@ -1,3 +1,4 @@
+import { hostname } from "node:os";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
@@ -117,7 +118,7 @@ test("SQLite recovery closes interrupted work without hiding MCP uncertainty", a
   store.insertRunEnvironment({
     id: "env-recovery",
     createdAt: "2026-09-09T10:00:00.000Z",
-    payload: { schema_version: 1 },
+    payload: { schema_version: 1, process_id: 2147483647, process_hostname: hostname() },
   });
   store.insertSession({
     id: "session-recovery",
@@ -227,4 +228,21 @@ test("SQLite store transaction commits the result or rolls back every write", as
     store.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+
+test("recovery preserves live, unknown and remote session owners", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-session-owner-"));
+  const filename = join(directory, "chat.sqlite");
+  const store = SqliteStore.open({ filename });
+  try {
+    for (const [id, payload] of Object.entries({ live: { process_id: process.pid, process_hostname: hostname() }, legacy: {}, remote: { process_id: 2147483647, process_hostname: "another-host" } })) {
+      store.insertRunEnvironment({ id, createdAt: "2026-01-01T00:00:00Z", payload });
+      store.insertSession({ id, environmentId: id, startedAt: "2026-01-01T00:00:00Z", status: "active" });
+    }
+    store.recoverInterrupted("2026-01-02T00:00:00Z");
+    const db = new DatabaseSync(filename, { readOnly: true });
+    try { assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE status = 'active'").get()?.n, 3); }
+    finally { db.close(); }
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });

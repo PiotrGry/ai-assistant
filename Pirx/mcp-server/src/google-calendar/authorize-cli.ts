@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 
-import { loadMcpServerConfig } from "../config.js";
+import { loadGoogleCalendarConfig } from "../config.js";
 import { authorizeGoogleCalendar } from "./authorize.js";
 
 const sshSession = process.env.SSH_CONNECTION !== undefined || process.env.SSH_TTY !== undefined;
@@ -26,7 +26,7 @@ try {
       }
     : {};
   await authorizeGoogleCalendar(
-    loadMcpServerConfig().googleCalendar,
+    loadGoogleCalendarConfig(),
     console.log,
     authorizationOptions,
   );

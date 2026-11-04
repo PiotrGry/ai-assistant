@@ -1,9 +1,23 @@
 name: pirx-dashboard
 
 services:
+  exporter:
+    image: python:3.14-slim
+    user: "1000:1000"
+    restart: unless-stopped
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: [python3, /app/snapshot.py, --source, /source, --destination, /snapshots, --watch]
+    volumes:
+      - ${HOME}/.local/share/pirx:/source:ro
+      - ${HOME}/.local/share/pirx-dashboard-export:/snapshots
+      - ./snapshot.py:/app/snapshot.py:ro
+
   grafana:
     image: grafana/grafana:13.0.8
-    # Same uid as the owner of ~/.local/share/pirx (drwx------), so the SQLite file and its WAL are readable.
+    # Only dedicated reporting snapshots are visible, never the live runtime directory.
     user: "1000:1000"
     restart: unless-stopped
     ports:
@@ -19,7 +33,7 @@ services:
       GF_LOG_MODE: console
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/pirx/pirx-models.json
     volumes:
-      - ${HOME}/.local/share/pirx:/var/lib/pirx
+      - ${HOME}/.local/share/pirx-dashboard-export:/var/lib/pirx:ro
       - ${HOME}/.local/share/pirx-grafana:/var/lib/grafana
       - ./provisioning:/etc/grafana/provisioning:ro
       - ./dashboards:/etc/grafana/dashboards/pirx:ro

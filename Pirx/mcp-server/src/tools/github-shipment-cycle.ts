@@ -1,3 +1,4 @@
+import type { RuntimeBindingCheck } from "../runtime-binding.js";
 import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
@@ -33,14 +34,15 @@ const outputSchema = z.object({ outcome: z.string(), taskId: z.string(), attempt
 
 function structured(value: unknown, isError = false) { return { content: [{ type: "text" as const, text: JSON.stringify(value) }], structuredContent: value, ...(isError ? { isError: true } : {}) }; }
 
-export function registerGitHubShipmentCycleTool(server: McpServer, options: { readonly config: GitHubConfig | undefined; readonly transport: GitHubShipmentPocTransport | undefined; readonly authorizationSecret: string | undefined; readonly environment: NodeJS.ProcessEnv; readonly configurationError?: string }): void {
+export function registerGitHubShipmentCycleTool(server: McpServer, options: { readonly config: GitHubConfig | undefined; readonly transport: GitHubShipmentPocTransport | undefined; readonly authorizationSecret: string | undefined; readonly environment: NodeJS.ProcessEnv; readonly databasePath: string | undefined; readonly runtimeConfigurationError?: string; readonly checkBinding?: RuntimeBindingCheck; readonly configurationError?: string }): void {
   server.registerTool("github_shipment_cycle", { title: "Run the durable GitHub shipment cycle", description: "Run the production Task/Attempt CI recovery boundary: create or reuse one feature PR, correlate exact CI, record bounded failure evidence and create one retry Attempt, or record exact-green recovery without merging. This tool never merges a pull request, creates a release PR, dispatches workflows, or deploys.", inputSchema, outputSchema, annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: true } }, async (input, context) => {
     const correlationId = input.correlationId ?? randomUUID();
     const authorization = verifyHostAuthorization(options.authorizationSecret, context.mcpReq._meta, "github_shipment_cycle", input);
     if (authorization === undefined) return structured({ outcome: "worker_authentication_required", taskId: input.taskId, attemptId: input.attemptId, eventId: input.eventId, message: "This shipment mutation requires host authorization for the exact cycle arguments." }, true);
     if (options.config === undefined || options.transport === undefined) return structured({ outcome: "unknown", taskId: input.taskId, attemptId: input.attemptId, eventId: input.eventId, message: options.configurationError ?? "GitHub shipment cycle is unavailable because GitHub is not configured." }, true);
+    if (options.databasePath === undefined) return structured({ outcome: "unconfigured", taskId: input.taskId, attemptId: input.attemptId, eventId: input.eventId, message: options.runtimeConfigurationError ?? "Runtime SQLite is not configured." }, true);
     let store: RuntimeSqliteStore;
-    try { store = RuntimeSqliteStore.open({ environment: options.environment, mode: "existing" }); }
+    try { options.checkBinding?.(); store = RuntimeSqliteStore.open({ filename: options.databasePath, environment: options.environment, mode: "existing" }); }
     catch (error: unknown) {
       return structured({ outcome: "unconfigured", taskId: input.taskId, attemptId: input.attemptId, eventId: input.eventId, message: error instanceof Error ? error.message : "Runtime SQLite could not be opened." }, true);
     }

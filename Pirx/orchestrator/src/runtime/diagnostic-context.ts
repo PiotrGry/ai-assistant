@@ -2,8 +2,9 @@
 export function diagnosticContext(value: unknown): unknown {
   const seen = new WeakSet<object>();
   function clean(item: unknown, key = ""): unknown {
-    if (/^(?:token|access.?token|refresh.?token|secret|password|authorization|cookie|prompt|stdout|stderr|body|payload|checkpoint)$/iu.test(key)) return "[REDACTED]";
+    if (/^(?:token|access.?token|refresh.?token|secret|password|api.?key|authorization|cookie|prompt|stdout|stderr|body|payload|checkpoint)$/iu.test(key)) return "[REDACTED]";
     if (typeof item === "string") return item
+      .replace(/("(?:token|access[_-]?token|refresh[_-]?token|secret|password|authorization|cookie|api[_-]?key)"\s*:\s*)"(?:[^"\\]|\\.)*"/giu, '$1"[REDACTED]"')
       .replace(/\bBearer\s+\S+/giu, "Bearer [REDACTED]")
       .replace(/\b(?:gh[pousr]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,})/gu, "[REDACTED]")
       .replace(/\b(token|secret|password|api[_-]?key)\s*[:=]\s*[^\s,;]+/giu, "$1=[REDACTED]");

@@ -48,6 +48,28 @@ function summarizeDiagnosticResult(value: unknown, maxCharacters: number, toolNa
     return summary.length <= maxCharacters && (low > 0 || text.length === 0) ? summary : undefined;
   }
 
+  if (toolName === "pirx_task_history" && Array.isArray(result.attempts)) {
+    const task = record(result.task);
+    const attempts: Record<string, unknown>[] = [];
+    const compact: Record<string, unknown> = { outcome: "success", truncated: true, task: { id: task?.id, state: task?.state }, attempts };
+    for (const item of result.attempts) {
+      const attempt = record(item);
+      if (attempt === undefined || !Number.isSafeInteger(attempt.ordinal)) break;
+      attempts.push({ id: attempt.id, ordinal: attempt.ordinal, state: attempt.state, result: attempt.result, diagnosticReference: attempt.diagnosticReference });
+      const hasMore = attempts.length < result.attempts.length || result.nextAfterOrdinal !== undefined;
+      if (hasMore) compact.nextAfterOrdinal = attempt.ordinal;
+      else delete compact.nextAfterOrdinal;
+      if (JSON.stringify(compact).length > maxCharacters) {
+        attempts.pop();
+        const last = attempts.at(-1);
+        if (last === undefined) return JSON.stringify({ outcome: "page_too_large", truncated: true, message: "Retry the same page with limit=1 and more context." });
+        compact.nextAfterOrdinal = last.ordinal;
+        break;
+      }
+    }
+    return JSON.stringify(compact);
+  }
+
   if (toolName === "pirx_orchestrator_status") {
     const snapshot = record(result.snapshot);
     if (snapshot === undefined || !Array.isArray(snapshot.diagnostics)) return undefined;

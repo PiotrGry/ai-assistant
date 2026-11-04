@@ -45,3 +45,31 @@ test("MCP requires exact host authorization before requesting service start", as
   assert.notEqual(allowed.isError, true); assert.equal(calls, 1);
   assert.equal((allowed.structuredContent as { outcome: string }).outcome, "start_requested");
 });
+
+
+test("service startup rejects an unverified active runtime before systemctl start", async () => {
+  let calls = 0;
+  const port = new SystemdOrchestratorServicePort({ platform: "linux", environment: { PIRX_ORCHESTRATOR_SERVICE_ENABLED: "true" },
+    checkBinding: () => { throw new Error("mismatch"); },
+    execute: (async () => { calls++; return { stdout: "", stderr: "" }; }) as unknown as typeof realExecute,
+  });
+  assert.equal((await port.start()).outcome, "unconfigured");
+  assert.equal(calls, 0);
+});
+
+test("invalid runtime profile rejects even an authorized service start", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-invalid-profile-"));
+  let calls = 0;
+  const secret = "test-service-secret";
+  const server = createMcpServer({ environment: { PIRX_ORCHESTRATOR_CONFIG: join(root, "missing.json") }, obsidianVault: new ObsidianVault(root), githubAuthorizationSecret: secret,
+    orchestratorServicePort: { async start() { calls++; return { outcome: "start_requested", message: "accepted" }; } },
+  });
+  const client = new Client({ name: "invalid-config", version: "1" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  context.after(async () => { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); });
+  await Promise.all([server.connect(b), client.connect(a)]);
+  const result = await client.callTool({ name: "pirx_orchestrator_start", arguments: {}, _meta: { [HOST_AUTHORIZATION_META_KEY]: createHostAuthorization(secret, "pirx_orchestrator_start", {}, "invalid-start") } });
+  assert.equal(result.isError, true);
+  assert.equal((result.structuredContent as { outcome: string }).outcome, "unconfigured");
+  assert.equal(calls, 0);
+});

@@ -1,3 +1,4 @@
+import type { RuntimeBindingCheck } from "../runtime-binding.js";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { diagnosticContext, RuntimeSqliteStore, RuntimeStorageError, type AttemptSnapshot } from "@pirx/orchestrator";
 import * as z from "zod/v4";
@@ -41,15 +42,16 @@ function summarizeAttempt(attempt: AttemptSnapshot) {
   };
 }
 
-export function registerTaskHistory(server: McpServer, filename: string | undefined): void {
+export function registerTaskHistory(server: McpServer, filename: string | undefined, configurationError?: string, checkBinding: RuntimeBindingCheck = () => {}): void {
   server.registerTool("pirx_task_history", {
     description: "Read the durable state and paged Attempts of a specific Task, including Tasks outside Queue. Use taskId or repository plus issueNumber. Pass nextAfterOrdinal for the next page. Use attemptId alone for its sanitized diagnostic, when available. No work is started.",
     inputSchema,
     annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
   }, async (input) => {
-    if (filename === undefined) return response({ outcome: "unconfigured", message: "PIRX_ORCHESTRATOR_DATABASE is not configured." });
+    if (filename === undefined) return response({ outcome: "unconfigured", message: configurationError ?? "Runtime SQLite is not configured." });
     let store: RuntimeSqliteStore | undefined;
     try {
+      checkBinding();
       const runtime = RuntimeSqliteStore.open({ filename, mode: "read_only", busyTimeoutMs: 1_000 });
       store = runtime;
       const snapshot = runtime.transaction<Record<string, unknown>>(() => {

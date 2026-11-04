@@ -104,3 +104,14 @@ a jego wymagania pamięciowe nie odpowiadają badanej klasie GPU 32 GB.
 
 Ustawienia domyślne: `think=true`, temperatura `0`, context `8192`,
 `num_predict=4096`, seed `42`, jedno powtórzenie 64 przypadków.
+
+
+## Pinned Ollama bootstrap
+
+Bootstrap no longer pipes a remote installer into a shell. Prefer a preinstalled
+Ollama release. Otherwise stage the official release archive on the benchmark
+host, set `BENCH_OLLAMA_ARCHIVE` to its absolute path and `BENCH_OLLAMA_SHA256`
+to the expected SHA-256 from a separately trusted release record. The checksum is
+checked before extraction into `/usr`; mismatch or missing values aborts. Use the
+archive for the host architecture and ensure tar supports its compression. Do not
+substitute a checksum calculated from an unverified download as provenance.

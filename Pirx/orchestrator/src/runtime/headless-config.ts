@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 
 import { PRODUCTION_RUNTIME_LIMITS, type ProductionRepositoryConfig } from "./production-runtime.js";
@@ -122,13 +123,24 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
   } as HeadlessOrchestratorConfig);
 }
 
-export async function loadHeadlessOrchestratorConfig(environment: NodeJS.ProcessEnv = process.env): Promise<HeadlessOrchestratorConfig> {
-  const filename = environment.PIRX_ORCHESTRATOR_CONFIG?.trim();
-  if (filename === undefined || filename.length === 0) throw new HeadlessConfigurationError("missing_configuration", "PIRX_ORCHESTRATOR_CONFIG must point to a configuration file.");
+export function readHeadlessOrchestratorConfig(environment: NodeJS.ProcessEnv = process.env): HeadlessOrchestratorConfig | undefined {
+  const explicit = environment.PIRX_ORCHESTRATOR_CONFIG;
+  const home = environment.HOME?.trim() || homedir();
+  const filename = explicit?.trim() ?? resolve(environment.XDG_CONFIG_HOME?.trim() || resolve(home, ".config"), "pirx", "orchestrator.json");
   if (!isAbsolute(filename)) throw new HeadlessConfigurationError("invalid_configuration", "PIRX_ORCHESTRATOR_CONFIG must be an absolute path.");
   let content: string;
-  try { content = await readFile(filename, "utf8"); } catch { throw new HeadlessConfigurationError("read_failure", "Headless orchestrator configuration could not be read."); }
+  try { content = readFileSync(filename, "utf8"); }
+  catch (error: unknown) {
+    if (explicit === undefined && (error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new HeadlessConfigurationError("read_failure", "Headless orchestrator configuration could not be read.");
+  }
   let parsed: unknown;
   try { parsed = JSON.parse(content); } catch { throw new HeadlessConfigurationError("invalid_configuration", "Headless orchestrator configuration is not valid JSON."); }
   return parseHeadlessOrchestratorConfig(parsed);
+}
+
+export async function loadHeadlessOrchestratorConfig(environment: NodeJS.ProcessEnv = process.env): Promise<HeadlessOrchestratorConfig> {
+  const config = readHeadlessOrchestratorConfig(environment);
+  if (config === undefined) throw new HeadlessConfigurationError("missing_configuration", "Configure pirx/orchestrator.json or set PIRX_ORCHESTRATOR_CONFIG.");
+  return config;
 }

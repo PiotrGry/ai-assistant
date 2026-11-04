@@ -1,3 +1,4 @@
+import { HeadlessConfigurationError, readHeadlessOrchestratorConfig, resolveRuntimeStoragePath, RuntimeStorageError } from "@pirx/orchestrator";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
@@ -15,8 +16,10 @@ export interface GoogleCalendarConfig {
 export interface McpServerConfig {
   readonly obsidianVaultPath: string | undefined;
   readonly orchestratorDatabasePath: string | undefined;
+  readonly orchestratorConfigurationError?: string;
   readonly resourceDatabasePath: string;
-  readonly googleCalendar: GoogleCalendarConfig;
+  readonly googleCalendar: GoogleCalendarConfig | undefined;
+  readonly googleCalendarConfigurationError?: string;
   readonly githubPocIssue: number | undefined;
   readonly githubPocConfigurationError: string | undefined;
 }
@@ -77,8 +80,44 @@ function defaultObsidianVault(): string | undefined {
 export function loadMcpServerConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): McpServerConfig {
-  const googleDirectory = resolve(homedir(), ".config", "pirx", "google-calendar");
   const dataHome = environment.XDG_DATA_HOME?.trim() || resolve(homedir(), ".local", "share");
+  let googleCalendar: GoogleCalendarConfig | undefined;
+  let googleCalendarConfigurationError: string | undefined;
+  try { googleCalendar = loadGoogleCalendarConfig(environment); }
+  catch (error: unknown) { googleCalendarConfigurationError = error instanceof Error ? error.message : "Google Calendar configuration is invalid."; }
+
+  const githubPocIssue = optionalPositiveInteger(environment.PIRX_GITHUB_POC_ISSUE);
+
+  let orchestratorDatabasePath: string | undefined;
+  let orchestratorConfigurationError: string | undefined;
+  try {
+    const runtime = readHeadlessOrchestratorConfig(environment);
+    if (runtime !== undefined || (environment.PIRX_ORCHESTRATOR_SERVICE_ENABLED !== "true" && optionalPath(environment.PIRX_ORCHESTRATOR_DATABASE) !== undefined)) {
+      orchestratorDatabasePath = resolveRuntimeStoragePath(environment, runtime?.databasePath);
+    } else {
+      orchestratorConfigurationError = "Configure pirx/orchestrator.json or set PIRX_ORCHESTRATOR_CONFIG to the daemon's profile.";
+    }
+  } catch (error: unknown) {
+    orchestratorConfigurationError = error instanceof HeadlessConfigurationError || error instanceof RuntimeStorageError
+      ? error.message
+      : "Orchestrator runtime configuration could not be verified.";
+  }
+
+  return {
+    obsidianVaultPath:
+      optionalPath(environment.PIRX_OBSIDIAN_VAULT) ?? defaultObsidianVault(),
+    orchestratorDatabasePath,
+    ...(orchestratorConfigurationError === undefined ? {} : { orchestratorConfigurationError }),
+    resourceDatabasePath: optionalPath(environment.PIRX_GPU_DB) ?? resolve(dataHome, "pirx", "gpu.sqlite"),
+    googleCalendar,
+    ...(googleCalendarConfigurationError === undefined ? {} : { googleCalendarConfigurationError }),
+    githubPocIssue: githubPocIssue.value,
+    githubPocConfigurationError: githubPocIssue.error,
+  };
+}
+
+export function loadGoogleCalendarConfig(environment: NodeJS.ProcessEnv = process.env): GoogleCalendarConfig {
+  const googleDirectory = resolve(homedir(), ".config", "pirx", "google-calendar");
   const timeZone =
     environment.PIRX_GOOGLE_CALENDAR_TIMEZONE?.trim() || configuredTimeZone();
 
@@ -90,34 +129,24 @@ export function loadMcpServerConfig(
     );
   }
 
-  const githubPocIssue = optionalPositiveInteger(environment.PIRX_GITHUB_POC_ISSUE);
-
   return {
-    obsidianVaultPath:
-      optionalPath(environment.PIRX_OBSIDIAN_VAULT) ?? defaultObsidianVault(),
-    orchestratorDatabasePath: optionalPath(environment.PIRX_ORCHESTRATOR_DATABASE),
-    resourceDatabasePath: optionalPath(environment.PIRX_GPU_DB) ?? resolve(dataHome, "pirx", "gpu.sqlite"),
-    googleCalendar: {
-      credentialsFile: resolve(
-        environment.PIRX_GOOGLE_CREDENTIALS_FILE?.trim() ||
-          resolve(googleDirectory, "credentials.json"),
-      ),
-      tokenFile: resolve(
-        environment.PIRX_GOOGLE_TOKEN_FILE?.trim() || resolve(googleDirectory, "token.json"),
-      ),
-      defaultCalendarId:
-        environment.PIRX_GOOGLE_CALENDAR_ID?.trim() || "primary",
-      defaultTimeZone: timeZone,
-      requestTimeoutMs: positiveInteger(
-        "PIRX_GOOGLE_TIMEOUT_MS",
-        environment.PIRX_GOOGLE_TIMEOUT_MS ?? "10000",
-      ),
-      authorizationTimeoutMs: positiveInteger(
-        "PIRX_GOOGLE_AUTH_TIMEOUT_MS",
-        environment.PIRX_GOOGLE_AUTH_TIMEOUT_MS ?? "300000",
-      ),
-    },
-    githubPocIssue: githubPocIssue.value,
-    githubPocConfigurationError: githubPocIssue.error,
+    credentialsFile: resolve(
+      environment.PIRX_GOOGLE_CREDENTIALS_FILE?.trim() ||
+        resolve(googleDirectory, "credentials.json"),
+    ),
+    tokenFile: resolve(
+      environment.PIRX_GOOGLE_TOKEN_FILE?.trim() || resolve(googleDirectory, "token.json"),
+    ),
+    defaultCalendarId:
+      environment.PIRX_GOOGLE_CALENDAR_ID?.trim() || "primary",
+    defaultTimeZone: timeZone,
+    requestTimeoutMs: positiveInteger(
+      "PIRX_GOOGLE_TIMEOUT_MS",
+      environment.PIRX_GOOGLE_TIMEOUT_MS ?? "10000",
+    ),
+    authorizationTimeoutMs: positiveInteger(
+      "PIRX_GOOGLE_AUTH_TIMEOUT_MS",
+      environment.PIRX_GOOGLE_AUTH_TIMEOUT_MS ?? "300000",
+    ),
   };
 }

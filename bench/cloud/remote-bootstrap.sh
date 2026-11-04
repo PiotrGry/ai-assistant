@@ -40,8 +40,26 @@ if (( ${#missing_packages[@]} > 0 )); then
 fi
 
 if ! command -v ollama >/dev/null 2>&1; then
-  echo "Instaluję Ollamę..."
-  curl -fsSL https://ollama.com/install.sh | sh
+  archive="${BENCH_OLLAMA_ARCHIVE:-}"
+  expected_digest="${BENCH_OLLAMA_SHA256:-}"
+  if [[ ! -f "$archive" || ! "$expected_digest" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "Stage a pinned Ollama release archive and set BENCH_OLLAMA_ARCHIVE and BENCH_OLLAMA_SHA256, or install Ollama beforehand." >&2
+    exit 1
+  fi
+  actual_digest="$(sha256sum -- "$archive")"
+  actual_digest="${actual_digest%% *}"
+  if [[ "${actual_digest,,}" != "${expected_digest,,}" ]]; then
+    echo "Ollama archive checksum mismatch; installation refused." >&2
+    exit 1
+  fi
+  # Inspect the pinned artifact before privileged extraction; never run a downloaded shell script.
+  archive_entries="$(tar -tf "$archive")"
+  if printf '%s\n' "$archive_entries" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+    echo "Unsafe archive path; installation refused." >&2
+    exit 1
+  fi
+  tar --no-same-owner -xf "$archive" -C /usr
+  command -v ollama >/dev/null 2>&1 || { echo "Pinned archive did not provide Ollama." >&2; exit 1; }
 fi
 
 mkdir -p "$MODELS_DIR" "$REMOTE_ROOT/bench/cloud-runs"

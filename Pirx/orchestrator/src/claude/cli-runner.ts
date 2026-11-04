@@ -1,3 +1,4 @@
+import { diagnosticContext } from "../runtime/diagnostic-context.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -408,7 +409,7 @@ export class ClaudeCodeCliRunner {
     const failed = (...args: Parameters<typeof failure>): ClaudeRoundTripFailure => {
       const result = failure(...args);
       const envelope = isRecord(parsed) ? parsed : {};
-      const evidence = [envelope.subtype, envelope.errors, envelope.error, envelope.message, stderr].filter((value) => value !== undefined && value !== "").map((value) => typeof value === "string" ? value : JSON.stringify(value)).join("\n");
+      const evidence = [envelope.subtype, envelope.errors, envelope.error, envelope.message, stderr].filter((value) => value !== undefined && value !== "").map((value) => typeof value === "string" ? value : JSON.stringify(diagnosticContext(value))).join("\n");
       return { ...result, diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, { ...result.diagnostic, stage: "process", ...(evidence ? { providerMessage: evidence } : {}), ...(outputLimitExceeded ? { providerMessageTruncated: true } : {}) }) };
     };
     if (trigger !== undefined) return failed(trigger, input.requestId, input.startedAt, exitCode);

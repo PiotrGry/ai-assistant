@@ -96,6 +96,8 @@ export class SessionLogger {
           createdAt: startedAt,
           payload: {
             schema_version: 1,
+            process_id: process.pid,
+            process_hostname: hostname(),
             node_version: process.version,
             model: config.model,
             base_url: config.baseUrl,

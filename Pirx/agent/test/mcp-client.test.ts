@@ -20,6 +20,8 @@ test("chat forwards runtime configuration to the real MCP child and can pause/re
   new OrchestratorControlRepository(store).recordDiagnostic({ schemaVersion: 1, event: "queue", outcome: "invalid_snapshot", reason: "Duplicate Queue Order=10 on closed Issues #48 and #189", details: { provider: "github", affectedIssues: [48, 189], correlationId: "correlation-243", token: "secret-value", context: 'quote " slash \\ unicode Ż😀 '.repeat(80) } }, at);
   const saved = process.env.PIRX_ORCHESTRATOR_DATABASE;
   const savedConfig = process.env.PIRX_CHAT_CONFIG;
+  const savedXdgConfig = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = root;
   const configFile = join(root, "chat.json");
   await writeFile(configFile, JSON.stringify({ PIRX_ORCHESTRATOR_DATABASE: filename }));
   process.env.PIRX_CHAT_CONFIG = configFile;
@@ -29,6 +31,7 @@ test("chat forwards runtime configuration to the real MCP child and can pause/re
   context.after(async () => {
     await client.close(); store.close();
     if (saved === undefined) delete process.env.PIRX_ORCHESTRATOR_DATABASE; else process.env.PIRX_ORCHESTRATOR_DATABASE = saved;
+    if (savedXdgConfig === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = savedXdgConfig;
     if (savedConfig === undefined) delete process.env.PIRX_CHAT_CONFIG; else process.env.PIRX_CHAT_CONFIG = savedConfig;
     await rm(root, { recursive: true, force: true });
   });

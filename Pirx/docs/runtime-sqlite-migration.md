@@ -1,8 +1,14 @@
 # Local runtime SQLite migration
 
-Use the same Pirx build for the daemon and chat/MCP. Confirm the daemon JSON's
-`databasePath` and the chat's `PIRX_ORCHESTRATOR_DATABASE` identify the same
-runtime file. The runtime file must be separate from `PIRX_STORAGE_FILE`.
+Use the same Pirx build for the daemon and chat/MCP. Daemon and MCP share `$XDG_CONFIG_HOME/pirx/orchestrator.json`
+(default `~/.config/pirx/orchestrator.json`). If the service uses a custom
+`PIRX_ORCHESTRATOR_CONFIG`, set the same absolute filename in the chat
+profile. Set `databasePath` in that shared JSON. Remove the legacy
+`PIRX_ORCHESTRATOR_DATABASE` from chat.json once the shared profile is used.
+If both are present, they must identify the same path. The runtime file
+must be separate from `PIRX_STORAGE_FILE`. Standalone MCP clients can still
+specify a runtime file directly when the orchestrator service is disabled
+and the shared profile is absent.
 
 1. Pause work and let the current Attempt finish or checkpoint. Stop
    `pirx-orchestrator.service` and close clients or other tools that can write

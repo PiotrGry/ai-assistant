@@ -296,7 +296,7 @@ function sameStorageFile(first: string, second: string): boolean {
   }
 }
 
-function storageFilename(environment: NodeJS.ProcessEnv, filename?: string): string {
+export function resolveRuntimeStoragePath(environment: NodeJS.ProcessEnv, filename?: string): string {
   const configured = environment.PIRX_ORCHESTRATOR_DATABASE?.trim();
   const selected = filename ?? configured;
   if (!selected) throw new RuntimeStorageError("invalid_configuration", "Set PIRX_ORCHESTRATOR_DATABASE or configure an explicit runtime SQLite path.");
@@ -318,12 +318,12 @@ function storageFilename(environment: NodeJS.ProcessEnv, filename?: string): str
 }
 
 export function defaultRuntimeStoragePath(environment: NodeJS.ProcessEnv = process.env): string {
-  return storageFilename(environment);
+  return resolveRuntimeStoragePath(environment);
 }
 
 /** Save one checked snapshot next to the runtime before an explicit upgrade. */
 export async function backupRuntimeBeforeMigration(filename: string, environment: NodeJS.ProcessEnv): Promise<string | undefined> {
-  const sourcePath = storageFilename(environment, filename);
+  const sourcePath = resolveRuntimeStoragePath(environment, filename);
   let source: DatabaseSync | undefined;
   let copy: DatabaseSync | undefined;
   let directory: string | undefined;
@@ -2858,7 +2858,7 @@ export class RuntimeSqliteStore {
 
   public static open(options: RuntimeSqliteStoreOptions = {}): RuntimeSqliteStore {
     if (options.filename !== undefined && options.filename.trim().length === 0) throw new RuntimeStorageError("invalid_configuration", "SQLite filename must not be empty.");
-    const filename = storageFilename(options.environment ?? process.env, options.filename?.trim());
+    const filename = resolveRuntimeStoragePath(options.environment ?? process.env, options.filename?.trim());
     const timeout = busyTimeout(options.busyTimeoutMs);
     const mode = options.mode ?? "migrate";
     let database: DatabaseSync | undefined;

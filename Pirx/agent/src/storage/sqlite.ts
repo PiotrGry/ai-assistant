@@ -1,3 +1,4 @@
+import { hostname } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 
 export const STORAGE_SCHEMA_VERSION = 2;
@@ -360,36 +361,36 @@ export class SqliteStore {
 
   recoverInterrupted(endedAt: string): void {
     this.#assertOpen();
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
-      this.#database
-        .prepare(
-          `UPDATE operations
-           SET ended_at = ?,
-               status = CASE WHEN kind = 'mcp' THEN 'unknown' ELSE 'failed' END,
-               error = 'process_restart'
-           WHERE status = 'started'`,
-        )
-        .run(endedAt);
-      this.#database
-        .prepare(
-          `UPDATE turns
-           SET ended_at = ?, status = 'failed'
-           WHERE status = 'started'`,
-        )
-        .run(endedAt);
-      this.#database
-        .prepare(
-          `UPDATE sessions
-           SET ended_at = ?, status = 'failed'
-           WHERE status = 'active'`,
-        )
-        .run(endedAt);
-      this.#database.exec("COMMIT");
-    } catch (error) {
-      this.#database.exec("ROLLBACK");
-      throw error;
-    }
+    this.transaction(() => {
+      const sessions = this.#database.prepare(`
+        SELECT s.id, json_extract(e.payload_json, '$.process_id') AS pid,
+          json_extract(e.payload_json, '$.process_hostname') AS host
+        FROM sessions s JOIN run_environments e ON e.id = s.environment_id
+        WHERE s.status = 'active'`).all() as Array<{ id: string; pid: unknown; host: unknown }>;
+      for (const session of sessions) {
+        // Unknown ownership, another host, or a live/reused PID is never proof of a crash.
+        if (session.host !== hostname() || typeof session.pid !== "number" || !Number.isSafeInteger(session.pid) || session.pid <= 0) continue;
+        try { process.kill(session.pid, 0); continue; }
+        catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue; }
+        this.#database.prepare(`UPDATE operations SET ended_at = ?,
+          status = CASE WHEN kind = 'mcp' THEN 'unknown' ELSE 'failed' END, error = 'process_restart'
+          WHERE session_id = ? AND status = 'started'`).run(endedAt, session.id);
+        this.#database.prepare("UPDATE turns SET ended_at = ?, status = 'failed' WHERE session_id = ? AND status = 'started'").run(endedAt, session.id);
+        this.#database.prepare("UPDATE sessions SET ended_at = ?, status = 'failed' WHERE id = ? AND status = 'active'").run(endedAt, session.id);
+      }
+    });
+  }
+
+  unresolvedActions(target: string, toolName: string): Array<{ mutationId: string; attempt: number; arguments: Record<string, unknown> }> {
+    this.#assertOpen();
+    const rows = this.#database.prepare(`
+      SELECT e.mutation_id, e.attempt, o.payload_json
+      FROM action_events e JOIN operations o ON o.id = e.operation_id
+      WHERE e.target = ? AND json_extract(o.payload_json, '$.tool_name') = ?
+        AND e.state IN ('planned', 'started', 'unknown')
+        AND NOT EXISTS (SELECT 1 FROM action_events newer WHERE newer.mutation_id = e.mutation_id AND newer.rowid > e.rowid)
+      ORDER BY e.rowid DESC`).all(target, toolName) as Array<{ mutation_id: string; attempt: number; payload_json: string }>;
+    return rows.map((row) => ({ mutationId: row.mutation_id, attempt: row.attempt, arguments: JSON.parse(row.payload_json).arguments as Record<string, unknown> }));
   }
 
   finishTurn(
