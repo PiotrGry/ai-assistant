@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
-import { RuntimeSqliteStore, diagnosticContext } from "@pirx/orchestrator";
+import { RuntimeSqliteStore, RuntimeStorageError, diagnosticContext } from "@pirx/orchestrator";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -88,10 +88,13 @@ export function registerConversationLog(server: McpServer, filename: string | un
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, async ({ taskId, afterRow }) => {
     if (!filename) return { content: [{ type: "text", text: "PIRX_ORCHESTRATOR_DATABASE is not configured" }], isError: true };
-    const store = RuntimeSqliteStore.open({ filename });
+    let store: RuntimeSqliteStore | undefined;
     try {
+      store = RuntimeSqliteStore.open({ filename, mode: "read_only" });
       const rows = store.database.prepare("SELECT rowid AS afterRow, * FROM runtime_agent_questions WHERE task_id = ? AND rowid > ? ORDER BY rowid LIMIT 1").all(taskId, afterRow);
       return { content: [{ type: "text", text: JSON.stringify(rows) }] };
-    } finally { store.close(); }
+    } catch (error: unknown) {
+      return { content: [{ type: "text", text: error instanceof RuntimeStorageError ? error.message : "Advisor history could not be read." }], isError: true };
+    } finally { store?.close(); }
   });
 }

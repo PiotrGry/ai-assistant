@@ -1,3 +1,4 @@
+import { RuntimeSqliteStore } from "../src/runtime/sqlite.js";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -257,6 +258,7 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) test(`CLI drains gracefully
   try {
     const filename = join(directory, "config.json");
     await writeFile(filename, JSON.stringify(validConfig(directory)), { mode: 0o600 });
+    RuntimeSqliteStore.open({ filename: parseHeadlessOrchestratorConfig(validConfig(directory)).databasePath }).close();
     const host = new FixtureHost(filename, signal);
     assert.equal(await runHeadlessCli(host, { queue: { reconcile: async () => ({ outcome: "synchronized" }) }, delivery: { reconcile: async () => ({ outcome: "idle", allowWorkerCycle: true }) }, githubConfigLoader: () => ({ token: "test-only", owner: "PiotrGry", repository: "ai-assistant", projectOwner: "PiotrGry", projectNumber: 3, apiUrl: "https://api.github.com", timeoutMs: 10_000 }) }), 0);
     assert.equal(host.exitCode, 0);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -61,6 +61,7 @@ test("Claude asks scoped Pirx MCP, receives an answer and chat reads the durable
 
 test("daemon-launched advisor stdio exposes only ask_pirx and rejects mismatched bindings", async () => {
   const root = await mkdtemp(join(tmpdir(), "pirx-advisor-stdio-"));
+  RuntimeSqliteStore.open({ filename: join(root, "runtime.sqlite") }).close();
   const client = new Client({ name: "worker", version: "1" });
   const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../../dist/advisor-cli.js", import.meta.url)), join(root, "runtime.sqlite"), "absent-task", "absent-attempt"], stderr: "pipe" });
   let stderr = "";
@@ -72,4 +73,20 @@ test("daemon-launched advisor stdio exposes only ask_pirx and rejects mismatched
     assert.equal(result.isError, true);
     assert.match(JSON.stringify(result), /binding mismatch/);
   } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("Advisor history reports a missing runtime database without creating it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-advisor-missing-"));
+  const filename = join(root, "runtime.sqlite");
+  const server = new McpServer({ name: "advisor-history", version: "1" });
+  registerConversationLog(server, filename);
+  const client = new Client({ name: "reader", version: "1" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  try {
+    const result = await client.callTool({ name: "pirx_agent_conversation", arguments: { taskId: "missing" } });
+    assert.equal(result.isError, true);
+    assert.match(JSON.stringify(result.content), /database does not exist/u);
+    await assert.rejects(access(filename), { code: "ENOENT" });
+  } finally { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });

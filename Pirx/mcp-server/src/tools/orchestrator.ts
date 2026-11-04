@@ -40,10 +40,10 @@ export class SqliteExecutionObservabilityToolPort implements ExecutionObservabil
     if (!existsSync(this.#filename)) return { outcome: "storage_error", message: "Orchestrator runtime database does not exist. Start the configured orchestrator service first." };
     let store: RuntimeSqliteStore | undefined;
     try {
-      store = RuntimeSqliteStore.open({ filename: this.#filename, busyTimeoutMs: 1_000 });
+      store = RuntimeSqliteStore.open({ filename: this.#filename, busyTimeoutMs: 1_000, mode: "read_only" });
       return new ExecutionObservabilityQueryService(store).query(input);
-    } catch {
-      return { outcome: "storage_error", message: "Orchestrator runtime database is unavailable." };
+    } catch (error: unknown) {
+      return { outcome: "storage_error", message: error instanceof RuntimeStorageError ? error.message : "Orchestrator runtime database is unavailable." };
     } finally {
       try { store?.close(); } catch { /* preserve bounded query result */ }
     }
@@ -54,13 +54,13 @@ export class SqliteOrchestratorControlToolPort implements OrchestratorControlToo
   readonly #filename: string;
   public constructor(filename: string) { this.#filename = filename; }
   public status(now: UtcTimestamp, staleAfterMs: number): StorageResult<OrchestratorStatusSnapshot> {
-    const result = this.#withStore((_store, repository) => repository.status(now, staleAfterMs));
+    const result = this.#withStore((_store, repository) => repository.status(now, staleAfterMs), "read_only");
     if (result.outcome === "storage_error") {
       console.error(JSON.stringify({ event: "orchestrator_status_read_failed", code: result.outcome, reason: result.message }));
     }
     return result;
   }
-  public diagnostic(sequence: number, offset: number, length: number): StorageResult<OrchestratorDiagnosticChunk> { return this.#withStore((_store, repository) => repository.diagnostic(sequence, offset, length)); }
+  public diagnostic(sequence: number, offset: number, length: number): StorageResult<OrchestratorDiagnosticChunk> { return this.#withStore((_store, repository) => repository.diagnostic(sequence, offset, length), "read_only"); }
   public request(input: OrchestratorControlRequest): OrchestratorControlRequestResult {
     const value = this.#withStore((_store, repository) => ({ outcome: "success" as const, value: repository.request(input) }));
     return value.outcome === "success" ? value.value : { outcome: "storage_error", operationId: input.operationId, message: value.message };
@@ -69,10 +69,10 @@ export class SqliteOrchestratorControlToolPort implements OrchestratorControlToo
     const value = this.#withStore((store) => ({ outcome: "success" as const, value: new HostShutdownRepository(store).command(input) }));
     return value.outcome === "success" ? value.value : { outcome: "storage_error", operationId: input.operationId, message: value.message };
   }
-  #withStore<T>(operation: (store: RuntimeSqliteStore, repository: OrchestratorControlRepository) => StorageResult<T>): StorageResult<T> {
+  #withStore<T>(operation: (store: RuntimeSqliteStore, repository: OrchestratorControlRepository) => StorageResult<T>, mode: "read_only" | "existing" = "existing"): StorageResult<T> {
     if (!existsSync(this.#filename)) return { outcome: "storage_error", message: "Orchestrator runtime database does not exist. Start the configured orchestrator service first." };
     let store: RuntimeSqliteStore | undefined;
-    try { store = RuntimeSqliteStore.open({ filename: this.#filename, busyTimeoutMs: 1_000 }); return operation(store, new OrchestratorControlRepository(store)); }
+    try { store = RuntimeSqliteStore.open({ filename: this.#filename, busyTimeoutMs: 1_000, mode }); return operation(store, new OrchestratorControlRepository(store)); }
     catch (error: unknown) { return { outcome: "storage_error", message: error instanceof RuntimeStorageError ? error.message : "Orchestrator runtime database is unavailable." }; }
     finally { try { store?.close(); } catch { /* preserve bounded operation result */ } }
   }

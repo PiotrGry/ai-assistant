@@ -17,7 +17,7 @@ import { ExecutionObservabilityProjector } from "./runtime/execution-observabili
 import { ProductionRuntime } from "./runtime/production-runtime.js";
 import { ReleaseMergeCoordinator } from "./runtime/release-merge.js";
 import { ShipmentCycleCoordinator } from "./runtime/shipment-coordinator.js";
-import { RuntimeSqliteStore } from "./runtime/sqlite.js";
+import { RuntimeSqliteStore, RuntimeStorageError } from "./runtime/sqlite.js";
 
 export interface HeadlessCliProcess {
   readonly env: NodeJS.ProcessEnv;
@@ -43,7 +43,14 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
   let runtime: ProductionRuntime | undefined;
   try {
     const config = await loadHeadlessOrchestratorConfig(host.env);
-    const store = RuntimeSqliteStore.open({ filename: config.databasePath, environment: host.env });
+    if (host.argv.slice(2).includes("--migrate")) {
+      const store = RuntimeSqliteStore.open({ filename: config.databasePath, environment: host.env, mode: "migrate" });
+      store.close();
+      writeEvent(host.stdout, { schemaVersion: 1, event: "runtime_migrated", outcome: "success" });
+      host.exitCode = 0;
+      return 0;
+    }
+    const store = RuntimeSqliteStore.open({ filename: config.databasePath, environment: host.env, mode: "existing" });
     const worker = new ProductionClaudeWorker({ store, repositories: config.repositories });
     runtime = new ProductionRuntime(store, {
       workerId: config.workerId, provider: config.provider, workerCapabilities: config.workerCapabilities,
@@ -94,8 +101,8 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
     return result.exitCode;
   } catch (error: unknown) {
     try { runtime?.close(); } catch { /* preserve the original bounded failure */ }
-    const code = error instanceof HeadlessConfigurationError ? error.code : "startup_failure";
-    writeEvent(host.stderr, { schemaVersion: 1, event: "startup_failed", outcome: code });
+    const code = error instanceof HeadlessConfigurationError || error instanceof RuntimeStorageError ? error.code : "startup_failure";
+    writeEvent(host.stderr, { schemaVersion: 1, event: "startup_failed", outcome: code, ...(error instanceof RuntimeStorageError ? { reason: error.message } : {}) });
     host.exitCode = 1;
     return 1;
   }

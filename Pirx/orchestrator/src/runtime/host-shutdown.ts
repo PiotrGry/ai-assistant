@@ -221,7 +221,7 @@ export class SqliteHeadlessHostShutdownPort implements HeadlessHostShutdownPort 
     const result = await this.#adapter.powerOff();
     let store: RuntimeSqliteStore | undefined;
     try {
-      store = RuntimeSqliteStore.open({ filename: this.#databasePath, busyTimeoutMs: 1_000 });
+      store = RuntimeSqliteStore.open({ filename: this.#databasePath, busyTimeoutMs: 1_000, mode: "existing" });
       const repository = new HostShutdownRepository(store);
       repository.transition("poweroff_requested", result.outcome === "accepted" ? "accepted" : "failed", this.#now(), result.outcome === "accepted" ? "poweroff_command_accepted" : "poweroff_command_rejected");
     } catch { /* poweroff_requested is the fail-closed durable fallback */ }

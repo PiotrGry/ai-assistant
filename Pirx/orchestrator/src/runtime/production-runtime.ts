@@ -175,7 +175,7 @@ export class ProductionRuntime {
     this.#scheduler = new SingleWorkerScheduler(schedulerOptions);
   }
 
-  public static openWithStorage(options: ProductionRuntimeOptions, storageOptions: RuntimeSqliteStoreOptions = {}): ProductionRuntime { return new ProductionRuntime(RuntimeSqliteStore.open(storageOptions), options); }
+  public static openWithStorage(options: ProductionRuntimeOptions, storageOptions: RuntimeSqliteStoreOptions = {}): ProductionRuntime { return new ProductionRuntime(RuntimeSqliteStore.open({ ...storageOptions, mode: "existing" }), options); }
   public get store(): RuntimeSqliteStoreType { return this.#store; }
   public get scheduler(): SingleWorkerScheduler { return this.#scheduler; }
   public get clock(): { now(): UtcTimestamp } { return this.#clock; }

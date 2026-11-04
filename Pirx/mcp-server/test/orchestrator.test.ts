@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
-import { createTask, createWorkerFailureDiagnostic, RuntimeSqliteStore, transitionAttempt, transitionTask } from "@pirx/orchestrator";
+import { createTask, createWorkerFailureDiagnostic, RUNTIME_STORAGE_SCHEMA_VERSION, RuntimeSqliteStore, transitionAttempt, transitionTask } from "@pirx/orchestrator";
 import type { AttemptId, TaskId, ExecutionReportQuery, HostShutdownCommand, OrchestratorControlRequest, OrchestratorStatusSnapshot, UtcTimestamp } from "@pirx/orchestrator";
 
 import { createHostAuthorization, HOST_AUTHORIZATION_META_KEY } from "../src/authorization.js";
@@ -108,7 +108,9 @@ test("MCP reads a blocked Attempt diagnostic from SQLite and distinguishes a fai
   const client = new Client({ name: "pirx-blocked-status-test", version: "0.1.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
-    const result = await client.callTool({ name: "pirx_orchestrator_status", arguments: {} });
+    store.database.exec("BEGIN IMMEDIATE");
+    const result = await client.callTool({ name: "pirx_orchestrator_status", arguments: {} })
+      .finally(() => store.database.exec("ROLLBACK"));
     assert.notEqual(result.isError, true);
     const snapshot = (result.structuredContent as { snapshot: OrchestratorStatusSnapshot }).snapshot;
     assert.equal(snapshot.attentionRequired?.task.id, task.value.id);
@@ -125,5 +127,11 @@ test("MCP reads a blocked Attempt diagnostic from SQLite and distinguishes a fai
     assert.equal(log.mock.callCount(), 1);
     assert.match(String(log.mock.calls[0]?.arguments[0]), /orchestrator_status_read_failed/u);
     assert.doesNotMatch(JSON.stringify([failure, log.mock.calls[0]?.arguments]), /private-fixture/u);
+
+    store.database.prepare("DELETE FROM runtime_schema_migrations WHERE version = ?").run(RUNTIME_STORAGE_SCHEMA_VERSION);
+    const incompatible = await client.callTool({ name: "pirx_orchestrator_status", arguments: {} });
+    assert.equal(incompatible.isError, true);
+    assert.match(JSON.stringify(incompatible.structuredContent), /Incompatible SQLite runtime schema/u);
+    assert.equal(store.database.prepare("SELECT version FROM runtime_schema_migrations WHERE version = ?").get(RUNTIME_STORAGE_SCHEMA_VERSION), undefined);
   } finally { await client.close(); await server.close(); }
 });

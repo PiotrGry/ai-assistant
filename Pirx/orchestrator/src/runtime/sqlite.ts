@@ -122,6 +122,7 @@ export interface RuntimeSqliteStoreOptions {
   readonly filename?: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly busyTimeoutMs?: number;
+  readonly mode?: "read_only" | "existing" | "migrate";
 }
 
 export interface TaskCompareAndSet {
@@ -902,6 +903,16 @@ const MIGRATIONS: readonly string[] = [
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
+
+function assertCompatibleRuntimeSchema(database: DatabaseSync): void {
+  const ledger = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_schema_migrations'").get();
+  const rows = ledger === undefined ? [] : database.prepare("SELECT version FROM runtime_schema_migrations ORDER BY version").all() as Array<{ version: number }>;
+  if (rows.length !== RUNTIME_STORAGE_SCHEMA_VERSION || rows.some((row, index) => row.version !== index + 1)) {
+    throw new RuntimeStorageError("storage_error", `Incompatible SQLite runtime schema (expected ${RUNTIME_STORAGE_SCHEMA_VERSION}). Use the matching build or the explicit migration procedure.`);
+  }
+  const tables = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('runtime_tasks', 'runtime_attempts')").all();
+  if (tables.length !== 2) throw new RuntimeStorageError("storage_error", "SQLite runtime schema is incomplete.");
+}
 
 function bootstrap(database: DatabaseSync, timeoutMs: number): void {
   database.exec(`PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = ${timeoutMs};`);
@@ -2754,6 +2765,7 @@ export class WorkerAvailabilityRepository {
 export class RuntimeSqliteStore {
   readonly #database: DatabaseSync;
   readonly #filename: string;
+  readonly #readOnly: boolean;
   #closed = false;
   #inTransaction = false;
   readonly tasks: TaskRepository;
@@ -2774,9 +2786,10 @@ export class RuntimeSqliteStore {
   readonly retryDecisions: RetryDecisionRepository;
   readonly workerAvailability: WorkerAvailabilityRepository;
 
-  private constructor(database: DatabaseSync, filename: string) {
+  private constructor(database: DatabaseSync, filename: string, readOnly: boolean) {
     this.#database = database;
     this.#filename = filename;
+    this.#readOnly = readOnly;
     this.tasks = new TaskRepository(this);
     this.attempts = new AttemptRepository(this);
     this.checkpoints = new CheckpointRepository(this);
@@ -2800,13 +2813,25 @@ export class RuntimeSqliteStore {
     if (options.filename !== undefined && options.filename.trim().length === 0) throw new RuntimeStorageError("invalid_configuration", "SQLite filename must not be empty.");
     const filename = storageFilename(options.environment ?? process.env, options.filename?.trim());
     const timeout = busyTimeout(options.busyTimeoutMs);
+    const mode = options.mode ?? "migrate";
     let database: DatabaseSync | undefined;
     try {
-      mkdirSync(dirname(filename), { recursive: true });
-      database = new DatabaseSync(filename);
-      bootstrap(database, timeout);
-      if (database === undefined) throw new RuntimeStorageError("storage_error", "SQLite runtime storage was not opened.");
-      return new RuntimeSqliteStore(database, filename);
+      if (mode === "migrate") {
+        mkdirSync(dirname(filename), { recursive: true });
+        database = new DatabaseSync(filename);
+        bootstrap(database, timeout);
+      } else {
+        try { statSync(filename); }
+        catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          throw new RuntimeStorageError("storage_error", "Orchestrator runtime database does not exist. Initialize it through the explicit migration procedure.");
+        }
+        database = new DatabaseSync(filename, { readOnly: mode === "read_only" });
+        database.exec(`PRAGMA busy_timeout = ${timeout};`);
+        assertCompatibleRuntimeSchema(database);
+        if (mode === "existing") database.exec("PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL;");
+      }
+      return new RuntimeSqliteStore(database, filename, mode === "read_only");
     } catch (error: unknown) {
       try { database?.close(); } catch { /* preserve sanitized startup error */ }
       if (error instanceof RuntimeStorageError) throw error;
@@ -2848,7 +2873,7 @@ export class RuntimeSqliteStore {
     }
     try {
       this.assertOpen();
-      this.#database.exec("BEGIN IMMEDIATE");
+      this.#database.exec(this.#readOnly ? "BEGIN" : "BEGIN IMMEDIATE");
       this.#inTransaction = true;
       const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions, workerAvailability: this.workerAvailability });
       if (result.outcome === "success") this.#database.exec("COMMIT");
