@@ -19,6 +19,7 @@ import type { OperationRecorder, OperationHandle } from "./operation-recorder.js
 import { readGpuStats, type GpuStats } from "./telemetry.js";
 import { currentTimeSystemContext } from "./time-context.js";
 import { ORCHESTRATION_SYSTEM_CONTEXT } from "./orchestration-context.js";
+import { withSystemInstruction } from "./system-instructions.js";
 import { withToolArgumentRecovery, ToolArgumentGenerationError, TOOL_ARGUMENT_FAILURE_RESPONSE } from "./tool-argument-recovery.js";
 
 type ResponseWithMetrics = ChatResponse;
@@ -518,7 +519,10 @@ export class PirxAgent {
       ) {
         const mayExecuteTools = iteration < this.#config.maxToolIterations && toolBudgetAvailable();
         const tools = mayExecuteTools ? this.#mcp.ollamaTools : [];
-        const messagesForModel = this.#messagesForModel();
+        const baseMessages = this.#messagesForModel();
+        const messagesForModel = mayExecuteTools
+          ? baseMessages
+          : withSystemInstruction(baseMessages, "[Pirx: limit narzędzi] Limit odczytów w tej turze został osiągnięty. Podsumuj wyłącznie potwierdzone wyniki, blocker i następny krok. Nie generuj kolejnych wywołań narzędzi ani znaczników XML/JSON udających wywołanie. Nie twierdź, że niewykonana akcja została wykonana.");
         const budget = {
           contextWindowTokens: this.#config.numCtx,
           maxOutputTokens: this.#config.maxOutputTokens ?? 1536,
@@ -529,7 +533,6 @@ export class PirxAgent {
           (messages) => this.#contextEstimator.estimate(model, contextSections(messages, tools), budget),
         );
         const messages = [...contextBuild.messages];
-        if (!mayExecuteTools) messages.push({ role: "system", content: "[Pirx: limit narzędzi] Limit odczytów w tej turze został osiągnięty. Podsumuj wyłącznie potwierdzone wyniki, blocker i następny krok. Nie generuj kolejnych wywołań narzędzi ani znaczników XML/JSON udających wywołanie. Nie twierdź, że niewykonana akcja została wykonana." });
         const llmOperationSequence = operationSequence;
         operationSequence += 1;
         const llmOperation =
@@ -648,11 +651,10 @@ export class PirxAgent {
           const checkArgumentRecoveryBefore = argumentRecoveryBudget.remaining;
           try {
             check = (await withToolArgumentRecovery(
-              [
-                  ...messages,
-                  withoutHistoricalThinking(response.message),
-                  { role: "system", content: CONTINUATION_CHECK_PROMPT },
-              ],
+              withSystemInstruction(
+                [...messages, withoutHistoricalThinking(response.message)],
+                CONTINUATION_CHECK_PROMPT,
+              ),
               tools.flatMap((tool) => tool.function.name === undefined ? [] : [tool.function.name]),
               argumentRecoveryBudget,
               (retryMessages) => executeModel(retryMessages, tools, request, checkOperation),

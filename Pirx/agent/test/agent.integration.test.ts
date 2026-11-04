@@ -47,7 +47,14 @@ async function startScriptedOllama(replies: readonly Record<string, unknown>[]):
       response.writeHead(404).end();
       return;
     }
-    requests.push(await requestJson(request));
+    const body = await requestJson(request);
+    requests.push(body);
+    const roles = (body.messages as Array<{ role: string }>).map((message) => message.role);
+    if (roles[0] !== "system" || roles.slice(1).includes("system")) {
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: "System instructions must precede the conversation" }));
+      return;
+    }
     const scripted = replies[requests.length - 1];
     if (scripted?.stall === true) {
       const captured = requests.at(-1)!;
@@ -138,9 +145,9 @@ test("continuation check runs a tool the model only announced, then ends on the 
   assert.equal(turn.metrics.model_calls, 3);
   assert.equal(ollama.requests.length, 3);
   const check = ollama.requests[1]?.messages as Array<{ role: string; content: string }>;
-  assert.equal(check.at(-2)?.content, "Pobieram teraz powitanie.");
-  assert.equal(check.at(-1)?.role, "system");
-  assert.match(check.at(-1)?.content ?? "", /kontynuacja/u);
+  assert.equal(check.at(-1)?.content, "Pobieram teraz powitanie.");
+  assert.equal(check[0]?.role, "system");
+  assert.match(check[0]?.content ?? "", /kontynuacja/u);
   assert.ok(Array.isArray(ollama.requests[1]?.tools));
   const afterTool = ollama.requests[2]?.messages as Array<{ content: string }>;
   assert.ok(afterTool.every((message) => !message.content.includes("[Pirx: kontynuacja]")));
@@ -207,7 +214,7 @@ test("backend argument parse failure retries generation once without repeating c
   assert.equal(turn.metrics.model_calls, 3);
   assert.equal(turn.metrics.input_tokens, null);
   const retry = ollama.requests[2]?.messages as Array<{ content: string }>;
-  assert.match(retry.at(-1)?.content ?? "", /naprawa formatu/u);
+  assert.match(retry[0]?.content ?? "", /naprawa formatu/u);
   assert.ok(turn.messages.every((message) => !message.content.includes("[Pirx: naprawa formatu]")));
   assert.equal(turn.messages.filter((message) => message.role === "tool").length, 1);
 });
@@ -259,7 +266,7 @@ test("textual tool markup after the tool budget is exhausted is never presented 
   assert.equal(ollama.requests.length, 9);
   const final = ollama.requests[8]!;
   assert.equal(final.tools, undefined);
-  assert.match((final.messages as Array<{ content: string }>).at(-1)!.content, /limit narzędzi/u);
+  assert.match((final.messages as Array<{ content: string }>)[0]!.content, /limit narzędzi/u);
 });
 
 test("backend failure after MCP keeps evidence in the turn and in the next request", async (context) => {
