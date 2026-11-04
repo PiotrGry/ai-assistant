@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   RuntimeSqliteStore,
+  RUNTIME_STORAGE_SCHEMA_VERSION,
   createTask,
   startInitialAttempt,
   transitionTask,
@@ -225,4 +226,16 @@ test("requires a runtime path and rejects conflicting paths and aliases to chat 
     shipment.close();
     assert.deepEqual(await readFile(chat), chatBytes);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("existing runtime open rejects incompatible schema before changing the database", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-runtime-no-migration-"));
+  const filename = join(directory, "runtime.sqlite");
+  const store = RuntimeSqliteStore.open({ filename });
+  try {
+    store.database.prepare("UPDATE runtime_schema_migrations SET version = ? WHERE version = ?").run(RUNTIME_STORAGE_SCHEMA_VERSION + 1, RUNTIME_STORAGE_SCHEMA_VERSION);
+    assert.throws(() => RuntimeSqliteStore.open({ filename, mode: "existing" }), /Incompatible SQLite runtime schema/u);
+    assert.throws(() => RuntimeSqliteStore.open({ filename, mode: "read_only" }), /Incompatible SQLite runtime schema/u);
+    assert.equal(store.database.prepare("SELECT version FROM runtime_schema_migrations WHERE version = ?").get(RUNTIME_STORAGE_SCHEMA_VERSION), undefined);
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });

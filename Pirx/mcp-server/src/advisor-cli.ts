@@ -4,7 +4,7 @@ import { createAdvisorServer } from "./advisor.js";
 
 const [filename, taskId, attemptId] = process.argv.slice(2);
 if (!filename || !taskId || !attemptId) throw Error("Advisor requires database, Task and Attempt binding");
-const store = RuntimeSqliteStore.open({ filename });
+const store = RuntimeSqliteStore.open({ filename, mode: "existing" });
 const handle = serveStdio(() => createAdvisorServer(store, taskId, attemptId));
 const keepAlive = setInterval(() => undefined, 60_000);
 process.stdin.resume();
