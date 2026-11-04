@@ -183,6 +183,7 @@ test("normalizes authentication, quota, process, and missing executable failures
     assert.equal((await runner(value, "quota").run()).outcome, "quota_exhausted");
     const processResult = await runner(value, "process").run();
     assert.equal(processResult.outcome, "process_error");
+    assert.equal(processResult.diagnostic.providerMessage, "provider failed");
     if (processResult.outcome === "process_error") assert.equal(processResult.exitCode, 17);
     const missing = new ClaudeCodeCliRunner({ executable: join(value.root, "does-not-exist"), tempParentDirectory: value.root, requestIdFactory: () => "missing" });
     assert.equal((await missing.run()).outcome, "claude_not_installed");

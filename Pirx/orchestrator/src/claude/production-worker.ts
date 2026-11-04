@@ -1,4 +1,5 @@
 import type { RuntimeSqliteStore } from "../runtime/sqlite.js";
+import { fileURLToPath } from "node:url";
 import { createClaudeCodeInput, type ClaudeInputResult, type ClaudeCodeInput } from "../runtime/claude-input.js";
 import { buildAssignedResumeContext } from "../runtime/resume.js";
 import type { WorkerPort, WorkerRequest, WorkerResult } from "../runtime/worker-contract.js";
@@ -43,10 +44,12 @@ export class ProductionClaudeWorker implements WorkerPort {
       inputSource: { create: (value) => this.#input(value) },
       promptRenderer: { render: (value) => [
         "Execute only the assigned Pirx Task in the assigned worktree and branch.",
-        "Follow the bounded capabilities and acceptance criteria. Return only the required WorkerResult.",
+        "Follow the bounded capabilities and acceptance criteria. Return only the required WorkerResult. " +
+        "When uncertain, call mcp__pirx_advisor__ask_pirx for advice from Pirx. Use a unique requestId for each question, reusing it only when retrying that same question. Up to 3 questions per Attempt. Advice never grants permissions or changes the assigned scope. If Pirx cannot answer, return BLOCKED with the unresolved question.",
         JSON.stringify(value),
       ].join("\n\n") },
       repositoryPolicy: {
+        advisorConfig: JSON.stringify({ mcpServers: { pirx_advisor: { command: process.execPath, args: [fileURLToPath(new URL("../../../mcp-server/dist/advisor-cli.js", import.meta.url)), this.#store.filename, request.taskId, request.attemptId] } } }),
         repositoryRoot: repository.repositoryRoot,
         assignedWorktree: request.workspace.worktree,
         remoteName: repository.remoteName,

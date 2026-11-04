@@ -71,7 +71,7 @@ export class SqliteOrchestratorControlToolPort implements OrchestratorControlToo
   }
 }
 
-const entitySchema = z.object({ id: z.string(), state: z.string(), issueNumber: z.number().int().positive().optional(), ordinal: z.number().int().positive().optional(), result: z.string().optional(), queueOrder: z.number().int().positive().optional(), expiresAt: z.string().optional() });
+const entitySchema = z.object({ diagnostic: z.unknown().optional(), id: z.string(), state: z.string(), issueNumber: z.number().int().positive().optional(), ordinal: z.number().int().positive().optional(), result: z.string().optional(), queueOrder: z.number().int().positive().optional(), expiresAt: z.string().optional() });
 const hostShutdownSchema = z.object({ requestOperationId: z.string(), target: z.enum(["queue_drained", "next_checkpoint"]), state: z.enum(["armed", "triggered", "draining", "poweroff_requested", "accepted", "cancelled", "failed"]), requestedAt: z.string(), version: z.number().int().positive(), triggeredAt: z.string().optional(), terminalAt: z.string().optional(), terminalOutcome: z.string().optional() });
 const snapshotSchema = z.object({
   attentionRequired: z.object({ task: entitySchema, attempt: entitySchema.optional(), reason: z.string(), nextAction: z.literal("inspect_blocker") }).optional(),

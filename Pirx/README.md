@@ -1,5 +1,34 @@
 # Pirx w TypeScript
 
+## Pytania workera do Pirxa
+
+Daemon automatycznie uruchamia Claude z dedykowanym serwerem MCP
+`pirx_advisor` i narzędziem `ask_pirx`. Nie trzeba rejestrować MCP ręcznie.
+Konfiguracja jest przypisana do konkretnego Tasku i Attemptu; pozostałe
+serwery MCP są wyłączone przez `--strict-mcp-config`.
+
+Doradca to osobna tura modelu Pirxa w Ollamie, bez narzędzi wykonawczych.
+Otrzymuje cel, zakres, kryteria akceptacji i poprzednie pytania z Attemptu.
+Korzysta z ustawień `OLLAMA_MODEL`, `OLLAMA_BASE_URL`, `OLLAMA_NUM_CTX`
+w środowisku serwera lub `~/.config/pirx/chat.json`. Nie zna historii TUI
+ani stanu hosta poza przekazanym kontekstem. Odpowiedź nie przyznaje uprawnień.
+
+Limit wynosi 3 pytania na Attempt, 4000 znaków pytania, 6000 znaków odpowiedzi
+i 45 sekund na odpowiedź modelu (w ramach limitu czasu całego workera).
+Powtórzenie tego samego `requestId` odczytuje poprzedni wynik bez ponownego
+wywołania modelu. Brak odpowiedzi oznacza błąd narzędzia; worker powinien
+zwrócić BLOCKED, jeśli nie może kontynuować bez wyjaśnienia.
+
+Pytania, odpowiedzi i błędy są zapisywane po redakcji sekretów w tabeli
+`runtime_agent_questions` w `runtime.sqlite` (migracja 32). Czat odczytuje
+historię narzędziem `pirx_agent_conversation` z `taskId` i kursorem `afterRow`.
+`pending` oznacza wywołanie bez zapisanego wyniku, również po przerwaniu procesu.
+Ta funkcja nie wysyła automatycznych powiadomień do TUI.
+
+Po aktualizacji trzeba zbudować cały workspace (`pnpm build`) i wdrożyć
+razem pakiety orchestrator, mcp-server oraz agent. Stary runtime ze schematem
+31 nie może otwierać bazy po migracji 32; przed wdrożeniem zachowaj kopię bazy.
+
 Docelowy runtime lokalnej asystentki składa się z dwóch procesów:
 
 - `agent` — rozmowa z Ollamą, pętla wywołań narzędzi i logi sesji,

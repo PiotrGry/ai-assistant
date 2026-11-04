@@ -111,6 +111,7 @@ test("server exposes complete tools with safe annotations", async (context) => {
       "obsidian_read",
       "obsidian_search",
       "obsidian_write",
+      "pirx_agent_conversation",
       "pirx_execution_report",
       "pirx_orchestrator_control",
       "pirx_orchestrator_diagnostic",

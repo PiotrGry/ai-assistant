@@ -24,6 +24,7 @@ export const CODE_WORKER_CAPABILITIES = Object.freeze([
 export type CodeWorkerCapability = (typeof CODE_WORKER_CAPABILITIES)[number];
 
 export interface ClaudeCodeRepositoryPolicy {
+  readonly advisorConfig?: string;
   readonly repositoryRoot: string;
   readonly assignedWorktree: string;
   readonly remoteName: string;
@@ -33,6 +34,7 @@ export interface ClaudeCodeRepositoryPolicy {
 }
 
 export interface ClaudeCodeWorkerProfile {
+  readonly advisorConfig?: string;
   readonly schemaVersion: typeof CLAUDE_CODE_WORKER_PROFILE_SCHEMA_VERSION;
   readonly cwd: string;
   readonly tools: readonly string[];
@@ -96,6 +98,10 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
     "Bash(git branch -D *)", "Bash(git branch --delete *)", "Bash(git remote *)", "Bash(git config *)",
     "Bash(git push --force *)", "Bash(git push -f *)", "Bash(git push --delete *)", "Bash(git push --mirror *)",
   ];
+  if (policy.advisorConfig !== undefined) {
+    denied.splice(denied.indexOf("mcp__*"), 1);
+    allowed.push("mcp__pirx_advisor__ask_pirx");
+  }
   if (parsedCapabilities.includes("repository.read")) {
     for (const tool of ["Read", "Glob", "Grep"]) { tools.push(tool); allow(tool, allowed); }
   }
@@ -119,6 +125,7 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
   if (!bashNeeded) denied.push("Bash");
   return { ok: true, value: Object.freeze({
     schemaVersion: CLAUDE_CODE_WORKER_PROFILE_SCHEMA_VERSION,
+    ...(policy.advisorConfig === undefined ? {} : { advisorConfig: policy.advisorConfig }),
     cwd: assignedWorktree,
     tools: Object.freeze(tools),
     allowedTools: Object.freeze(allowed),

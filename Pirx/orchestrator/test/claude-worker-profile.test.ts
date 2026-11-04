@@ -26,6 +26,17 @@ const policy = {
   commitMessage: "Pirx: apply assigned repair",
 };
 
+test("advisor uses only explicit MCP config and one permitted tool", () => {
+  const config = JSON.stringify({ mcpServers: { pirx_advisor: { command: "node", args: ["advisor-cli.js", "runtime.sqlite", "task", "attempt"] } } });
+  const profile = buildClaudeCodeWorkerProfile(request(), { ...policy, advisorConfig: config });
+  assert.ok(profile.ok);
+  assert.ok(!profile.value.disallowedTools.includes("mcp__*"));
+  assert.ok(profile.value.allowedTools.includes("mcp__pirx_advisor__ask_pirx"));
+  const args = buildClaudeWorkerArguments("request", "prompt", {}, profile.value);
+  assert.ok(args.includes("--strict-mcp-config"));
+  assert.equal(args[args.indexOf("--mcp-config") + 1], config);
+});
+
 function request(granted = ["repository.read", "repository.write", "tests.run", "git.commit", "git.push_assigned_branch"]): WorkerRequest {
   const task = createTask({ id: taskId, goal: "Perform one bounded repair", scope: "assigned worktree only", acceptanceCriteria: ["return a structured result"], priority: 1, risk: "low", requiredCapabilities: granted, createdAt: now });
   if (!task.ok) throw new Error(task.error.message);

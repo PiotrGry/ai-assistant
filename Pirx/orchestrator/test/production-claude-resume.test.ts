@@ -40,6 +40,9 @@ test("production Claude resumes an assigned successor from its predecessor check
     let calls = 0;
     const worker = new ProductionClaudeWorker({ store, repositories: [{ repository: "PiotrGry/ai-assistant", repositoryRoot: root, remoteName: "origin", testCommands: [] }], runner: { async runStructured(input) {
       calls++;
+      const advisor = JSON.parse(input.workerProfile!.advisorConfig!).mcpServers.pirx_advisor;
+      assert.equal(advisor.command, process.execPath);
+      assert.deepEqual(advisor.args.slice(1), [store.filename, request.value.taskId, request.value.attemptId]);
       assert.match(input.prompt, /"mode":"resume"/u);
       assert.match(input.prompt, /resume-production-attempt-1/u);
       return { outcome: "success", requestId: input.requestId, durationMs: 1, exitCode: 0, structuredOutput: { kind: "worker_result", schemaVersion: 1, taskId: request.value.taskId, attemptId: request.value.attemptId, correlationId: request.value.correlationId, outcome: "BLOCKED", reason: "Fixture completed without repository mutations" } };

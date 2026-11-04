@@ -178,6 +178,7 @@ export function buildClaudeWorkerArguments(requestId: string, prompt: string, re
   // permission mode and deny-by-default prompt target keep every other tool
   // unavailable without relying on an unsupported legacy --restricted flag.
   const arguments_: string[] = ["-p", "--tools", profile.tools.join(",")];
+  if (profile.advisorConfig !== undefined) arguments_.push("--strict-mcp-config", "--mcp-config", profile.advisorConfig);
   if (profile.allowedTools.length > 0) arguments_.push("--allowedTools", profile.allowedTools.join(","));
   if (profile.disallowedTools.length > 0) arguments_.push("--disallowedTools", profile.disallowedTools.join(","));
   arguments_.push("--permission-mode", profile.permissionMode, "--disable-slash-commands", "--no-session-persistence", "--max-turns", String(profile.maxTurns), "--output-format", "json", "--json-schema", schema, prompt);
@@ -391,11 +392,17 @@ export class ClaudeCodeCliRunner {
     const stdout = Buffer.concat(stdoutChunks).toString("utf8");
     const stderr = Buffer.concat(stderrChunks).toString("utf8");
     let parsed: unknown;
+    const failed = (...args: Parameters<typeof failure>): ClaudeRoundTripFailure => {
+      const result = failure(...args);
+      const envelope = isRecord(parsed) ? parsed : {};
+      const evidence = [envelope.subtype, envelope.errors, envelope.error, envelope.message, stderr].filter((value) => value !== undefined && value !== "").map((value) => typeof value === "string" ? value : JSON.stringify(value)).join("\n");
+      return { ...result, diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, { ...result.diagnostic, stage: "process", ...(evidence ? { providerMessage: evidence } : {}) }) };
+    };
     try { parsed = JSON.parse(stdout); }
-    catch { return failure(explicitFailureCode(undefined, stderr) ?? (exitCode !== 0 ? "process_error" : "invalid_output"), input.requestId, input.startedAt, exitCode, exitCode !== 0 ? undefined : "malformed_cli_envelope"); }
+    catch { return failed(explicitFailureCode(undefined, stderr) ?? (exitCode !== 0 ? "process_error" : "invalid_output"), input.requestId, input.startedAt, exitCode, exitCode !== 0 ? undefined : "malformed_cli_envelope"); }
     const explicit = explicitFailure(parsed, stderr);
-    if (explicit !== undefined) return failure(explicit.outcome, input.requestId, input.startedAt, exitCode, diagnosticCode(explicit.outcome), explicit.providerRecovery);
-    if (exitCode !== 0) return failure("process_error", input.requestId, input.startedAt, exitCode);
+    if (explicit !== undefined) return failed(explicit.outcome, input.requestId, input.startedAt, exitCode, diagnosticCode(explicit.outcome), explicit.providerRecovery);
+    if (exitCode !== 0) return failed("process_error", input.requestId, input.startedAt, exitCode);
     if (!isRecord(parsed) || parsed.type !== "result" || parsed.subtype !== "success" || parsed.is_error !== false) return failure("invalid_output", input.requestId, input.startedAt, exitCode, "malformed_cli_envelope");
     if (input.structuredOutput === true) {
       if (parsed.structured_output === undefined) return failure("invalid_output", input.requestId, input.startedAt, exitCode, "missing_structured_output");

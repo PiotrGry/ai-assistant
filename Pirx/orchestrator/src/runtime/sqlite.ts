@@ -110,7 +110,7 @@ import {
   type WorkerProviderRecoveryMetadata,
 } from "./worker-availability.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 31 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 32 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -843,6 +843,18 @@ const MIGRATIONS: readonly string[] = [
     );
     CREATE INDEX runtime_orchestrator_diagnostics_event ON runtime_orchestrator_diagnostics(event, sequence DESC);
   `,
+  `CREATE TABLE runtime_agent_questions (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES runtime_tasks(id),
+    attempt_id TEXT NOT NULL REFERENCES runtime_attempts(id),
+    question TEXT NOT NULL,
+    answer TEXT,
+    state TEXT NOT NULL CHECK (state IN ('pending','answered','failed')),
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(attempt_id, id)
+  );
+  CREATE INDEX runtime_agent_questions_task ON runtime_agent_questions(task_id, created_at);`,
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";

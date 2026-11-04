@@ -35,7 +35,7 @@ export type OrchestratorControlRequestResult =
   | { readonly outcome: "applied" | "replayed"; readonly record: OrchestratorControlRecord; readonly operationId: string; readonly message: string }
   | { readonly outcome: "conflict" | "invalid_request" | "storage_error"; readonly operationId: string; readonly message: string };
 
-export interface OrchestratorEntitySummary { readonly id: string; readonly state: string; readonly issueNumber?: number; readonly ordinal?: number; readonly result?: string; readonly queueOrder?: number; readonly expiresAt?: UtcTimestamp; }
+export interface OrchestratorEntitySummary { readonly id: string; readonly state: string; readonly issueNumber?: number; readonly ordinal?: number; readonly result?: string; readonly diagnostic?: unknown; readonly queueOrder?: number; readonly expiresAt?: UtcTimestamp; }
 export interface OrchestratorHostShutdownSummary { readonly requestOperationId: string; readonly target: HostShutdownTarget; readonly state: HostShutdownState; readonly requestedAt: UtcTimestamp; readonly version: number; readonly triggeredAt?: UtcTimestamp; readonly terminalAt?: UtcTimestamp; readonly terminalOutcome?: string; }
 export interface OrchestratorStatusSnapshot {
   readonly schemaVersion: typeof ORCHESTRATOR_CONTROL_SCHEMA_VERSION;
@@ -88,7 +88,12 @@ export class OrchestratorControlRepository {
   public recordDiagnostic(event: HeadlessServiceEvent, at: UtcTimestamp): StorageResult<number> {
     if (!canonicalTimestamp(at)) return { outcome: "invalid_record", message: "Diagnostic timestamp is invalid." };
     return this.#store.execute(() => {
-      const result = this.#store.database.prepare("INSERT INTO runtime_orchestrator_diagnostics (recorded_at,event,outcome,diagnostic_json) VALUES (?,?,?,?)").run(at, event.event, event.outcome, JSON.stringify(diagnosticContext(event)));
+      const details = event.details;
+      const taskId = details !== null && typeof details === "object" && "taskId" in details ? details.taskId : undefined;
+      const history = typeof taskId === "string" ? this.#store.attempts.listByTask(taskId) : undefined;
+      const workerFailures = history?.outcome === "success" ? history.value.slice(-3).flatMap((attempt) => attempt.state === "terminal" ? [{ attemptId: attempt.id, ordinal: attempt.ordinal, result: attempt.result, diagnostic: attempt.diagnostic }] : []) : [];
+      const enriched = workerFailures.length > 0 ? { ...event, details: { ...details as object, workerFailures } } : event;
+      const result = this.#store.database.prepare("INSERT INTO runtime_orchestrator_diagnostics (recorded_at,event,outcome,diagnostic_json) VALUES (?,?,?,?)").run(at, event.event, event.outcome, JSON.stringify(diagnosticContext(enriched)));
       return { outcome: "success", value: Number(result.lastInsertRowid) };
     });
   }
@@ -181,6 +186,10 @@ export class OrchestratorControlRepository {
         const attention = this.#store.database.prepare("SELECT t.id, t.state, t.github_issue_number AS issue_number, t.blocking_reason, s.queue_order FROM runtime_tasks t JOIN runtime_task_selection s ON s.task_id = t.id WHERE t.state IN ('blocked','failed') AND s.queue_order IS NOT NULL ORDER BY s.queue_order, t.updated_at DESC LIMIT 1").get() as Record<string, unknown> | undefined;
         const attentionTask = summary(attention, { issue: true, queue: true });
         const attentionAttempt = attentionTask === undefined ? undefined : summary(this.#store.database.prepare("SELECT id, state, ordinal, result FROM runtime_attempts WHERE task_id = ? ORDER BY ordinal DESC LIMIT 1").get(attentionTask.id) as Record<string, unknown> | undefined, { ordinal: true, result: true });
+        const attemptEvidence = attentionTask === undefined ? undefined : this.#store.attempts.listByTask(attentionTask.id);
+        const latestAttempt = attemptEvidence?.outcome === "success" ? attemptEvidence.value.at(-1) : undefined;
+        const latestDiagnostic = latestAttempt?.state === "terminal" ? latestAttempt.diagnostic : undefined;
+        if (attentionAttempt !== undefined && latestDiagnostic !== undefined) Object.assign(attentionAttempt, { diagnostic: diagnosticContext(latestDiagnostic) });
         const attentionRequired = attentionTask === undefined ? undefined : { task: attentionTask, ...(attentionAttempt === undefined ? {} : { attempt: attentionAttempt }), reason: String(diagnosticContext(attention?.blocking_reason ?? "Task requires reconciliation.")), nextAction: "inspect_blocker" as const };
         return { outcome: "success", value: Object.freeze({ ...snapshot, diagnostics, ...(attentionRequired === undefined ? {} : { attentionRequired }) }) };
       } catch { return { outcome: "storage_error", message: "Orchestrator status snapshot could not be read." }; }
