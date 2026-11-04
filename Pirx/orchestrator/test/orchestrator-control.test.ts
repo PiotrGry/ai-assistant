@@ -19,6 +19,76 @@ const t0 = "2026-10-30T12:00:00.000Z" as UtcTimestamp;
 const t1 = "2026-10-30T12:01:00.000Z" as UtcTimestamp;
 const t2 = "2026-10-30T12:05:00.000Z" as UtcTimestamp;
 
+test("status identifies a missing diagnostic even when its heartbeat was stored", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-observation-failure-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  try {
+    store.database.exec("CREATE TRIGGER fail_diagnostic BEFORE INSERT ON runtime_orchestrator_diagnostics BEGIN SELECT RAISE(FAIL, 'injected'); END");
+    new SqliteHeadlessControlPort(store, () => t1).observe({ schemaVersion: 1, event: "queue", outcome: "failed" });
+    const status = new OrchestratorControlRepository(store).status(t1, 120_000);
+    assert.equal(status.outcome, "success");
+    if (status.outcome !== "success") return;
+    assert.equal(status.value.heartbeatStale, false);
+    assert.equal((status.value as { lastPersistedObservationIncomplete?: boolean }).lastPersistedObservationIncomplete, true);
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("reports each independent persistence failure and recovers without exposing secrets", async () => {
+  for (const [failDiagnostic, failHeartbeat] of [[true, false], [false, true], [true, true]] as const) {
+    const directory = await mkdtemp(join(tmpdir(), "pirx-observation-faults-"));
+    const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+    const reports: Array<{ stage: string; code: string; otherWrite: string; correlationId?: string }> = [];
+    try {
+      let now = t0;
+      const control = new SqliteHeadlessControlPort(store, () => now, (failure) => reports.push(failure));
+      control.observe({ schemaVersion: 1, event: "starting", outcome: "starting" });
+      now = t1;
+      if (failDiagnostic) store.database.exec("CREATE TRIGGER fail_diagnostic BEFORE INSERT ON runtime_orchestrator_diagnostics BEGIN SELECT RAISE(FAIL, 'private diagnostic'); END");
+      if (failHeartbeat) store.database.exec("CREATE TRIGGER fail_heartbeat BEFORE UPDATE ON runtime_orchestrator_control BEGIN SELECT RAISE(FAIL, 'private heartbeat'); END");
+      control.observe({ schemaVersion: 1, event: "queue", outcome: "failed", details: { correlationId: "Bearer hidden-token" } });
+      assert.deepEqual(reports.map((item) => item.stage), [...(failDiagnostic ? ["diagnostic"] : []), ...(failHeartbeat ? ["heartbeat"] : [])]);
+      assert.ok(reports.every((item) => item.code === "storage_error" && item.correlationId === "Bearer [REDACTED]"));
+      assert.ok(reports.every((item) => item.otherWrite === (failDiagnostic && failHeartbeat ? "failed" : "success")));
+      assert.doesNotMatch(JSON.stringify(reports), /hidden-token|private diagnostic|private heartbeat/u);
+      const repository = new OrchestratorControlRepository(store);
+      const status = repository.status(t1, 120_000);
+      assert.equal(status.outcome, "success");
+      if (status.outcome === "success" && !(failDiagnostic && failHeartbeat)) assert.equal(status.value.lastPersistedObservationIncomplete, true);
+      if (status.outcome === "success" && failDiagnostic && failHeartbeat) assert.equal(status.value.heartbeatAt, t0);
+      if (failDiagnostic) store.database.exec("DROP TRIGGER fail_diagnostic");
+      if (failHeartbeat) store.database.exec("DROP TRIGGER fail_heartbeat");
+      control.observe({ schemaVersion: 1, event: "queue", outcome: "recovered" });
+      const recovered = repository.status(t1, 120_000);
+      assert.equal(recovered.outcome, "success");
+      if (recovered.outcome === "success") assert.equal(recovered.value.lastPersistedObservationIncomplete, false);
+      const throwingLogger = new SqliteHeadlessControlPort(store, () => t1, () => { throw new Error("logger failed"); });
+      store.database.exec("CREATE TRIGGER fail_again BEFORE INSERT ON runtime_orchestrator_diagnostics BEGIN SELECT RAISE(FAIL, 'injected'); END");
+      assert.doesNotThrow(() => throwingLogger.observe({ schemaVersion: 1, event: "cycle", outcome: "idle" }));
+      const absentCorrelation: Array<{ correlationId?: string }> = [];
+      new SqliteHeadlessControlPort(store, () => t1, (failure) => absentCorrelation.push(failure)).observe({ schemaVersion: 1, event: "cycle", outcome: "idle" });
+      assert.equal(absentCorrelation[0]?.correlationId, undefined);
+    } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("upgrades an existing control record conservatively", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-observation-migration-"));
+  const filename = join(directory, "runtime.sqlite");
+  let store = RuntimeSqliteStore.open({ filename });
+  try {
+    assert.equal(new OrchestratorControlRepository(store).heartbeat("running", t0).outcome, "success");
+    store.database.exec("ALTER TABLE runtime_orchestrator_control DROP COLUMN diagnostic_incomplete; ALTER TABLE runtime_orchestrator_control DROP COLUMN diagnostic_sequence; DELETE FROM runtime_schema_migrations WHERE version = 33");
+    store.close();
+    store = RuntimeSqliteStore.open({ filename });
+    const status = new OrchestratorControlRepository(store).status(t1, 120_000);
+    assert.equal(status.outcome, "success");
+    if (status.outcome === "success") {
+      assert.equal(status.value.heartbeatAt, t0);
+      assert.equal(status.value.lastPersistedObservationIncomplete, true);
+    }
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("one status read identifies the queued blocked Task without searching journal history", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pirx-control-attention-"));
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });

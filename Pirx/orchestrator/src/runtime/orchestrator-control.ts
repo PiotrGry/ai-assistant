@@ -44,6 +44,7 @@ export interface OrchestratorStatusSnapshot {
   readonly version: number;
   readonly heartbeatAt?: UtcTimestamp;
   readonly heartbeatStale: boolean;
+  readonly lastPersistedObservationIncomplete: boolean;
   readonly lastQueueOutcome?: string;
   readonly lastDeliveryOutcome?: string;
   readonly lastCycleOutcome?: string;
@@ -143,7 +144,7 @@ export class OrchestratorControlRepository {
     return transaction.outcome === "success" ? transaction.value : { outcome: "storage_error", operationId: input.operationId, message: transaction.message };
   }
 
-  public heartbeat(state: OrchestratorObservedState, at: UtcTimestamp, outcomes: { readonly queue?: string; readonly delivery?: string; readonly cycle?: string } = {}): StorageResult<OrchestratorControlRecord> {
+  public heartbeat(state: OrchestratorObservedState, at: UtcTimestamp, outcomes: { readonly queue?: string; readonly delivery?: string; readonly cycle?: string } = {}, diagnostic?: { readonly sequence?: number }): StorageResult<OrchestratorControlRecord> {
     if (!["starting", "running", "paused", "stopping", "stopped", "error"].includes(state) || !canonicalTimestamp(at) || Object.values(outcomes).some((value) => value !== undefined && safeOutcome(value) === undefined)) return { outcome: "invalid_record", message: "Orchestrator heartbeat is invalid." };
     return this.#store.execute(() => {
       try {
@@ -151,6 +152,7 @@ export class OrchestratorControlRepository {
         if (current.outcome === "not_found") this.#store.database.prepare("INSERT INTO runtime_orchestrator_control (singleton, requested_mode, requested_at, requested_by, request_reason, request_version, observed_state, heartbeat_at, last_queue_outcome, last_delivery_outcome, last_cycle_outcome) VALUES (1, 'running', ?, 'service-bootstrap', 'service startup', 1, ?, ?, ?, ?, ?)").run(at, state, at, outcomes.queue ?? null, outcomes.delivery ?? null, outcomes.cycle ?? null);
         else if (current.outcome === "success") this.#store.database.prepare("UPDATE runtime_orchestrator_control SET observed_state = ?, heartbeat_at = ?, last_queue_outcome = COALESCE(?, last_queue_outcome), last_delivery_outcome = COALESCE(?, last_delivery_outcome), last_cycle_outcome = COALESCE(?, last_cycle_outcome) WHERE singleton = 1").run(state, at, outcomes.queue ?? null, outcomes.delivery ?? null, outcomes.cycle ?? null);
         else return current;
+        if (diagnostic !== undefined) this.#store.database.prepare("UPDATE runtime_orchestrator_control SET diagnostic_sequence = COALESCE(?, diagnostic_sequence), diagnostic_incomplete = ? WHERE singleton = 1").run(diagnostic.sequence ?? null, diagnostic.sequence === undefined ? 1 : 0);
         return this.get();
       } catch { return { outcome: "storage_error", message: "Orchestrator heartbeat could not be stored." }; }
     });
@@ -171,13 +173,16 @@ export class OrchestratorControlRepository {
         const release = this.#store.database.prepare("SELECT id, state FROM runtime_releases WHERE state NOT IN ('deployed', 'rolled_back') ORDER BY updated_at, id LIMIT 1").get() as Record<string, unknown> | undefined;
         const record = control.outcome === "success" ? control.value : undefined;
         const heartbeatStale = record?.heartbeatAt === undefined || Date.parse(now) - Date.parse(record.heartbeatAt) > staleAfterMs;
+        const observation = this.#store.database.prepare("SELECT diagnostic_sequence, diagnostic_incomplete FROM runtime_orchestrator_control WHERE singleton = 1").get() as { diagnostic_sequence: number | null; diagnostic_incomplete: number } | undefined;
+        const latestSequence = this.#store.database.prepare("SELECT MAX(sequence) AS sequence FROM runtime_orchestrator_diagnostics").get() as { sequence: number | null };
+        const lastPersistedObservationIncomplete = observation === undefined || observation.diagnostic_incomplete !== 0 || observation.diagnostic_sequence !== latestSequence.sequence;
         const activeTaskSummary = summary(activeTask, { issue: true });
         const activeAttemptSummary = summary(activeAttempt, { ordinal: true, result: true });
         const activeLeaseSummary = summary(lease, { expiry: true });
         const nextTaskSummary = summary(next, { issue: true, queue: true });
         const activeReleaseSummary = summary(release);
         const hostShutdown = shutdown.outcome === "success" ? { requestOperationId: shutdown.value.requestOperationId, target: shutdown.value.target, state: shutdown.value.state, requestedAt: shutdown.value.requestedAt, version: shutdown.value.version, ...(shutdown.value.triggeredAt === undefined ? {} : { triggeredAt: shutdown.value.triggeredAt }), ...(shutdown.value.terminalAt === undefined ? {} : { terminalAt: shutdown.value.terminalAt }), ...(shutdown.value.terminalOutcome === undefined ? {} : { terminalOutcome: shutdown.value.terminalOutcome }) } : undefined;
-        const snapshot: OrchestratorStatusSnapshot = { schemaVersion: 1, requestedMode: record?.requestedMode ?? "running", observedState: record?.observedState ?? "stopped", version: record?.version ?? 0, ...(record?.heartbeatAt === undefined ? {} : { heartbeatAt: record.heartbeatAt }), heartbeatStale, ...(record?.lastQueueOutcome === undefined ? {} : { lastQueueOutcome: record.lastQueueOutcome }), ...(record?.lastDeliveryOutcome === undefined ? {} : { lastDeliveryOutcome: record.lastDeliveryOutcome }), ...(record?.lastCycleOutcome === undefined ? {} : { lastCycleOutcome: record.lastCycleOutcome }), ...(activeTaskSummary === undefined ? {} : { activeTask: activeTaskSummary }), ...(activeAttemptSummary === undefined ? {} : { activeAttempt: activeAttemptSummary }), ...(activeLeaseSummary === undefined ? {} : { activeLease: activeLeaseSummary }), ...(nextTaskSummary === undefined ? {} : { nextQueuedTask: nextTaskSummary }), ...(activeReleaseSummary === undefined ? {} : { activeRelease: activeReleaseSummary }), ...(hostShutdown === undefined ? {} : { hostShutdown }) };
+        const snapshot: OrchestratorStatusSnapshot = { schemaVersion: 1, requestedMode: record?.requestedMode ?? "running", observedState: record?.observedState ?? "stopped", version: record?.version ?? 0, ...(record?.heartbeatAt === undefined ? {} : { heartbeatAt: record.heartbeatAt }), heartbeatStale, lastPersistedObservationIncomplete, ...(record?.lastQueueOutcome === undefined ? {} : { lastQueueOutcome: record.lastQueueOutcome }), ...(record?.lastDeliveryOutcome === undefined ? {} : { lastDeliveryOutcome: record.lastDeliveryOutcome }), ...(record?.lastCycleOutcome === undefined ? {} : { lastCycleOutcome: record.lastCycleOutcome }), ...(activeTaskSummary === undefined ? {} : { activeTask: activeTaskSummary }), ...(activeAttemptSummary === undefined ? {} : { activeAttempt: activeAttemptSummary }), ...(activeLeaseSummary === undefined ? {} : { activeLease: activeLeaseSummary }), ...(nextTaskSummary === undefined ? {} : { nextQueuedTask: nextTaskSummary }), ...(activeReleaseSummary === undefined ? {} : { activeRelease: activeReleaseSummary }), ...(hostShutdown === undefined ? {} : { hostShutdown }) };
         const rows = this.#store.database.prepare("SELECT * FROM runtime_orchestrator_diagnostics WHERE sequence IN (SELECT MAX(sequence) FROM runtime_orchestrator_diagnostics GROUP BY event) OR sequence = (SELECT MAX(sequence) FROM runtime_orchestrator_diagnostics WHERE event = 'cycle' AND outcome <> 'idle') ORDER BY sequence DESC LIMIT 12").all() as Array<{ sequence: number; recorded_at: string; diagnostic_json: string }>;
         const diagnostics = rows.map((row): OrchestratorDiagnostic => {
           const parsed = diagnosticContext(JSON.parse(row.diagnostic_json)) as HeadlessServiceEvent;
@@ -197,20 +202,33 @@ export class OrchestratorControlRepository {
   }
 }
 
+type ObservationFailure = { readonly stage: "diagnostic" | "heartbeat"; readonly code: string; readonly otherWrite: "success" | "failed" | "not_attempted"; readonly correlationId?: string };
+
 export class SqliteHeadlessControlPort implements HeadlessControlPort {
   readonly #repository: OrchestratorControlRepository;
   readonly #now: () => UtcTimestamp;
-  public constructor(store: RuntimeSqliteStore, now: () => UtcTimestamp = () => new Date().toISOString() as UtcTimestamp) { this.#repository = new OrchestratorControlRepository(store); this.#now = now; }
+  readonly #report: (failure: ObservationFailure) => void;
+  public constructor(store: RuntimeSqliteStore, now: () => UtcTimestamp = () => new Date().toISOString() as UtcTimestamp, report: (failure: ObservationFailure) => void = () => {}) { this.#repository = new OrchestratorControlRepository(store); this.#now = now; this.#report = report; }
   public read(): { readonly outcome: "success"; readonly mode: OrchestratorRequestedMode } | { readonly outcome: "error"; readonly message: string } {
     const value = this.#repository.get();
     if (value.outcome === "not_found") return { outcome: "success", mode: "running" };
     return value.outcome === "success" ? { outcome: "success", mode: value.value.requestedMode } : { outcome: "error", message: value.message };
   }
   public observe(event: HeadlessServiceEvent): void {
-    this.#repository.recordDiagnostic(event, this.#now());
+    const at = this.#now();
+    const diagnostic = this.#repository.recordDiagnostic(event, at);
     const observed: OrchestratorObservedState = event.event === "starting" ? "starting" : event.event === "stopping" || event.event === "host_shutdown" ? "stopping" : event.event === "stopped" ? "stopped" : event.event === "cycle_error" ? "error" : event.event === "control" && event.outcome === "paused" ? "paused" : "running";
     const outcomes = event.event === "queue" ? { queue: event.outcome } : event.event === "delivery" ? { delivery: event.outcome } : event.event === "cycle" || event.event === "cycle_error" ? { cycle: event.outcome } : {};
-    this.#repository.heartbeat(observed, this.#now(), outcomes);
+    const heartbeat = this.#repository.heartbeat(observed, at, outcomes, diagnostic.outcome === "success" ? { sequence: diagnostic.value } : {});
+    const details = event.details !== null && typeof event.details === "object" && "correlationId" in event.details ? event.details.correlationId : undefined;
+    const sanitized = typeof details === "string" ? diagnosticContext(details) : undefined;
+    const correlationId = typeof sanitized === "string" ? sanitized.replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 256) : undefined;
+    const context = correlationId === undefined ? {} : { correlationId };
+    if (diagnostic.outcome !== "success") try { this.#report({ stage: "diagnostic", code: diagnostic.outcome, otherWrite: heartbeat.outcome === "success" ? "success" : "failed", ...context }); } catch { /* Logging failures cannot affect orchestration. */ }
+    if (heartbeat.outcome !== "success") try { this.#report({ stage: "heartbeat", code: heartbeat.outcome, otherWrite: diagnostic.outcome === "success" ? "success" : "failed", ...context }); } catch { /* Logging failures cannot affect orchestration. */ }
   }
-  public paused(): void { this.#repository.heartbeat("paused", this.#now()); }
+  public paused(): void {
+    const heartbeat = this.#repository.heartbeat("paused", this.#now());
+    if (heartbeat.outcome !== "success") try { this.#report({ stage: "heartbeat", code: heartbeat.outcome, otherWrite: "not_attempted" }); } catch { /* Logging failures cannot affect orchestration. */ }
+  }
 }

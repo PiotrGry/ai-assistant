@@ -8,6 +8,8 @@ import test from "node:test";
 import {
   HeadlessConfigurationError,
   HeadlessOrchestratorService,
+  RuntimeSqliteStore,
+  SqliteHeadlessControlPort,
   parseHeadlessOrchestratorConfig,
   type HeadlessRuntimePort,
   type HeadlessServiceEvent,
@@ -90,6 +92,22 @@ test("contains observability projection failure without blocking the work cycle"
   assert.equal(observations.length >= 2, true);
   assert.equal(observations.every((event) => event.outcome === "storage_error" && event.reason === "projection_threw"), true);
   assert.equal(JSON.stringify(events).includes("raw storage detail"), false);
+});
+
+test("diagnostic persistence failure does not retry the worker cycle", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-service-persistence-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  try {
+    store.database.exec("CREATE TRIGGER fail_diagnostic BEFORE INSERT ON runtime_orchestrator_diagnostics BEGIN SELECT RAISE(FAIL, 'private error'); END");
+    const failures: string[] = [];
+    const control = new SqliteHeadlessControlPort(store, undefined, (failure) => failures.push(failure.stage));
+    const port = runtime();
+    let service: HeadlessOrchestratorService;
+    service = new HeadlessOrchestratorService(port, { cycleIntervalMs: 100, control, sleep: async () => { await service.stop("fixture"); } });
+    assert.equal((await service.run()).outcome, "stopped");
+    assert.deepEqual(port.calls, ["recover", "cycle", "shutdown", "close"]);
+    assert.ok(failures.length > 0 && failures.every((stage) => stage === "diagnostic"));
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
 test("does not execute stale runtime Queue data when GitHub reconciliation fails", async () => {

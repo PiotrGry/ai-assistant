@@ -18,7 +18,7 @@ class FakeControl implements OrchestratorControlToolPort, ExecutionObservability
   calls: OrchestratorControlRequest[] = [];
   mode: "running" | "paused" = "running";
   version = 1;
-  readonly snapshot: OrchestratorStatusSnapshot = { schemaVersion: 1, requestedMode: "running", observedState: "running", version: 1, heartbeatAt: now, heartbeatStale: false, activeTask: { id: "task-211", state: "in_progress", issueNumber: 211 }, nextQueuedTask: { id: "task-212", state: "ready", issueNumber: 212, queueOrder: 500 } };
+  readonly snapshot: OrchestratorStatusSnapshot = { schemaVersion: 1, requestedMode: "running", observedState: "running", version: 1, heartbeatAt: now, heartbeatStale: false, lastPersistedObservationIncomplete: true, activeTask: { id: "task-211", state: "in_progress", issueNumber: 211 }, nextQueuedTask: { id: "task-212", state: "ready", issueNumber: 212, queueOrder: 500 } };
   status() { return { outcome: "success" as const, value: { ...this.snapshot, requestedMode: this.mode, version: this.version } }; }
   request(input: OrchestratorControlRequest) { this.calls.push(input); this.mode = input.action === "pause" ? "paused" : "running"; this.version += 1; return { outcome: "applied" as const, operationId: input.operationId, record: { schemaVersion: 1 as const, requestedMode: this.mode, requestedAt: input.requestedAt, requestedBy: input.requestedBy, reason: input.reason, version: this.version, observedState: "running" as const, heartbeatAt: now }, message: "applied" }; }
   shutdown(input: HostShutdownCommand) { return { outcome: "applied" as const, operationId: input.operationId, record: { schemaVersion: 1 as const, requestOperationId: input.action === "arm" ? input.operationId : input.requestOperationId, target: "queue_drained" as const, state: input.action === "arm" ? "armed" as const : "cancelled" as const, checkpointBaseline: 0, requestedAt: input.requestedAt, requestedBy: input.requestedBy, reason: input.reason, version: 1 }, message: "applied" }; }
@@ -38,6 +38,7 @@ test("MCP reads bounded status and requires exact authorization for pause/resume
   const status = await client.callTool({ name: "pirx_orchestrator_status", arguments: { staleAfterMs: 120_000 } });
   assert.notEqual(status.isError, true);
   assert.equal((status.structuredContent as { snapshot: { activeTask: { issueNumber: number } } }).snapshot.activeTask.issueNumber, 211);
+  assert.equal((status.structuredContent as { snapshot: { lastPersistedObservationIncomplete: boolean } }).snapshot.lastPersistedObservationIncomplete, true);
   assert.equal(JSON.stringify(status.structuredContent).includes("prompt"), false);
 
   const report = await client.callTool({ name: "pirx_execution_report", arguments: { from: "2026-10-30T12:00:00.000Z", to: now } });
