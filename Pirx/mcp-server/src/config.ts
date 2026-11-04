@@ -1,3 +1,4 @@
+import { HeadlessConfigurationError, readHeadlessOrchestratorConfig, resolveRuntimeStoragePath, RuntimeStorageError } from "@pirx/orchestrator";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
@@ -15,6 +16,7 @@ export interface GoogleCalendarConfig {
 export interface McpServerConfig {
   readonly obsidianVaultPath: string | undefined;
   readonly orchestratorDatabasePath: string | undefined;
+  readonly orchestratorConfigurationError?: string;
   readonly resourceDatabasePath: string;
   readonly googleCalendar: GoogleCalendarConfig;
   readonly githubPocIssue: number | undefined;
@@ -92,10 +94,26 @@ export function loadMcpServerConfig(
 
   const githubPocIssue = optionalPositiveInteger(environment.PIRX_GITHUB_POC_ISSUE);
 
+  let orchestratorDatabasePath: string | undefined;
+  let orchestratorConfigurationError: string | undefined;
+  try {
+    const runtime = readHeadlessOrchestratorConfig(environment);
+    if (runtime !== undefined || (environment.PIRX_ORCHESTRATOR_SERVICE_ENABLED !== "true" && optionalPath(environment.PIRX_ORCHESTRATOR_DATABASE) !== undefined)) {
+      orchestratorDatabasePath = resolveRuntimeStoragePath(environment, runtime?.databasePath);
+    } else {
+      orchestratorConfigurationError = "Configure pirx/orchestrator.json or set PIRX_ORCHESTRATOR_CONFIG to the daemon's profile.";
+    }
+  } catch (error: unknown) {
+    orchestratorConfigurationError = error instanceof HeadlessConfigurationError || error instanceof RuntimeStorageError
+      ? error.message
+      : "Orchestrator runtime configuration could not be verified.";
+  }
+
   return {
     obsidianVaultPath:
       optionalPath(environment.PIRX_OBSIDIAN_VAULT) ?? defaultObsidianVault(),
-    orchestratorDatabasePath: optionalPath(environment.PIRX_ORCHESTRATOR_DATABASE),
+    orchestratorDatabasePath,
+    ...(orchestratorConfigurationError === undefined ? {} : { orchestratorConfigurationError }),
     resourceDatabasePath: optionalPath(environment.PIRX_GPU_DB) ?? resolve(dataHome, "pirx", "gpu.sqlite"),
     googleCalendar: {
       credentialsFile: resolve(

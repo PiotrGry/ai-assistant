@@ -88,8 +88,8 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   });
 
   registerHelloTool(server);
-  registerConversationLog(server, config.orchestratorDatabasePath);
-  registerTaskHistory(server, config.orchestratorDatabasePath);
+  registerConversationLog(server, config.orchestratorDatabasePath, config.orchestratorConfigurationError);
+  registerTaskHistory(server, config.orchestratorDatabasePath, config.orchestratorConfigurationError);
   registerSystemTools(server);
   registerObsidianTools(server, obsidianVault);
   registerCalendarTools(server, calendar);
@@ -97,7 +97,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
     port: options.orchestratorControlPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteOrchestratorControlToolPort(config.orchestratorDatabasePath)),
     observabilityPort: options.executionObservabilityPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteExecutionObservabilityToolPort(config.orchestratorDatabasePath)),
     authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
-    ...(config.orchestratorDatabasePath === undefined ? { configurationError: "PIRX_ORCHESTRATOR_DATABASE is not configured." } : {}),
+    ...(config.orchestratorConfigurationError === undefined ? {} : { configurationError: config.orchestratorConfigurationError }),
   });
   registerResourceTools(server, { port: options.resourceReportPort ?? new SqliteResourceReportPort(config.resourceDatabasePath) });
   registerOrchestratorLogTool(server, options.orchestratorLogsPort ?? new SystemdOrchestratorLogsPort({ environment }));
@@ -175,6 +175,8 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
       transport: shipmentTransport,
       authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
       environment,
+      databasePath: config.orchestratorDatabasePath,
+      ...(config.orchestratorConfigurationError === undefined ? {} : { runtimeConfigurationError: config.orchestratorConfigurationError }),
       ...(githubConfigurationError === undefined ? {} : { configurationError: githubConfigurationError }),
     });
   }

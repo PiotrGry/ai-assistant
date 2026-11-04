@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { resolve } from "node:path";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 import { loadMcpServerConfig } from "../src/config.js";
 
 test("MCP configuration uses the existing environment-based approach", () => {
   const config = loadMcpServerConfig({
+    XDG_CONFIG_HOME: "/tmp/pirx-legacy-config-fixture",
     PIRX_OBSIDIAN_VAULT: "/tmp/pirx-vault",
     PIRX_GOOGLE_CREDENTIALS_FILE: "/tmp/pirx-creds.json",
     PIRX_GOOGLE_TOKEN_FILE: "/tmp/pirx-token.json",
@@ -55,4 +58,50 @@ test("MCP keeps invalid optional GitHub POC configuration controlled", () => {
   const config = loadMcpServerConfig({ PIRX_GITHUB_POC_ISSUE: "0" });
   assert.equal(config.githubPocIssue, undefined);
   assert.match(config.githubPocConfigurationError ?? "", /positive integer/u);
+});
+
+function validConfig(directory = "/tmp/pirx-headless"): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    databasePath: `${directory}/runtime.sqlite`,
+    workerId: "pirx-worker",
+    provider: "claude-code",
+    workerCapabilities: ["repository.read", "repository.write", "tests.run", "git.commit", "git.push_assigned_branch"],
+    repositories: [{
+      repository: "PiotrGry/ai-assistant", repositoryRoot: "/tmp/pirx-repository", baseBranch: "develop", baseRevision: "a".repeat(40), remoteName: "origin", testCommands: ["npm run check"],
+      delivery: { releaseBranch: "main", featureWorkflowName: "CI", releaseRequiredChecks: ["CI"], featureRequiredApprovals: 0, releaseRequiredApprovals: 0, featureMergeMethod: "merge", releaseMergeMethod: "merge", requireMergeable: true },
+    }],
+    worktreeParent: `${directory}/worktrees`,
+    leaseDurationMs: 60_000,
+    shutdownTimeoutMs: 5_000,
+    workerTimeoutMs: 120_000,
+    workerOutputBytes: 16_384,
+    workerErrorBytes: 16_384,
+    maximumConsecutiveResumeFailures: 3,
+    cycleIntervalMs: 30_000,
+    errorIntervalMs: 60_000,
+    githubProjectOwner: "PiotrGry",
+    githubProjectNumber: 3,
+    githubApiUrl: "https://api.github.com",
+    githubTimeoutMs: 10_000,
+  };
+}
+
+test("MCP and the daemon use the same runtime profile and reject a conflicting legacy path", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-shared-profile-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "pirx"));
+  const path = join(root, "pirx", "orchestrator.json");
+  await writeFile(path, JSON.stringify(validConfig(root)));
+  const environment = { XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_SERVICE_ENABLED: "true" };
+  const config = loadMcpServerConfig(environment);
+  assert.equal(config.orchestratorDatabasePath, join(root, "runtime.sqlite"));
+  const conflict = loadMcpServerConfig({ ...environment, PIRX_ORCHESTRATOR_DATABASE: join(root, "wrong.sqlite") });
+  assert.equal(conflict.orchestratorDatabasePath, undefined);
+  assert.match(conflict.orchestratorConfigurationError ?? "", /conflicts/u);
+  const { loadHeadlessOrchestratorConfig } = await import("@pirx/orchestrator");
+  assert.equal((await loadHeadlessOrchestratorConfig(environment)).databasePath, config.orchestratorDatabasePath);
+  const missing = loadMcpServerConfig({ ...environment, PIRX_ORCHESTRATOR_CONFIG: join(root, "missing.json"), PIRX_ORCHESTRATOR_DATABASE: join(root, "runtime.sqlite") });
+  assert.equal(missing.orchestratorDatabasePath, undefined);
+  assert.match(missing.orchestratorConfigurationError ?? "", /could not be read/u);
 });
