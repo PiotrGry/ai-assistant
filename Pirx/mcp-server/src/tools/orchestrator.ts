@@ -52,7 +52,13 @@ export class SqliteExecutionObservabilityToolPort implements ExecutionObservabil
 export class SqliteOrchestratorControlToolPort implements OrchestratorControlToolPort {
   readonly #filename: string;
   public constructor(filename: string) { this.#filename = filename; }
-  public status(now: UtcTimestamp, staleAfterMs: number): StorageResult<OrchestratorStatusSnapshot> { return this.#withStore((_store, repository) => repository.status(now, staleAfterMs)); }
+  public status(now: UtcTimestamp, staleAfterMs: number): StorageResult<OrchestratorStatusSnapshot> {
+    const result = this.#withStore((_store, repository) => repository.status(now, staleAfterMs));
+    if (result.outcome === "storage_error") {
+      console.error(JSON.stringify({ event: "orchestrator_status_read_failed", code: result.outcome, reason: result.message }));
+    }
+    return result;
+  }
   public diagnostic(sequence: number, offset: number, length: number): StorageResult<OrchestratorDiagnosticChunk> { return this.#withStore((_store, repository) => repository.diagnostic(sequence, offset, length)); }
   public request(input: OrchestratorControlRequest): OrchestratorControlRequestResult {
     const value = this.#withStore((_store, repository) => ({ outcome: "success" as const, value: repository.request(input) }));

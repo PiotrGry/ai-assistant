@@ -187,10 +187,15 @@ export class OrchestratorControlRepository {
         const attentionTask = summary(attention, { issue: true, queue: true });
         const attentionAttempt = attentionTask === undefined ? undefined : summary(this.#store.database.prepare("SELECT id, state, ordinal, result FROM runtime_attempts WHERE task_id = ? ORDER BY ordinal DESC LIMIT 1").get(attentionTask.id) as Record<string, unknown> | undefined, { ordinal: true, result: true });
         const attemptEvidence = attentionTask === undefined ? undefined : this.#store.attempts.listByTask(attentionTask.id);
-        const latestAttempt = attemptEvidence?.outcome === "success" ? attemptEvidence.value.at(-1) : undefined;
+        if (attemptEvidence !== undefined && attemptEvidence.outcome !== "success") {
+          return { outcome: "storage_error", message: "The blocked Task's Attempt history could not be read." };
+        }
+        const latestAttempt = attemptEvidence?.value.at(-1);
         const latestDiagnostic = latestAttempt?.state === "terminal" ? latestAttempt.diagnostic : undefined;
-        if (attentionAttempt !== undefined && latestDiagnostic !== undefined) Object.assign(attentionAttempt, { diagnostic: diagnosticContext(latestDiagnostic) });
-        const attentionRequired = attentionTask === undefined ? undefined : { task: attentionTask, ...(attentionAttempt === undefined ? {} : { attempt: attentionAttempt }), reason: String(diagnosticContext(attention?.blocking_reason ?? "Task requires reconciliation.")), nextAction: "inspect_blocker" as const };
+        const attempt = attentionAttempt !== undefined && latestDiagnostic !== undefined
+          ? Object.freeze({ ...attentionAttempt, diagnostic: diagnosticContext(latestDiagnostic) })
+          : attentionAttempt;
+        const attentionRequired = attentionTask === undefined ? undefined : { task: attentionTask, ...(attempt === undefined ? {} : { attempt }), reason: String(diagnosticContext(attention?.blocking_reason ?? "Task requires reconciliation.")), nextAction: "inspect_blocker" as const };
         return { outcome: "success", value: Object.freeze({ ...snapshot, diagnostics, ...(attentionRequired === undefined ? {} : { attentionRequired }) }) };
       } catch { return { outcome: "storage_error", message: "Orchestrator status snapshot could not be read." }; }
     });
