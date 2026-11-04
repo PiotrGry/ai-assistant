@@ -1,6 +1,6 @@
-import { DatabaseSync } from "node:sqlite";
+import { backup, DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -319,6 +319,51 @@ function storageFilename(environment: NodeJS.ProcessEnv, filename?: string): str
 
 export function defaultRuntimeStoragePath(environment: NodeJS.ProcessEnv = process.env): string {
   return storageFilename(environment);
+}
+
+/** Save one checked snapshot next to the runtime before an explicit upgrade. */
+export async function backupRuntimeBeforeMigration(filename: string, environment: NodeJS.ProcessEnv): Promise<string | undefined> {
+  const sourcePath = storageFilename(environment, filename);
+  let source: DatabaseSync | undefined;
+  let copy: DatabaseSync | undefined;
+  let directory: string | undefined;
+  try {
+    try { statSync(sourcePath); }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    source = new DatabaseSync(sourcePath, { readOnly: true });
+    source.exec(`PRAGMA busy_timeout = ${DEFAULT_RUNTIME_BUSY_TIMEOUT_MS};`);
+    const versions = source.prepare("SELECT version FROM runtime_schema_migrations ORDER BY version").all();
+    if (!versions.length || versions.length > RUNTIME_STORAGE_SCHEMA_VERSION ||
+      versions.some((row, index) => row.version !== index + 1)) {
+      throw new RuntimeStorageError("storage_error", "Cannot back up an incompatible runtime schema for migration.");
+    }
+    directory = mkdtempSync(join(dirname(sourcePath), ".pirx-pre-migration-"));
+    const destination = join(directory, "runtime.sqlite");
+    await backup(source, destination);
+    copy = new DatabaseSync(destination, { readOnly: true });
+    const integrity = copy.prepare("PRAGMA integrity_check").all();
+    const copiedVersions = copy.prepare("SELECT version FROM runtime_schema_migrations ORDER BY version").all();
+    if (integrity.length !== 1 || integrity[0]?.integrity_check !== "ok" ||
+      copy.prepare("PRAGMA foreign_key_check").get() !== undefined ||
+      copiedVersions.length !== versions.length ||
+      copiedVersions.some((row, index) => row.version !== versions[index]?.version)) {
+      throw new RuntimeStorageError("storage_error", "The runtime SQLite backup failed verification.");
+    }
+    return destination;
+  } catch {
+    copy?.close();
+    copy = undefined;
+    if (directory !== undefined) {
+      try { rmSync(directory, { recursive: true, force: true }); } catch { /* Preserve the backup failure. */ }
+    }
+    throw new RuntimeStorageError("storage_error", "Runtime migration was not started because a verified SQLite backup could not be created.");
+  } finally {
+    copy?.close();
+    source?.close();
+  }
 }
 
 const MIGRATIONS: readonly string[] = [
