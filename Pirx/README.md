@@ -247,3 +247,27 @@ zawiera tokenów, logów jobów ani surowych odpowiedzi GitHuba.
 ## LazyVim
 
 W `:LazyExtras` włącz `lang.typescript`, zrestartuj Neovim i otwórz dowolny plik z `agent/src` albo `mcp-server/src`. `:LspInfo` powinno wtedy pokazać `vtsls`; serwer językowy sam odczyta tutejszy `tsconfig` i zależności z workspace.
+
+
+### Explicit Obsidian opt-in
+
+Set `PIRX_OBSIDIAN_VAULT` to the vault you want Pirx to access, either in the
+existing chat profile or the launch environment (explicit environment wins).
+There is no automatic fallback to the repository vault. Missing configuration
+leaves Obsidian unavailable; an invalid configured path fails only the Obsidian
+operation and never selects another vault. Other MCP integrations remain usable.
+
+
+### GitHub write target
+
+A fallback repository is only a read default. To enable mutations, explicitly set
+both `PIRX_GITHUB_OWNER` and `PIRX_GITHUB_REPOSITORY` in the launch environment or
+supported chat profile. Daemon repository entries supply their explicit targets.
+GitHub token transport requires HTTPS; redirects and cross-origin request URLs
+are rejected. Tests use injected transports rather than a production HTTP bypass.
+
+
+`calendar_list_events` returns one bounded page: `events`, `complete`, and optional
+`nextPageToken`. Continue with that token as `pageToken` and unchanged calendar,
+range and page-size parameters. An empty page with a token is not an empty calendar.
+A failed subsequent page is an error, not proof that the previous page was complete.

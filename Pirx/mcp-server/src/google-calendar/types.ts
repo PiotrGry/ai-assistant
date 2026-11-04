@@ -78,11 +78,18 @@ export interface ListEventsOptions {
   readonly timeMin?: string;
   readonly timeMax?: string;
   readonly maxResults?: number;
+  readonly pageToken?: string;
+}
+
+export interface CalendarEventPage {
+  readonly events: CalendarEvent[];
+  readonly complete: boolean;
+  readonly nextPageToken?: string;
 }
 
 export interface CalendarOperations {
   listCalendars(): Promise<CalendarInfo[]>;
-  listEvents(options: ListEventsOptions): Promise<CalendarEvent[]>;
+  listEvents(options: ListEventsOptions): Promise<CalendarEventPage>;
   getEvent(calendarId: string | undefined, eventId: string): Promise<CalendarEvent>;
   createEvent(
     calendarId: string | undefined,

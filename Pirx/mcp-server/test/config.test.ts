@@ -36,9 +36,9 @@ test("MCP configuration uses the existing environment-based approach", () => {
   assert.equal(config.githubPocConfigurationError, undefined);
 });
 
-test("MCP configuration uses the project vault by default", () => {
+test("MCP configuration requires an explicit vault even when the repository has one", () => {
   const config = loadMcpServerConfig({});
-  assert.equal(config.obsidianVaultPath?.endsWith("/Pirx/vault"), true);
+  assert.equal(config.obsidianVaultPath, undefined);
   assert.equal(config.resourceDatabasePath.endsWith("/.local/share/pirx/gpu.sqlite"), true);
 });
 
@@ -126,4 +126,31 @@ test("invalid Calendar configuration does not prevent other MCP tools from start
     assert.equal(calendar.isError, true);
     assert.match(JSON.stringify(calendar), /PIRX_GOOGLE_TIMEOUT_MS/);
   } finally { await client.close(); await server.close(); }
+});
+
+
+test("Obsidian is opt-in and invalid paths do not disable other MCP tools", async () => {
+  const { createMcpServer } = await import("../src/server.js");
+  const root = await mkdtemp(join(tmpdir(), "pirx-vault-optin-"));
+  try {
+    await writeFile(join(root, "note.md"), "explicit-vault-content");
+    for (const environment of [{}, { PIRX_OBSIDIAN_VAULT: join(root, "missing") }, { PIRX_OBSIDIAN_VAULT: root }]) {
+      const server = createMcpServer({ environment });
+      const client = new Client({ name: "vault-optin", version: "1" });
+      const [a, b] = InMemoryTransport.createLinkedPair();
+      try {
+        await Promise.all([server.connect(b), client.connect(a)]);
+        const note = await client.callTool({ name: "obsidian_read", arguments: { path: "note.md" } });
+        if (environment.PIRX_OBSIDIAN_VAULT === root) {
+          assert.notEqual(note.isError, true);
+          assert.match(JSON.stringify(note), /explicit-vault-content/);
+        } else {
+          assert.equal(note.isError, true);
+          assert.ok(!JSON.stringify(note).includes("explicit-vault-content"));
+        }
+        const hello = await client.callTool({ name: "hello", arguments: { name: "operator" } });
+        assert.notEqual(hello.isError, true);
+      } finally { await client.close(); await server.close(); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

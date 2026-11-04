@@ -74,13 +74,14 @@ test("listEvents sends the requested range and returns timed/all-day events chro
     });
   };
   const client = new GoogleCalendarClient(tokenProvider, config, { fetch });
-  const events = await client.listEvents({
+  const { events, complete } = await client.listEvents({
     calendarId: "work@example.com",
     timeMin: "2026-03-28T00:00:00+01:00",
     timeMax: "2026-03-30T00:00:00+02:00",
     maxResults: 25,
   });
 
+  assert.equal(complete, true);
   assert.deepEqual(events.map((item) => item.id), ["all-day", "later"]);
   assert.equal(events[0]?.allDay, true);
   assert.equal(events[1]?.timeZone, "Europe/Warsaw");
@@ -287,4 +288,33 @@ test("event timing rejects mixed, reversed and timezone-less timed inputs", asyn
       (error: unknown) => error instanceof CalendarError && error.code === "invalid_request",
     );
   }
+});
+
+
+test("event pagination exposes incomplete empty pages and resumes without changing range", async () => {
+  const requests: URL[] = [];
+  const client = new GoogleCalendarClient(tokenProvider, config, { fetch: async (input) => {
+    const url = new URL(input); requests.push(url);
+    return url.searchParams.has("pageToken")
+      ? jsonResponse({ items: [event("second-page", { date: "2026-11-04" }, { date: "2026-11-05" })] })
+      : jsonResponse({ items: [], nextPageToken: "cursor-2" });
+  } });
+  const query = { calendarId: "work", timeMin: "2026-11-01T00:00:00Z", timeMax: "2026-12-01T00:00:00Z", maxResults: 1 };
+  const first = await client.listEvents(query);
+  assert.equal(first.complete, false);
+  assert.deepEqual(first.events, []);
+  const second = await client.listEvents({ ...query, pageToken: first.nextPageToken! });
+  assert.equal(second.complete, true);
+  assert.equal(second.events[0]?.id, "second-page");
+  assert.equal(second.nextPageToken, undefined);
+  assert.equal(requests[1]?.searchParams.get("pageToken"), "cursor-2");
+  assert.equal(requests[1]?.searchParams.get("timeMin"), query.timeMin);
+  assert.equal(requests.length, 2);
+});
+
+test("event pagination rejects repeated cursors and never returns a successful partial result on failure", async () => {
+  const repeated = new GoogleCalendarClient(tokenProvider, config, { fetch: async () => jsonResponse({ items: [], nextPageToken: "same" }) });
+  await assert.rejects(() => repeated.listEvents({ pageToken: "same" }), /repeated event page token/);
+  const unavailable = new GoogleCalendarClient(tokenProvider, config, { fetch: async () => jsonResponse({}, 503) });
+  await assert.rejects(() => unavailable.listEvents({ pageToken: "next" }), CalendarError);
 });

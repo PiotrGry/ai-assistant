@@ -159,13 +159,14 @@ export function registerCalendarTools(
     {
       title: "List Google Calendar events",
       description:
-        "Read current Google Calendar events in chronological order. Use this again whenever the user asks to confirm the current calendar state.",
+        "Read one page of Google Calendar events in chronological order. If complete=false, call again with nextPageToken as pageToken and the same calendar/range to read the remaining events. Never describe a partial page as the whole calendar.",
       inputSchema: z
         .object({
           calendarId: calendarIdSchema,
           timeMin: rangeDateTimeSchema.optional(),
           timeMax: rangeDateTimeSchema.optional(),
           maxResults: z.number().int().min(1).max(250).optional(),
+          pageToken: z.string().min(1).max(4096).optional(),
         })
         .superRefine((value, context) => {
           if (
@@ -181,21 +182,22 @@ export function registerCalendarTools(
             });
           }
         }),
-      outputSchema: z.object({ events: z.array(calendarEventSchema) }),
+      outputSchema: z.object({ events: z.array(calendarEventSchema), complete: z.boolean(), nextPageToken: z.string().optional() }),
       annotations: {
         readOnlyHint: true,
         idempotentHint: true,
         openWorldHint: true,
       },
     },
-    async ({ calendarId, timeMin, timeMax, maxResults }) => {
+    async ({ calendarId, timeMin, timeMax, maxResults, pageToken }) => {
       const options: ListEventsOptions = {
         ...(calendarId !== undefined ? { calendarId } : {}),
         ...(timeMin !== undefined ? { timeMin } : {}),
         ...(timeMax !== undefined ? { timeMax } : {}),
         ...(maxResults !== undefined ? { maxResults } : {}),
+        ...(pageToken !== undefined ? { pageToken } : {}),
       };
-      return structured({ events: await calendar.listEvents(options) });
+      return structured({ ...await calendar.listEvents(options) });
     },
   );
 

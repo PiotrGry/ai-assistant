@@ -1,8 +1,6 @@
 import { HeadlessConfigurationError, readHeadlessOrchestratorConfig, resolveRuntimeStoragePath, RuntimeStorageError } from "@pirx/orchestrator";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
-import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
 export interface GoogleCalendarConfig {
   readonly credentialsFile: string;
@@ -68,15 +66,6 @@ function optionalPositiveInteger(value: string | undefined): {
   return { value: parsed, error: undefined };
 }
 
-function defaultObsidianVault(): string | undefined {
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    resolve(moduleDirectory, "..", "..", "vault"),
-    resolve(moduleDirectory, "..", "..", "..", "vault"),
-  ];
-  return candidates.find((candidate) => existsSync(candidate));
-}
-
 export function loadMcpServerConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): McpServerConfig {
@@ -105,7 +94,7 @@ export function loadMcpServerConfig(
 
   return {
     obsidianVaultPath:
-      optionalPath(environment.PIRX_OBSIDIAN_VAULT) ?? defaultObsidianVault(),
+      optionalPath(environment.PIRX_OBSIDIAN_VAULT),
     orchestratorDatabasePath,
     ...(orchestratorConfigurationError === undefined ? {} : { orchestratorConfigurationError }),
     resourceDatabasePath: optionalPath(environment.PIRX_GPU_DB) ?? resolve(dataHome, "pirx", "gpu.sqlite"),
