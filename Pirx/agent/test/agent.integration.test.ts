@@ -6,6 +6,8 @@ import { dirname, join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { SqliteActionLedger } from "../src/action-ledger.js";
+import { SqliteStore } from "../src/storage/sqlite.js";
 import { PirxAgent } from "../src/agent.js";
 import type { AgentConfig } from "../src/config.js";
 import type {
@@ -795,4 +797,26 @@ test("LLM timeout aborts a stalled Ollama request and rolls back the turn", asyn
   });
 
   await assert.rejects(() => agent.chat("This request should time out."), /timeout|aborted/iu);
+});
+
+test("blocks mutations without a durable intent while continuing reads and chat", async (context) => {
+  const write = { function: { name: "obsidian_write", arguments: {} } };
+  const read = { function: { name: "hello", arguments: { name: "Piotr" } } };
+  const calls = { role: "assistant", content: "", tool_calls: [write, read] };
+  const answer = { role: "assistant", content: "Odczyt zakończony." };
+  const { agent } = await createContinuationAgent(context, [calls, answer, calls, answer]);
+  const store = SqliteStore.open({ filename: ":memory:" });
+  const ledger = new SqliteActionLedger(store);
+  store.close();
+
+  for (const [turnContext, expected] of [
+    [{}, /rejestr operacji jest niedostępny/u],
+    [{ actionLedger: ledger, sessionId: "test-session", turnId: "test-turn" }, /nie udało się utrwalić zamiaru/u],
+  ] as const) {
+    const turn = await agent.chat("Wykonaj próbę zapisu i odczytu.", turnContext);
+    const replies = turn.messages.filter((message) => message.role === "tool").slice(-2);
+    assert.match(replies[0]?.content ?? "", expected);
+    assert.match(replies[1]?.content ?? "", /Hello, Piotr!/u);
+    assert.equal(turn.content, answer.content);
+  }
 });
