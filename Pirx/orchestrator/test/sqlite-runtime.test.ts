@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
+import { backup, DatabaseSync } from "node:sqlite";
 import { link, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
+import { backupRuntimeBeforeMigration } from "../src/runtime/sqlite.js";
 
 import {
   RuntimeSqliteStore,
   RUNTIME_STORAGE_SCHEMA_VERSION,
   createTask,
+  createCheckpoint,
+  createWorkerFailureDiagnostic,
+  OrchestratorControlRepository,
   startInitialAttempt,
   transitionTask,
   transitionAttempt,
@@ -238,4 +242,49 @@ test("existing runtime open rejects incompatible schema before changing the data
     assert.throws(() => RuntimeSqliteStore.open({ filename, mode: "read_only" }), /Incompatible SQLite runtime schema/u);
     assert.equal(store.database.prepare("SELECT version FROM runtime_schema_migrations WHERE version = ?").get(RUNTIME_STORAGE_SCHEMA_VERSION), undefined);
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("pre-migration backup captures committed WAL data and restores it to a separate runtime", async () => {
+  const fixture = await databaseFixture();
+  const store = RuntimeSqliteStore.open({ filename: fixture.filename });
+  try {
+    assert.equal(store.tasks.create(makeTask()).outcome, "success");
+    const started = store.startAttempt(taskId, { id: attemptId, worker: "pirx", provider: "test" }, t1);
+    if (started.outcome !== "success") throw new Error("Attempt fixture failed");
+    const terminal = transitionAttempt(started.value.attempt, "running", { type: "finish", result: "FAILED", blockingReason: "reconciliation required", diagnostic: createWorkerFailureDiagnostic("timeout") }, t2);
+    if (!terminal.ok) throw new Error("Terminal fixture failed");
+    assert.equal(store.attempts.update(terminal.value, "running").outcome, "success");
+    const blocked = transitionTask(started.value.task, "in_progress", { type: "block", reason: "reconciliation required" }, t2);
+    if (!blocked.ok) throw new Error("Task fixture failed");
+    assert.equal(store.tasks.update(blocked.value, { state: "in_progress", updatedAt: started.value.task.updatedAt }).outcome, "success");
+    const checkpoint = createCheckpoint({ id: "backup-checkpoint" as never, taskId, previousAttemptId: attemptId, trigger: "RECOVERABLE_FAILURE", createdAt: t2, goal: makeTask().goal, currentState: "blocked", completedWork: [], remainingWork: ["verify remote state"], changedFiles: [], findings: [], hypotheses: [], tests: [], evidence: [], lastAction: "push returned no result", resumeInstruction: "reconcile before retry" });
+    if (!checkpoint.ok) throw new Error(JSON.stringify(checkpoint.violations));
+    assert.equal(store.checkpoints.save(checkpoint.value).outcome, "success");
+    const control = new OrchestratorControlRepository(store);
+    const entry = control.recordDiagnostic({ schemaVersion: 1, event: "cycle", outcome: "failed", reason: "reconciliation required" }, t2);
+    if (entry.outcome !== "success") throw new Error(entry.message);
+    const saved = await backupRuntimeBeforeMigration(fixture.filename, {});
+    assert.ok(saved);
+    const restoredPath = join(fixture.directory, "restored.sqlite");
+    const source = new DatabaseSync(saved, { readOnly: true });
+    try { await backup(source, restoredPath); } finally { source.close(); }
+    const restored = RuntimeSqliteStore.open({ filename: restoredPath, mode: "existing" });
+    try {
+      assert.deepEqual(restored.tasks.get(taskId), store.tasks.get(taskId));
+      assert.deepEqual(restored.attempts.get(attemptId), store.attempts.get(attemptId));
+      assert.equal(restored.database.prepare("SELECT id FROM runtime_checkpoints WHERE id = ?").get(checkpoint.value.id)?.id, checkpoint.value.id);
+      assert.deepEqual(new OrchestratorControlRepository(restored).diagnostic(entry.value), control.diagnostic(entry.value));
+      assert.equal(restored.selection.select({ evaluatedAt: t2, worker: { workerId: "pirx", capabilities: ["repository.read"] } }).outcome, "no_runnable_task");
+      assert.deepEqual(restored.database.prepare("PRAGMA foreign_key_check").all(), []);
+    } finally { restored.close(); }
+  } finally { store.close(); await rm(fixture.directory, { recursive: true, force: true }); }
+});
+
+test("pre-migration backup rejects a corrupt source without replacing it", async () => {
+  const fixture = await databaseFixture();
+  try {
+    await writeFile(fixture.filename, "invalid SQLite");
+    await assert.rejects(backupRuntimeBeforeMigration(fixture.filename, {}), /migration was not started/u);
+    assert.equal(await readFile(fixture.filename, "utf8"), "invalid SQLite");
+  } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });

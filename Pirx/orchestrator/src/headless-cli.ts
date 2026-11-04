@@ -17,7 +17,7 @@ import { ExecutionObservabilityProjector } from "./runtime/execution-observabili
 import { ProductionRuntime } from "./runtime/production-runtime.js";
 import { ReleaseMergeCoordinator } from "./runtime/release-merge.js";
 import { ShipmentCycleCoordinator } from "./runtime/shipment-coordinator.js";
-import { RuntimeSqliteStore, RuntimeStorageError } from "./runtime/sqlite.js";
+import { backupRuntimeBeforeMigration, RuntimeSqliteStore, RuntimeStorageError } from "./runtime/sqlite.js";
 
 export interface HeadlessCliProcess {
   readonly env: NodeJS.ProcessEnv;
@@ -44,6 +44,8 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
   try {
     const config = await loadHeadlessOrchestratorConfig(host.env);
     if (host.argv.slice(2).includes("--migrate")) {
+      const backupPath = await backupRuntimeBeforeMigration(config.databasePath, host.env);
+      if (backupPath !== undefined) writeEvent(host.stdout, { schemaVersion: 1, event: "runtime_backup_created", outcome: "success", backupPath });
       const store = RuntimeSqliteStore.open({ filename: config.databasePath, environment: host.env, mode: "migrate" });
       store.close();
       writeEvent(host.stdout, { schemaVersion: 1, event: "runtime_migrated", outcome: "success" });
