@@ -19,6 +19,7 @@ import {
 } from "@pirx/orchestrator";
 
 import { loadMcpServerConfig } from "./config.js";
+import { registerTaskHistory } from "./tools/task-history.js";
 import { registerConversationLog } from "./advisor.js";
 import { GoogleOAuthTokenProvider } from "./google-calendar/auth.js";
 import { GoogleCalendarClient } from "./google-calendar/client.js";
@@ -88,6 +89,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
 
   registerHelloTool(server);
   registerConversationLog(server, config.orchestratorDatabasePath);
+  registerTaskHistory(server, config.orchestratorDatabasePath);
   registerSystemTools(server);
   registerObsidianTools(server, obsidianVault);
   registerCalendarTools(server, calendar);

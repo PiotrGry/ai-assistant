@@ -136,3 +136,57 @@ test("MCP reads a blocked Attempt diagnostic from SQLite and distinguishes a fai
     assert.equal(store.database.prepare("SELECT version FROM runtime_schema_migrations WHERE version = ?").get(RUNTIME_STORAGE_SCHEMA_VERSION), undefined);
   } finally { await client.close(); await server.close(); }
 });
+
+test("MCP Task history pages persisted Attempts and resolves the repository explicitly", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-task-history-"));
+  const filename = join(root, "runtime.sqlite");
+  const store = RuntimeSqliteStore.open({ filename });
+  try {
+    for (const [taskId, repository] of [["task-one", "first"], ["task-two", "second"], ["task-three", "second"]] as const) {
+      const task = createTask({ id: taskId as TaskId, githubReference: { owner: "Pirx", repository, issueNumber: 42 }, goal: "Test fixture", scope: "fixture", acceptanceCriteria: ["ok"], priority: 1, risk: "low", requiredCapabilities: ["repository.read"], createdAt: now });
+      if (!task.ok) throw new Error("Task fixture failed");
+      assert.equal(store.tasks.create(task.value).outcome, "success");
+    }
+    const t1 = "2026-10-30T13:01:00.000Z" as UtcTimestamp;
+    const first = store.startAttempt("task-one", { id: "attempt-one" as AttemptId, worker: "pirx", provider: "claude-code" }, now);
+    if (first.outcome !== "success") throw new Error("Attempt fixture failed");
+    const diagnostic = createWorkerFailureDiagnostic("timeout", { stage: "process", correlationId: "fixture-correlation" });
+    const failed = transitionAttempt(first.value.attempt, "running", { type: "finish", result: "FAILED", blockingReason: "timed out", diagnostic }, t1);
+    if (!failed.ok) throw new Error("Terminal Attempt fixture failed");
+    assert.equal(store.attempts.update(failed.value, "running").outcome, "success");
+    const branch = "pirx/task-history";
+    const revision = "a".repeat(40);
+    const second = store.startAttempt("task-one", { id: "attempt-two" as AttemptId, worker: "pirx", provider: "claude-code", branch }, t1);
+    if (second.outcome !== "success") throw new Error("Retry fixture failed");
+    const terminal = transitionAttempt(second.value.attempt, "running", { type: "finish", result: "CODE_PUSHED", branch, finalCommit: revision }, t1);
+    if (!terminal.ok) throw new Error("Completed Attempt fixture failed");
+    assert.equal(store.attempts.update(terminal.value, "running").outcome, "success");
+    const history = store.attempts.listByTask("task-one");
+    if (history.outcome !== "success") throw new Error("History fixture failed");
+    const done = transitionTask(second.value.task, "in_progress", { type: "complete", evidence: { attemptId: terminal.value.id, finalCommit: revision, evidenceReference: "test:completed" }, attempts: history.value }, t1);
+    if (!done.ok) throw new Error("Task completion fixture failed");
+    assert.equal(store.tasks.update(done.value, { state: "in_progress", updatedAt: second.value.task.updatedAt }).outcome, "success");
+  } finally { store.close(); }
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = createMcpServer({ environment: { PIRX_ORCHESTRATOR_DATABASE: filename } });
+  const client = new Client({ name: "pirx-task-history-test", version: "1" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const lookup = async (arguments_: Record<string, unknown>) => {
+    const reply = await client.callTool({ name: "pirx_task_history", arguments: arguments_ });
+    return JSON.parse(JSON.stringify(reply.structuredContent));
+  };
+  try {
+    const first = await lookup({ repository: "pirx/first", issueNumber: 42, limit: 1 });
+    assert.equal(first.task.id, "task-one");
+    assert.equal(first.task.state, "completed");
+    assert.equal(first.attempts[0].correlationId, "fixture-correlation");
+    assert.equal(first.nextAfterOrdinal, 1);
+    const second = await lookup({ taskId: first.task.id, afterOrdinal: first.nextAfterOrdinal, limit: 1 });
+    assert.equal(second.attempts[0].id, "attempt-two");
+    assert.equal(second.nextAfterOrdinal, undefined);
+    assert.equal((await lookup(first.attempts[0].diagnosticReference)).diagnostic.code, "timeout");
+    assert.equal((await lookup({ attemptId: "attempt-two" })).diagnostic, null);
+    assert.deepEqual((await lookup({ repository: "Pirx/second", issueNumber: 42 })).taskIds, ["task-three", "task-two"]);
+    assert.equal((await lookup({ repository: "Pirx/missing", issueNumber: 42 })).outcome, "not_found");
+  } finally { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
