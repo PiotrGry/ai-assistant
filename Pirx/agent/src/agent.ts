@@ -745,7 +745,7 @@ export class PirxAgent {
           toolRequests += 1;
           const arguments_ = normalizeArguments(call.function.arguments);
           if (arguments_ === undefined) {
-            const execution = { text: "Nie wykonano wywołania: argumenty muszą być poprawnym obiektem JSON zgodnym ze schematem narzędzia. Nie zastąpiono ich pustym obiektem.", isError: true, serverUnavailable: false };
+            const execution: ToolExecution = { outcome: "failed_before_execution", text: "Nie wykonano wywołania: argumenty muszą być poprawnym obiektem JSON zgodnym ze schematem narzędzia. Nie zastąpiono ich pustym obiektem.", isError: true, serverUnavailable: false };
             this.#hooks.onToolResult?.(name, execution, 0);
             this.#messages.push({ role: "tool", tool_name: name, content: execution.text });
             continue;
@@ -832,17 +832,17 @@ export class PirxAgent {
             actionPlan === undefined ? undefined : { operationId: actionPlan.mutationId },
             Math.min(this.#config.maxToolResultCharacters ?? 12_000, maximumResultCharacters - resultCharacters),
           );
-          resultCharacters += execution.text.length;
-          this.#messages.push({ role: "tool", tool_name: name, content: execution.text });
+          const operationState = execution.outcome === "succeeded" ? "succeeded" : execution.outcome === "unknown" ? "unknown" : "failed";
+          const toolMessage = actionPlan !== undefined && operationState === "unknown"
+            ? `Wynik operacji jest niepewny. Sprawdź stan zewnętrzny przed ponowieniem. ${execution.text}`
+            : execution.text;
+          resultCharacters += toolMessage.length;
+          this.#messages.push({ role: "tool", tool_name: name, content: toolMessage });
           const toolDurationMs = performance.now() - toolStartedAt;
           if (mcpOperation !== undefined) {
             context.operationRecorder?.finish(mcpOperation, {
               endedAt: this.#now().toISOString(),
-              status: execution.serverUnavailable
-                ? "unknown"
-                : execution.isError
-                  ? "failed"
-                  : "succeeded",
+              status: operationState,
               payload: {
                 schema_version: 1,
                 tool_name: name,
@@ -854,17 +854,14 @@ export class PirxAgent {
             });
           }
           if (actionPlan !== undefined) {
-            const state = execution.serverUnavailable
-              ? "unknown"
-              : execution.isError
-                ? "failed"
-                : "succeeded";
             context.actionLedger?.finish(
               actionPlan,
-              state,
+              operationState,
               {
                 is_error: execution.isError,
                 server_unavailable: execution.serverUnavailable,
+                execution_outcome: execution.outcome,
+                ...(execution.correlationId === undefined ? {} : { correlation_id: execution.correlationId }),
               },
               execution.isError ? execution.text : undefined,
             );

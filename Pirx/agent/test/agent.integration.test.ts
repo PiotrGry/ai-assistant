@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { SqliteActionLedger } from "../src/action-ledger.js";
+import { mutationId, SqliteActionLedger } from "../src/action-ledger.js";
 import { SqliteStore } from "../src/storage/sqlite.js";
 import { PirxAgent } from "../src/agent.js";
 import type { AgentConfig } from "../src/config.js";
@@ -819,4 +819,44 @@ test("blocks mutations without a durable intent while continuing reads and chat"
     assert.match(replies[1]?.content ?? "", /Hello, Piotr!/u);
     assert.equal(turn.content, answer.content);
   }
+});
+
+test("an MCP write that times out after its effect stays unknown and cannot be replayed", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-mcp-write-timeout-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const entry = join(root, "mcp.mjs");
+  const effects = join(root, "effects");
+  await writeFile(entry, `
+    import { appendFileSync } from "node:fs";
+    import { createInterface } from "node:readline";
+    const reply = (id, result) => console.log(JSON.stringify({ jsonrpc: "2.0", id, result }));
+    for await (const line of createInterface({ input: process.stdin })) {
+      const { id, method, params } = JSON.parse(line);
+      if (method === "initialize") reply(id, { protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } });
+      if (method === "tools/list") reply(id, { tools: [{ name: "fixture_write", inputSchema: { type: "object" }, annotations: { readOnlyHint: false } }] });
+      if (method === "tools/call") {
+        appendFileSync(${JSON.stringify(effects)}, "effect\\n");
+        setTimeout(() => reply(id, { content: [{ type: "text", text: "success" }] }), 1_000);
+      }
+    }
+  `);
+  const arguments_ = { idempotencyKey: "same-write" };
+  const write = { role: "assistant", content: "", tool_calls: [{ function: { name: "fixture_write", arguments: arguments_ } }] };
+  const answer = { role: "assistant", content: "Sprawdź stan." };
+  const { agent } = await createContinuationAgent(context, [write, answer, write, answer], { mcpServerEntry: entry, toolTimeoutMs: 250, continuationCheck: false });
+  const store = SqliteStore.open({ filename: ":memory:" });
+  context.after(() => store.close());
+  const ledger = new SqliteActionLedger(store);
+  const at = new Date().toISOString();
+  store.insertRunEnvironment({ id: "env", createdAt: at, payload: {} });
+  store.insertSession({ id: "session", environmentId: "env", startedAt: at, status: "active" });
+  for (const [sequence, turnId] of ["first", "replay"].entries()) {
+    store.insertTurn({ id: turnId, sessionId: "session", sequence, startedAt: at, status: "started", userPrompt: "Write once", payload: {} });
+    const turn = await agent.chat("Write once", { actionLedger: ledger, sessionId: "session", turnId });
+    assert.match(turn.messages.filter((message) => message.role === "tool").at(-1)?.content ?? "", /niepewny/u);
+  }
+  const id = mutationId({ sessionId: "session", turnId: "first", sequence: 0, target: "fixture_write", toolName: "fixture_write", arguments: arguments_, authorization: {} });
+  assert.equal(store.latestActionState(id)?.state, "unknown");
+  assert.equal(store.count("operations"), 1);
+  assert.equal(await readFile(effects, "utf8"), "effect\n");
 });

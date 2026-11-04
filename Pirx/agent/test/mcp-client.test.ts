@@ -88,6 +88,7 @@ test("błędna nazwa narzędzia nie wyłącza serwera MCP", async (context) => {
   const unknown = await client.callTool("nieistniejace_narzedzie", {});
   assert.equal(unknown.isError, true);
   assert.equal(unknown.serverUnavailable, false);
+  assert.equal(unknown.outcome, "failed_before_execution");
 
   const hello = await client.callTool("hello", { name: "Piotr" });
   assert.equal(hello.isError, false);

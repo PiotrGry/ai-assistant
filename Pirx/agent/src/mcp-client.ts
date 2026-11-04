@@ -22,6 +22,8 @@ export interface ToolExecution {
   readonly text: string;
   readonly isError: boolean;
   readonly serverUnavailable: boolean;
+  readonly outcome: "succeeded" | "failed_before_execution" | "confirmed_failure" | "unknown";
+  readonly correlationId?: string;
 }
 
 interface ListedMcpTool {
@@ -203,6 +205,7 @@ export class PirxMcpClient {
         text: `Serwer MCP jest niedostępny: ${reason}`,
         isError: true,
         serverUnavailable: true,
+        outcome: "failed_before_execution",
       };
     }
 
@@ -211,43 +214,57 @@ export class PirxMcpClient {
         text: `Nieznane narzędzie MCP: ${name}. Dostępne: ${this.toolNames.join(", ")}.`,
         isError: true,
         serverUnavailable: false,
+        outcome: "failed_before_execution",
       };
     }
 
+    const mutating = !this.isReadOnlyTool(name);
+    let dispatched = false;
     try {
-      const result = await this.#client.callTool(
-        {
-          name,
-          arguments: arguments_,
-          ...(authorization === undefined
-            ? {}
-            : {
-                _meta: {
-                  [HOST_AUTHORIZATION_META_KEY]: createHostAuthorization(
-                    this.#authorizationSecret,
-                    name,
-                    arguments_,
-                    authorization.operationId,
-                  ),
-                },
-              }),
-        },
-        { timeout: this.#toolTimeoutMs },
-      );
+      const request = {
+        name,
+        arguments: arguments_,
+        ...(authorization === undefined
+          ? {}
+          : {
+              _meta: {
+                [HOST_AUTHORIZATION_META_KEY]: createHostAuthorization(
+                  this.#authorizationSecret,
+                  name,
+                  arguments_,
+                  authorization.operationId,
+                ),
+              },
+            }),
+      };
+      dispatched = true;
+      const result = await this.#client.callTool(request, { timeout: this.#toolTimeoutMs });
+      const details = result.structuredContent as Record<string, unknown> | undefined;
+      const correlationId = typeof details?.correlationId === "string" && /^[A-Za-z0-9._:-]{1,128}$/u.test(details.correlationId)
+        ? details.correlationId
+        : undefined;
+      const outcome = details?.remoteOutcome === "unknown" || details?.outcome === "unknown" ||
+        (mutating && result.isError === true && details?.remoteOutcome !== "not_accepted")
+        ? "unknown"
+        : result.isError === true ? "confirmed_failure" : "succeeded";
 
       return {
         text: toolResultToText(result, Math.max(256, Math.min(this.#maxToolResultCharacters, maximumResultCharacters)), name),
-        isError: result.isError === true,
+        isError: outcome !== "succeeded",
+        outcome,
+        ...(correlationId === undefined ? {} : { correlationId }),
         serverUnavailable: false,
       };
     } catch (error: unknown) {
       const detail = error instanceof Error ? error.message : String(error);
+      const outcome = !dispatched ? "failed_before_execution" : mutating || isConnectionFailure(error) ? "unknown" : "confirmed_failure";
 
       if (error instanceof ProtocolError) {
         return {
           text: `Błąd wywołania narzędzia ${name}: ${detail}`,
           isError: true,
           serverUnavailable: false,
+          outcome,
         };
       }
 
@@ -257,13 +274,15 @@ export class PirxMcpClient {
           text: `Serwer MCP jest niedostępny: ${detail}`,
           isError: true,
           serverUnavailable: true,
+          outcome,
         };
       }
 
       return {
-        text: `Nie udało się wykonać narzędzia ${name}: ${detail}`,
+        text: `Błąd wywołania narzędzia ${name}: ${detail}`,
         isError: true,
         serverUnavailable: false,
+        outcome,
       };
     }
   }
