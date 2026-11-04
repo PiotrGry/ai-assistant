@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
-import type { ExecutionReportQuery, HostShutdownCommand, OrchestratorControlRequest, OrchestratorStatusSnapshot, UtcTimestamp } from "@pirx/orchestrator";
+import { createTask, createWorkerFailureDiagnostic, RuntimeSqliteStore, transitionAttempt, transitionTask } from "@pirx/orchestrator";
+import type { AttemptId, TaskId, ExecutionReportQuery, HostShutdownCommand, OrchestratorControlRequest, OrchestratorStatusSnapshot, UtcTimestamp } from "@pirx/orchestrator";
 
 import { createHostAuthorization, HOST_AUTHORIZATION_META_KEY } from "../src/authorization.js";
 import { ObsidianVault } from "../src/obsidian/vaults.js";
@@ -79,4 +80,50 @@ test("unconfigured orchestrator tools remain listed and return controlled result
   const report = await client.callTool({ name: "pirx_execution_report", arguments: {} });
   assert.equal(report.isError, true);
   assert.match(JSON.stringify(report.structuredContent), /unconfigured/u);
+});
+
+test("MCP reads a blocked Attempt diagnostic from SQLite and distinguishes a failed read", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-orchestrator-blocked-"));
+  const filename = join(root, "runtime.sqlite");
+  const store = RuntimeSqliteStore.open({ filename });
+  context.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+
+  const task = createTask({ id: "blocked-task" as TaskId, goal: "Fix fixture", scope: "test", acceptanceCriteria: ["fixed"], priority: 1, risk: "low", requiredCapabilities: ["repository.read"], createdAt: now });
+  if (!task.ok) throw new Error("Task fixture failed");
+  assert.equal(store.tasks.create(task.value).outcome, "success");
+  const attemptId = "blocked-attempt" as AttemptId;
+  const started = store.startAttempt(task.value.id, { id: attemptId, worker: "pirx", provider: "claude-code" }, now);
+  if (started.outcome !== "success") throw new Error("Attempt fixture failed");
+  const at = "2026-10-30T13:01:00.000Z" as UtcTimestamp;
+  const diagnostic = createWorkerFailureDiagnostic("timeout", { durationMs: 30_000 });
+  const finished = transitionAttempt(started.value.attempt, "running", { type: "finish", result: "FAILED", blockingReason: "Worker timed out", diagnostic }, at);
+  const blocked = transitionTask(started.value.task, "in_progress", { type: "block", reason: "Worker timed out" }, at);
+  if (!finished.ok || !blocked.ok) throw new Error("Terminal fixture failed");
+  assert.equal(store.attempts.update(finished.value, "running").outcome, "success");
+  assert.equal(store.tasks.update(blocked.value, { state: "in_progress", updatedAt: started.value.task.updatedAt }).outcome, "success");
+  assert.equal(store.selection.synchronize({ taskId: task.value.id, queueOrder: 10, dependencyState: "known", blockers: [], synchronizedAt: at }).outcome, "success");
+
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = createMcpServer({ environment: { PIRX_ORCHESTRATOR_DATABASE: filename } });
+  const client = new Client({ name: "pirx-blocked-status-test", version: "0.1.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const result = await client.callTool({ name: "pirx_orchestrator_status", arguments: {} });
+    assert.notEqual(result.isError, true);
+    const snapshot = (result.structuredContent as { snapshot: OrchestratorStatusSnapshot }).snapshot;
+    assert.equal(snapshot.attentionRequired?.task.id, task.value.id);
+    assert.equal(snapshot.attentionRequired?.attempt?.id, attemptId);
+    assert.deepEqual(snapshot.attentionRequired?.attempt?.diagnostic, diagnostic);
+
+    store.database.prepare("UPDATE runtime_attempts SET diagnostic_json = ? WHERE id = ?").run('{"unsafe":"private-fixture"}', attemptId);
+    const log = context.mock.method(console, "error", () => undefined);
+    const failure = await client.callTool({ name: "pirx_orchestrator_status", arguments: {} });
+    assert.equal(failure.isError, true);
+    const error = failure.structuredContent as { outcome?: string; message?: string };
+    assert.equal(error.outcome, "unavailable");
+    assert.match(String(error.message), /Attempt history could not be read/u);
+    assert.equal(log.mock.callCount(), 1);
+    assert.match(String(log.mock.calls[0]?.arguments[0]), /orchestrator_status_read_failed/u);
+    assert.doesNotMatch(JSON.stringify([failure, log.mock.calls[0]?.arguments]), /private-fixture/u);
+  } finally { await client.close(); await server.close(); }
 });
