@@ -1565,7 +1565,10 @@ def execute(client: GitHubClient, meta: ProjectMetadata, *, dry_run: bool) -> No
         issue = issues.get(epic.title)
         if issue:
             reused += 1
-            print(f"REUSE    #{issue['number']} {issue['html_url']}")
+            print(f"REUSE    #{issue['number']} {issue['html_url']} (existing metadata preserved)")
+            if not dry_run:
+                add_to_project(client, meta, issue["node_id"])
+            continue
         elif dry_run:
             print(f"WOULD CREATE issue in {MILESTONES[epic.milestone][0]}")
             print("WOULD ADD Project item + ONE batched field mutation")

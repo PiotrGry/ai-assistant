@@ -77,3 +77,17 @@ sqlite3 ~/.local/share/pirx/gpu.sqlite "SELECT COUNT(*), datetime(MAX(sampled_at
 
 Dane historyczne sprzed zapisu z TUI importuje `pnpm --filter @pirx/agent import:logs <katalog logów>`
 (z katalogu `Pirx`). Operacje narzędzi są tylko dla nowych sesji.
+
+## Izolacja bazy (naprawa #267)
+
+Grafana widzi wyłącznie katalog `~/.local/share/pirx-dashboard-export`, zamontowany
+read-only. Nie widzi runtime SQLite ani jego WAL. Osobny exporter bez sieci co
+30 sekund wykonuje spójny SQLite backup dwóch baz raportowych. Sprawdza schemat
+oraz odrzuca bazę zawierającą tabele `runtime_*`. Nie kopiuje otwartego pliku przez `cp`.
+Snapshot nie wymaga zapisu WAL/SHM przez Grafanę. Przy błędzie zachowuje poprzedni
+snapshot, a `docker compose logs exporter` podaje nazwę bazy, typ błędu i czas
+ostatniego udanego eksportu. Dashboard może więc pokazywać starsze dane.
+
+Compose nadal zakłada UID/GID 1000 i domyślne ścieżki źródłowe. Jeżeli używasz
+innego UID lub niestandardowego `PIRX_STORAGE_FILE`/`PIRX_GPU_DB`, dostosuj mounty
+exportera i UID obu kontenerów; nie montuj runtime do Grafany.

@@ -16,5 +16,5 @@ if [[ ! -f "$AGE_KEY" ]]; then
   exit 1
 fi
 
-mkdir -p -m 700 "$DATA_DIR"
+mkdir -p -m 700 "$DATA_DIR" "${HOME}/.local/share/pirx-dashboard-export"
 exec sops exec-env grafana.sops.env 'docker compose -f compose.yaml up -d --wait'

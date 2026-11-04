@@ -1,3 +1,4 @@
+import { managedRuntimeBinding } from "./runtime-binding.js";
 import { McpServer } from "@modelcontextprotocol/server";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -68,9 +69,15 @@ export interface McpServerOptions {
   readonly orchestratorLogsPort?: OrchestratorLogsPort;
 }
 
+function unavailableCalendar(message: string): CalendarOperations {
+  const unavailable = async (): Promise<never> => { throw new Error(`Google Calendar unavailable: ${message}`); };
+  return { listCalendars: unavailable, listEvents: unavailable, getEvent: unavailable, createEvent: unavailable, updateEvent: unavailable, deleteEvent: unavailable };
+}
+
 export function createMcpServer(options: McpServerOptions = {}): McpServer {
   const environment = options.environment ?? process.env;
   const config = loadMcpServerConfig(environment);
+  const checkBinding = managedRuntimeBinding(config.orchestratorDatabasePath, environment);
   const obsidianVault =
     options.obsidianVault ??
     (config.obsidianVaultPath === undefined
@@ -78,31 +85,32 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
       : new ObsidianVault(config.obsidianVaultPath));
   const calendar =
     options.calendar ??
-    new GoogleCalendarClient(
+    (config.googleCalendar === undefined ? unavailableCalendar(config.googleCalendarConfigurationError ?? "Calendar configuration is invalid.") : new GoogleCalendarClient(
       new GoogleOAuthTokenProvider(config.googleCalendar),
       config.googleCalendar,
-    );
+    ));
   const server = new McpServer({
     name: "pirx-mcp-server",
     version: "0.1.0",
   });
 
   registerHelloTool(server);
-  registerConversationLog(server, config.orchestratorDatabasePath, config.orchestratorConfigurationError);
-  registerTaskHistory(server, config.orchestratorDatabasePath, config.orchestratorConfigurationError);
+  registerConversationLog(server, config.orchestratorDatabasePath, config.orchestratorConfigurationError, checkBinding);
+  registerTaskHistory(server, config.orchestratorDatabasePath, config.orchestratorConfigurationError, checkBinding);
   registerSystemTools(server);
   registerObsidianTools(server, obsidianVault);
   registerCalendarTools(server, calendar);
   registerOrchestratorTools(server, {
-    port: options.orchestratorControlPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteOrchestratorControlToolPort(config.orchestratorDatabasePath)),
-    observabilityPort: options.executionObservabilityPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteExecutionObservabilityToolPort(config.orchestratorDatabasePath)),
+    port: options.orchestratorControlPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteOrchestratorControlToolPort(config.orchestratorDatabasePath, checkBinding)),
+    observabilityPort: options.executionObservabilityPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteExecutionObservabilityToolPort(config.orchestratorDatabasePath, checkBinding)),
     authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
     ...(config.orchestratorConfigurationError === undefined ? {} : { configurationError: config.orchestratorConfigurationError }),
   });
   registerResourceTools(server, { port: options.resourceReportPort ?? new SqliteResourceReportPort(config.resourceDatabasePath) });
   registerOrchestratorLogTool(server, options.orchestratorLogsPort ?? new SystemdOrchestratorLogsPort({ environment }));
   registerOrchestratorServiceTool(server, {
-    port: options.orchestratorServicePort ?? new SystemdOrchestratorServicePort({ environment }),
+    port: options.orchestratorServicePort ?? new SystemdOrchestratorServicePort({ environment, checkBinding }),
+    ...(config.orchestratorConfigurationError === undefined ? {} : { configurationError: config.orchestratorConfigurationError }),
     authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
   });
   // Issue tools are always listed; without configuration they return a controlled
@@ -176,6 +184,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
       authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
       environment,
       databasePath: config.orchestratorDatabasePath,
+      checkBinding,
       ...(config.orchestratorConfigurationError === undefined ? {} : { runtimeConfigurationError: config.orchestratorConfigurationError }),
       ...(githubConfigurationError === undefined ? {} : { configurationError: githubConfigurationError }),
     });

@@ -1,3 +1,5 @@
+import { RuntimeStorageError } from "@pirx/orchestrator";
+import type { RuntimeBindingCheck } from "../runtime-binding.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { McpServer } from "@modelcontextprotocol/server";
@@ -13,14 +15,18 @@ export class SystemdOrchestratorServicePort implements OrchestratorServicePort {
   readonly #environment: NodeJS.ProcessEnv;
   readonly #platform: string;
   readonly #execute: typeof execute;
-  public constructor(options: { readonly environment?: NodeJS.ProcessEnv; readonly platform?: string; readonly execute?: typeof execute } = {}) {
+  readonly #checkBinding: RuntimeBindingCheck;
+  public constructor(options: { readonly environment?: NodeJS.ProcessEnv; readonly platform?: string; readonly execute?: typeof execute; readonly checkBinding?: RuntimeBindingCheck } = {}) {
     this.#environment = options.environment ?? process.env;
     this.#platform = options.platform ?? process.platform;
     this.#execute = options.execute ?? execute;
+    this.#checkBinding = options.checkBinding ?? (() => {});
   }
   public async start(): Promise<OrchestratorServiceResult> {
     if (this.#environment.PIRX_ORCHESTRATOR_SERVICE_ENABLED !== "true") return { outcome: "unconfigured", message: "Install the pirx-orchestrator user service and set PIRX_ORCHESTRATOR_SERVICE_ENABLED=true in the chat environment." };
     if (this.#platform !== "linux") return { outcome: "unsupported_platform", message: "Chat service startup currently supports Linux systemd user services." };
+    try { this.#checkBinding(); }
+    catch (error: unknown) { return { outcome: "unconfigured", message: error instanceof RuntimeStorageError ? error.message : "Runtime identity could not be verified; service start was not requested." }; }
     const env: NodeJS.ProcessEnv = {};
     for (const key of ["HOME", "USER", "LOGNAME", "PATH", "LANG", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]) if (this.#environment[key] !== undefined) env[key] = this.#environment[key];
     try {
@@ -32,7 +38,7 @@ export class SystemdOrchestratorServicePort implements OrchestratorServicePort {
   }
 }
 
-export function registerOrchestratorServiceTool(server: McpServer, options: { readonly port: OrchestratorServicePort; readonly authorizationSecret: string | undefined }): void {
+export function registerOrchestratorServiceTool(server: McpServer, options: { readonly port: OrchestratorServicePort; readonly authorizationSecret: string | undefined; readonly configurationError?: string }): void {
   server.registerTool("pirx_orchestrator_start", {
     title: "Start the supervised Pirx orchestrator",
     description: "Request startup of the installed pirx-orchestrator user service to process the configured GitHub Queue through leased Claude CLI workers. Does not select an arbitrary Issue or bypass Queue order. Verify status afterwards; start_requested is not proof of execution.",
@@ -42,7 +48,9 @@ export function registerOrchestratorServiceTool(server: McpServer, options: { re
   }, async (_input, context) => {
     const result = verifyHostAuthorization(options.authorizationSecret, context.mcpReq._meta, "pirx_orchestrator_start", {}) === undefined
       ? { outcome: "authorization_required", message: "Exact host authorization is required to start orchestration." }
-      : await options.port.start();
+      : options.configurationError !== undefined
+        ? { outcome: "unconfigured", message: options.configurationError }
+        : await options.port.start();
     return { content: [{ type: "text" as const, text: JSON.stringify(result) }], structuredContent: result, ...(result.outcome === "start_requested" ? {} : { isError: true }) };
   });
 }

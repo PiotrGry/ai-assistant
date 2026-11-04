@@ -18,7 +18,8 @@ export interface McpServerConfig {
   readonly orchestratorDatabasePath: string | undefined;
   readonly orchestratorConfigurationError?: string;
   readonly resourceDatabasePath: string;
-  readonly googleCalendar: GoogleCalendarConfig;
+  readonly googleCalendar: GoogleCalendarConfig | undefined;
+  readonly googleCalendarConfigurationError?: string;
   readonly githubPocIssue: number | undefined;
   readonly githubPocConfigurationError: string | undefined;
 }
@@ -79,18 +80,11 @@ function defaultObsidianVault(): string | undefined {
 export function loadMcpServerConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): McpServerConfig {
-  const googleDirectory = resolve(homedir(), ".config", "pirx", "google-calendar");
   const dataHome = environment.XDG_DATA_HOME?.trim() || resolve(homedir(), ".local", "share");
-  const timeZone =
-    environment.PIRX_GOOGLE_CALENDAR_TIMEZONE?.trim() || configuredTimeZone();
-
-  try {
-    new Intl.DateTimeFormat("en", { timeZone }).format();
-  } catch {
-    throw new Error(
-      `PIRX_GOOGLE_CALENDAR_TIMEZONE must be a valid IANA timezone (received: ${timeZone}).`,
-    );
-  }
+  let googleCalendar: GoogleCalendarConfig | undefined;
+  let googleCalendarConfigurationError: string | undefined;
+  try { googleCalendar = loadGoogleCalendarConfig(environment); }
+  catch (error: unknown) { googleCalendarConfigurationError = error instanceof Error ? error.message : "Google Calendar configuration is invalid."; }
 
   const githubPocIssue = optionalPositiveInteger(environment.PIRX_GITHUB_POC_ISSUE);
 
@@ -115,27 +109,44 @@ export function loadMcpServerConfig(
     orchestratorDatabasePath,
     ...(orchestratorConfigurationError === undefined ? {} : { orchestratorConfigurationError }),
     resourceDatabasePath: optionalPath(environment.PIRX_GPU_DB) ?? resolve(dataHome, "pirx", "gpu.sqlite"),
-    googleCalendar: {
-      credentialsFile: resolve(
-        environment.PIRX_GOOGLE_CREDENTIALS_FILE?.trim() ||
-          resolve(googleDirectory, "credentials.json"),
-      ),
-      tokenFile: resolve(
-        environment.PIRX_GOOGLE_TOKEN_FILE?.trim() || resolve(googleDirectory, "token.json"),
-      ),
-      defaultCalendarId:
-        environment.PIRX_GOOGLE_CALENDAR_ID?.trim() || "primary",
-      defaultTimeZone: timeZone,
-      requestTimeoutMs: positiveInteger(
-        "PIRX_GOOGLE_TIMEOUT_MS",
-        environment.PIRX_GOOGLE_TIMEOUT_MS ?? "10000",
-      ),
-      authorizationTimeoutMs: positiveInteger(
-        "PIRX_GOOGLE_AUTH_TIMEOUT_MS",
-        environment.PIRX_GOOGLE_AUTH_TIMEOUT_MS ?? "300000",
-      ),
-    },
+    googleCalendar,
+    ...(googleCalendarConfigurationError === undefined ? {} : { googleCalendarConfigurationError }),
     githubPocIssue: githubPocIssue.value,
     githubPocConfigurationError: githubPocIssue.error,
+  };
+}
+
+export function loadGoogleCalendarConfig(environment: NodeJS.ProcessEnv = process.env): GoogleCalendarConfig {
+  const googleDirectory = resolve(homedir(), ".config", "pirx", "google-calendar");
+  const timeZone =
+    environment.PIRX_GOOGLE_CALENDAR_TIMEZONE?.trim() || configuredTimeZone();
+
+  try {
+    new Intl.DateTimeFormat("en", { timeZone }).format();
+  } catch {
+    throw new Error(
+      `PIRX_GOOGLE_CALENDAR_TIMEZONE must be a valid IANA timezone (received: ${timeZone}).`,
+    );
+  }
+
+  return {
+    credentialsFile: resolve(
+      environment.PIRX_GOOGLE_CREDENTIALS_FILE?.trim() ||
+        resolve(googleDirectory, "credentials.json"),
+    ),
+    tokenFile: resolve(
+      environment.PIRX_GOOGLE_TOKEN_FILE?.trim() || resolve(googleDirectory, "token.json"),
+    ),
+    defaultCalendarId:
+      environment.PIRX_GOOGLE_CALENDAR_ID?.trim() || "primary",
+    defaultTimeZone: timeZone,
+    requestTimeoutMs: positiveInteger(
+      "PIRX_GOOGLE_TIMEOUT_MS",
+      environment.PIRX_GOOGLE_TIMEOUT_MS ?? "10000",
+    ),
+    authorizationTimeoutMs: positiveInteger(
+      "PIRX_GOOGLE_AUTH_TIMEOUT_MS",
+      environment.PIRX_GOOGLE_AUTH_TIMEOUT_MS ?? "300000",
+    ),
   };
 }

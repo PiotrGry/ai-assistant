@@ -274,3 +274,24 @@ for that command; do not run Pirx as root and do not add arbitrary commands to
 the configuration. A missing permission or rejected command is a controlled
 failure and never falls back to `sudo`, a shell, force-kill, reboot, suspend, or
 another mutation.
+
+
+### Runtime identity and review hardening (#267)
+
+When `PIRX_ORCHESTRATOR_SERVICE_ENABLED=true`, MCP checks the systemd user
+service MainPID and verifies that its open file descriptors include the configured
+SQLite inode before status/history reads and control/shipment writes. A second
+valid profile pointing elsewhere is rejected with `Runtime mismatch`; configuring
+a path alone is not proof of daemon identity. This requires Linux `/proc` access
+for the same user. An unavailable service manager fails closed. A stopped service
+has no active identity: historical reads remain available, and `start_requested`
+only acknowledges systemd acceptance. Verify status after startup. Align chat and
+service profiles before starting a stopped service; the check cannot infer that
+service's future configuration from an inactive process.
+
+Calendar configuration errors stay within Calendar tools. CLI authorization still
+validates Calendar configuration strictly. Chat session recovery only closes
+sessions whose recorded local PID is demonstrably dead; legacy, remote, and live
+owners are preserved. PID reuse is handled conservatively (no forced recovery).
+Unknown mutations are retained across turns and sessions and require reconciliation;
+this fix does not invent an automatic resolution for unknown external side effects.

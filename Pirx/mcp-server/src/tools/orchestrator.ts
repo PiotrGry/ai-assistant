@@ -1,3 +1,4 @@
+import type { RuntimeBindingCheck } from "../runtime-binding.js";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { existsSync } from "node:fs";
 import * as z from "zod/v4";
@@ -35,11 +36,12 @@ export interface ExecutionObservabilityToolPort {
 
 export class SqliteExecutionObservabilityToolPort implements ExecutionObservabilityToolPort {
   readonly #filename: string;
-  public constructor(filename: string) { this.#filename = filename; }
+  public constructor(filename: string, private readonly checkBinding: RuntimeBindingCheck = () => {}) { this.#filename = filename; }
   public report(input: ExecutionReportQuery): ExecutionReportResult {
     if (!existsSync(this.#filename)) return { outcome: "storage_error", message: "Orchestrator runtime database does not exist. Start the configured orchestrator service first." };
     let store: RuntimeSqliteStore | undefined;
     try {
+      this.checkBinding();
       store = RuntimeSqliteStore.open({ filename: this.#filename, busyTimeoutMs: 1_000, mode: "read_only" });
       return new ExecutionObservabilityQueryService(store).query(input);
     } catch (error: unknown) {
@@ -52,7 +54,7 @@ export class SqliteExecutionObservabilityToolPort implements ExecutionObservabil
 
 export class SqliteOrchestratorControlToolPort implements OrchestratorControlToolPort {
   readonly #filename: string;
-  public constructor(filename: string) { this.#filename = filename; }
+  public constructor(filename: string, private readonly checkBinding: RuntimeBindingCheck = () => {}) { this.#filename = filename; }
   public status(now: UtcTimestamp, staleAfterMs: number): StorageResult<OrchestratorStatusSnapshot> {
     const result = this.#withStore((_store, repository) => repository.status(now, staleAfterMs), "read_only");
     if (result.outcome === "storage_error") {
@@ -72,7 +74,7 @@ export class SqliteOrchestratorControlToolPort implements OrchestratorControlToo
   #withStore<T>(operation: (store: RuntimeSqliteStore, repository: OrchestratorControlRepository) => StorageResult<T>, mode: "read_only" | "existing" = "existing"): StorageResult<T> {
     if (!existsSync(this.#filename)) return { outcome: "storage_error", message: "Orchestrator runtime database does not exist. Start the configured orchestrator service first." };
     let store: RuntimeSqliteStore | undefined;
-    try { store = RuntimeSqliteStore.open({ filename: this.#filename, busyTimeoutMs: 1_000, mode }); return operation(store, new OrchestratorControlRepository(store)); }
+    try { this.checkBinding(); store = RuntimeSqliteStore.open({ filename: this.#filename, busyTimeoutMs: 1_000, mode }); return operation(store, new OrchestratorControlRepository(store)); }
     catch (error: unknown) { return { outcome: "storage_error", message: error instanceof RuntimeStorageError ? error.message : "Orchestrator runtime database is unavailable." }; }
     finally { try { store?.close(); } catch { /* preserve bounded operation result */ } }
   }

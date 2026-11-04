@@ -1,10 +1,11 @@
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
-import { loadMcpServerConfig } from "../src/config.js";
+import { loadMcpServerConfig, loadGoogleCalendarConfig } from "../src/config.js";
 
 test("MCP configuration uses the existing environment-based approach", () => {
   const config = loadMcpServerConfig({
@@ -22,6 +23,7 @@ test("MCP configuration uses the existing environment-based approach", () => {
   });
 
   assert.equal(config.obsidianVaultPath, resolve("/tmp/pirx-vault"));
+  assert.ok(config.googleCalendar);
   assert.equal(config.googleCalendar.credentialsFile, resolve("/tmp/pirx-creds.json"));
   assert.equal(config.googleCalendar.tokenFile, resolve("/tmp/pirx-token.json"));
   assert.equal(config.googleCalendar.defaultCalendarId, "work@example.com");
@@ -42,12 +44,12 @@ test("MCP configuration uses the project vault by default", () => {
 
 test("MCP configuration rejects invalid timeouts and timezones", () => {
   assert.throws(
-    () => loadMcpServerConfig({ PIRX_GOOGLE_TIMEOUT_MS: "0" }),
+    () => loadGoogleCalendarConfig({ PIRX_GOOGLE_TIMEOUT_MS: "0" }),
     /positive integer/u,
   );
   assert.throws(
     () =>
-      loadMcpServerConfig({
+      loadGoogleCalendarConfig({
         PIRX_GOOGLE_CALENDAR_TIMEZONE: "Not/A_Real_Timezone",
       }),
     /valid IANA timezone/u,
@@ -104,4 +106,24 @@ test("MCP and the daemon use the same runtime profile and reject a conflicting l
   const missing = loadMcpServerConfig({ ...environment, PIRX_ORCHESTRATOR_CONFIG: join(root, "missing.json"), PIRX_ORCHESTRATOR_DATABASE: join(root, "runtime.sqlite") });
   assert.equal(missing.orchestratorDatabasePath, undefined);
   assert.match(missing.orchestratorConfigurationError ?? "", /could not be read/u);
+});
+
+
+test("invalid Calendar configuration does not prevent other MCP tools from starting", async () => {
+  const environment = { PIRX_GOOGLE_TIMEOUT_MS: "0" };
+  const config = loadMcpServerConfig(environment);
+  assert.equal(config.googleCalendar, undefined);
+  assert.match(config.googleCalendarConfigurationError ?? "", /PIRX_GOOGLE_TIMEOUT_MS/);
+  const { createMcpServer } = await import("../src/server.js");
+  const server = createMcpServer({ environment });
+  const client = new Client({ name: "calendar-isolation", version: "1" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([server.connect(b), client.connect(a)]);
+    const healthy = await client.callTool({ name: "hello", arguments: { name: "Pirx" } });
+    assert.notEqual(healthy.isError, true);
+    const calendar = await client.callTool({ name: "calendar_list_calendars", arguments: {} });
+    assert.equal(calendar.isError, true);
+    assert.match(JSON.stringify(calendar), /PIRX_GOOGLE_TIMEOUT_MS/);
+  } finally { await client.close(); await server.close(); }
 });

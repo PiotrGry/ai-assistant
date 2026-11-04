@@ -128,3 +128,20 @@ test("shortened final diagnostic page provides a cursor and preserves every char
   }
   assert.equal(collected, original);
 });
+
+
+test("history truncation advances only over delivered Attempts", () => {
+  const attempts = Array.from({ length: 20 }, (_, index) => ({ id: `attempt-${index + 1}`, ordinal: index + 1, state: "terminal", result: "FAILED", diagnosticReference: { attemptId: `attempt-${index + 1}` }, blockingReason: "long reason ".repeat(100) }));
+  const output = toolResultToText({ structuredContent: { outcome: "success", task: { id: "task-1", state: "blocked" }, attempts, nextAfterOrdinal: 20 } }, 512, "pirx_task_history");
+  const parsed = JSON.parse(output);
+  assert.ok(output.length <= 512);
+  assert.ok(parsed.attempts.length > 0 && parsed.attempts.length < 20);
+  assert.equal(parsed.nextAfterOrdinal, parsed.attempts.at(-1).ordinal);
+  assert.deepEqual(parsed.attempts.map((a: { ordinal: number }) => a.ordinal), Array.from({ length: parsed.attempts.length }, (_, index) => index + 1));
+});
+
+test("history page too large does not return a cursor that would lose an Attempt", () => {
+  const parsed = JSON.parse(toolResultToText({ structuredContent: { outcome: "success", task: { id: "task" }, attempts: [{ id: "a".repeat(1000), ordinal: 1 }], nextAfterOrdinal: 1 } }, 256, "pirx_task_history"));
+  assert.equal(parsed.outcome, "page_too_large");
+  assert.equal(parsed.nextAfterOrdinal, undefined);
+});

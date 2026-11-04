@@ -87,6 +87,17 @@ export class SqliteActionLedger {
       throw new Error(`Action sequence must be a non-negative safe integer: ${input.sequence}`);
     }
 
+    return this.#store.transaction(() => this.#plan(input));
+  }
+
+  #plan(input: ActionPlanInput): ActionPlan {
+    const unresolved = this.#store.unresolvedActions(input.target, input.toolName)
+      .find((action) => stableArguments(action.arguments) === stableArguments(input.arguments));
+    if (unresolved !== undefined) return {
+      mutationId: unresolved.mutationId, operationId: "", attempt: unresolved.attempt,
+      target: input.target, authorization: input.authorization,
+      alreadySucceeded: false, requiresReconciliation: true,
+    };
     const id = mutationId(input);
     const previous = this.#store.latestActionState(id);
     if (previous?.state === "succeeded") {
@@ -169,13 +180,15 @@ export class SqliteActionLedger {
     if (plan.operationId.length === 0) {
       throw new Error("Cannot finish an action without a new operation.");
     }
-    this.#transition(plan, state, confirmation);
-    this.#store.finishOperation(
+    this.#store.transaction(() => {
+      this.#transition(plan, state, confirmation);
+      this.#store.finishOperation(
       plan.operationId,
       new Date().toISOString(),
       state,
       error,
-    );
+      );
+    });
   }
 
   #transition(

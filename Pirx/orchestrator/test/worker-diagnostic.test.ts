@@ -16,3 +16,16 @@ test("input diagnostics retain bounded field and violation code without exportin
   assert.equal(createWorkerFailureDiagnostic("binding_mismatch", { violationCode: "unsafe value with spaces" }).violationCode, undefined);
   assert.equal(validateWorkerFailureDiagnostic({ ...value, violationCode: "unsafe value with spaces" }), undefined);
 });
+
+
+test("redacts secret values in JSON evidence before persistence", () => {
+  for (const providerMessage of [
+    JSON.stringify({ error: { password: "fixture-password", api_key: "fixture-key", message: "useful error code" } }),
+    'provider returned {"password":"fixture-password","message":"useful error code"}',
+  ]) {
+    const diagnostic = createWorkerFailureDiagnostic("process_failure", { providerMessage });
+    assert.ok(!JSON.stringify(diagnostic).includes("fixture-password"));
+    assert.ok(!JSON.stringify(diagnostic).includes("fixture-key"));
+    assert.match(diagnostic.providerMessage ?? "", /useful error code/);
+  }
+});
