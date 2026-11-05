@@ -840,7 +840,10 @@ export class PirxAgent {
           const execution = await this.#mcp.callTool(
             name,
             arguments_,
-            actionPlan === undefined ? undefined : { operationId: actionPlan.mutationId },
+            actionPlan === undefined ? undefined : {
+              operationId: actionPlan.operationId,
+              idempotencyKey: actionPlan.mutationId,
+            },
             Math.min(this.#config.maxToolResultCharacters ?? 12_000, maximumResultCharacters - resultCharacters),
             Math.max(1, Math.floor(deadline - performance.now())),
           );

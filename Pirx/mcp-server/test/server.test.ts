@@ -16,7 +16,10 @@ import {
 } from "../src/google-calendar/types.js";
 import { ObsidianVault } from "../src/obsidian/vaults.js";
 import { createMcpServer } from "../src/server.js";
+import { createHostAuthorization, HOST_AUTHORIZATION_META_KEY } from "../src/authorization.js";
 import type { GitHubFailureHandoffPocGateway } from "@pirx/orchestrator";
+
+const authorizationSecret = "calendar-obsidian-host-authorization";
 
 const sampleEvent: CalendarEvent = {
   id: "event-1",
@@ -27,7 +30,7 @@ const sampleEvent: CalendarEvent = {
   timeZone: "UTC",
 };
 
-function fakeCalendar(): CalendarOperations {
+function fakeCalendar(createdEvents: CalendarEventFields[] = []): CalendarOperations {
   return {
     async listCalendars() {
       return [{ id: "primary", summary: "Primary", primary: true, timeZone: "UTC" }];
@@ -42,6 +45,7 @@ function fakeCalendar(): CalendarOperations {
       _calendarId: string | undefined,
       _event: CalendarEventFields,
     ) {
+      createdEvents.push(_event);
       return sampleEvent;
     },
     async updateEvent(
@@ -58,17 +62,19 @@ function fakeCalendar(): CalendarOperations {
 async function connectedServer() {
   const root = await mkdtemp(join(tmpdir(), "pirx-server-vault-"));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const calendarCreates: CalendarEventFields[] = [];
   const server = createMcpServer({
     environment: {},
     obsidianVault: new ObsidianVault(root),
-    calendar: fakeCalendar(),
+    calendar: fakeCalendar(calendarCreates),
+    authorizationSecret,
   });
   const client = new Client({ name: "pirx-test", version: "0.1.0" });
   await Promise.all([
     server.connect(serverTransport),
     client.connect(clientTransport),
   ]);
-  return { root, server, client };
+  return { root, server, client, calendarCreates };
 }
 
 test("server exposes complete tools with safe annotations", async (context) => {
@@ -144,6 +150,96 @@ test("server exposes complete tools with safe annotations", async (context) => {
   assert.equal(byName.get("obsidian_write")?.annotations?.destructiveHint, true);
   assert.match(byName.get("calendar_get_event")?.description ?? "", /current external state/u);
   assert.match(byName.get("obsidian_read")?.description ?? "", /current external state/u);
+});
+
+test("Calendar and Obsidian mutations require exact single-use host authorization while reads remain unchanged", async (context) => {
+  const fixture = await connectedServer();
+  context.after(async () => {
+    await fixture.client.close();
+    await fixture.server.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+
+  const event = {
+    summary: "Authorized event",
+    start: "2026-11-06T10:00:00Z",
+    end: "2026-11-06T11:00:00Z",
+  };
+  const missing = await fixture.client.callTool({ name: "calendar_create_event", arguments: event });
+  assert.equal(missing.isError, true);
+  assert.equal((missing.structuredContent as { outcome: string }).outcome, "authorization_required");
+  assert.equal(fixture.calendarCreates.length, 0);
+
+  const eventAuthorization = createHostAuthorization(authorizationSecret, "calendar_create_event", event, "calendar-attempt-1", "calendar-mutation");
+  const legacy = await fixture.client.callTool({
+    name: "calendar_create_event",
+    arguments: event,
+    _meta: { [HOST_AUTHORIZATION_META_KEY]: { ...eventAuthorization, version: 1 } },
+  });
+  assert.equal(legacy.isError, true);
+  assert.equal((legacy.structuredContent as { outcome: string }).outcome, "authorization_required");
+  const changed = await fixture.client.callTool({
+    name: "calendar_create_event",
+    arguments: { ...event, summary: "Changed after approval" },
+    _meta: { [HOST_AUTHORIZATION_META_KEY]: eventAuthorization },
+  });
+  assert.equal(changed.isError, true);
+  assert.equal((changed.structuredContent as { outcome: string }).outcome, "authorization_required");
+  assert.equal(fixture.calendarCreates.length, 0);
+
+  const created = await fixture.client.callTool({
+    name: "calendar_create_event",
+    arguments: event,
+    _meta: { [HOST_AUTHORIZATION_META_KEY]: eventAuthorization },
+  });
+  assert.notEqual(created.isError, true);
+  assert.equal(fixture.calendarCreates.length, 1);
+  const replayed = await fixture.client.callTool({
+    name: "calendar_create_event",
+    arguments: event,
+    _meta: { [HOST_AUTHORIZATION_META_KEY]: eventAuthorization },
+  });
+  assert.equal(replayed.isError, true);
+  assert.equal((replayed.structuredContent as { outcome: string }).outcome, "authorization_replayed");
+  assert.equal(fixture.calendarCreates.length, 1);
+
+  const createNote = { path: "work/exact.md", content: "before" };
+  const createNoteAuthorization = createHostAuthorization(authorizationSecret, "obsidian_create", createNote, "note-create-1", "note-create");
+  const noteCreated = await fixture.client.callTool({
+    name: "obsidian_create",
+    arguments: createNote,
+    _meta: { [HOST_AUTHORIZATION_META_KEY]: createNoteAuthorization },
+  });
+  assert.notEqual(noteCreated.isError, true);
+
+  const writeNote = { path: "work/exact.md", content: "after" };
+  const writeAuthorization = createHostAuthorization(authorizationSecret, "obsidian_write", writeNote, "note-write-1", "note-write");
+  const changedTarget = await fixture.client.callTool({
+    name: "obsidian_write",
+    arguments: { ...writeNote, path: "work/other.md" },
+    _meta: { [HOST_AUTHORIZATION_META_KEY]: writeAuthorization },
+  });
+  assert.equal(changedTarget.isError, true);
+  assert.equal((changedTarget.structuredContent as { outcome: string }).outcome, "authorization_required");
+  const written = await fixture.client.callTool({
+    name: "obsidian_write",
+    arguments: writeNote,
+    _meta: { [HOST_AUTHORIZATION_META_KEY]: writeAuthorization },
+  });
+  assert.notEqual(written.isError, true);
+  const writeReplay = await fixture.client.callTool({
+    name: "obsidian_write",
+    arguments: writeNote,
+    _meta: { [HOST_AUTHORIZATION_META_KEY]: writeAuthorization },
+  });
+  assert.equal(writeReplay.isError, true);
+  assert.equal((writeReplay.structuredContent as { outcome: string }).outcome, "authorization_replayed");
+
+  const read = await fixture.client.callTool({ name: "obsidian_read", arguments: { path: "work/exact.md" } });
+  assert.notEqual(read.isError, true);
+  assert.deepEqual(read.structuredContent, { path: "work/exact.md", content: "after" });
+  const calendarRead = await fixture.client.callTool({ name: "calendar_get_event", arguments: { eventId: "event-1" } });
+  assert.notEqual(calendarRead.isError, true);
 });
 
 test("shipment POC is annotated as a mutating operation", async (context) => {

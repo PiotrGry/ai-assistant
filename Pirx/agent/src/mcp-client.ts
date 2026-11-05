@@ -77,7 +77,8 @@ export class PirxMcpClient {
   readonly #serverEntry: string;
   readonly #toolTimeoutMs: number;
   readonly #maxToolResultCharacters: number;
-  readonly #authorizationSecret: string;
+  #authorizationSecret: string;
+  readonly #rotateAuthorizationSecret: boolean;
 
   #client: Client | undefined;
   #tools: ListedMcpTool[] = [];
@@ -89,12 +90,13 @@ export class PirxMcpClient {
     serverEntry: string,
     toolTimeoutMs: number,
     maxToolResultCharacters = 12_000,
-    authorizationSecret = randomBytes(32).toString("base64url"),
+    authorizationSecret?: string,
   ) {
     this.#serverEntry = serverEntry;
     this.#toolTimeoutMs = toolTimeoutMs;
     this.#maxToolResultCharacters = maxToolResultCharacters;
-    this.#authorizationSecret = authorizationSecret;
+    this.#authorizationSecret = authorizationSecret ?? randomBytes(32).toString("base64url");
+    this.#rotateAuthorizationSecret = authorizationSecret === undefined;
   }
 
   get toolNames(): readonly string[] {
@@ -170,6 +172,7 @@ export class PirxMcpClient {
     const previous = this.#client;
     this.#client = undefined;
     if (previous !== undefined) void previous.close().catch(() => undefined);
+    if (this.#rotateAuthorizationSecret) this.#authorizationSecret = randomBytes(32).toString("base64url");
     const environment = childEnvironment(process.env);
     environment.PIRX_MCP_AUTH_SECRET = this.#authorizationSecret;
     const transport = new StdioClientTransport({
@@ -208,7 +211,7 @@ export class PirxMcpClient {
   async callTool(
     name: string,
     arguments_: Record<string, unknown>,
-    authorization?: Pick<HostToolAuthorization, "operationId">,
+    authorization?: Pick<HostToolAuthorization, "operationId"> & Partial<Pick<HostToolAuthorization, "idempotencyKey">>,
     maximumResultCharacters: number = this.#maxToolResultCharacters,
     maximumDurationMs: number = this.#toolTimeoutMs,
   ): Promise<ToolExecution> {
@@ -241,7 +244,7 @@ export class PirxMcpClient {
     const request = {
       name,
       arguments: arguments_,
-      ...(authorization === undefined ? {} : { _meta: { [HOST_AUTHORIZATION_META_KEY]: createHostAuthorization(this.#authorizationSecret, name, arguments_, authorization.operationId) } }),
+      ...(authorization === undefined ? {} : { _meta: { [HOST_AUTHORIZATION_META_KEY]: createHostAuthorization(this.#authorizationSecret, name, arguments_, authorization.operationId, authorization.idempotencyKey ?? authorization.operationId) } }),
     };
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const client = this.#client;

@@ -208,6 +208,16 @@ wyłączny), a wydarzenia czasowe wymagają ISO 8601 z `Z` albo jawnym offsetem.
 Żądania sieciowe mają timeout i nie są automatycznie ponawiane — szczególnie
 tworzenie wydarzeń jest wykonywane najwyżej raz na wywołanie narzędzia.
 
+Każda mutacja Calendar i Obsidian wymaga podpisanej autoryzacji hosta związanej
+z dokładną nazwą narzędzia, celem i skrótem wszystkich argumentów. Jedno
+`operationId` autoryzuje tylko jeden dispatch i jest zużywane przed efektem;
+zmiana argumentów albo ponowne użycie podpisu jest odrzucane. Stabilny klucz
+idempotencji i wynik próby pozostają w trwałym action ledgerze Agenta. Odczyty
+nie wymagają autoryzacji i zachowują dotychczasowy UX. Sekret podpisu jest
+rotowany przy każdym połączeniu MCP, więc autoryzacja ze starego procesu nie
+działa po reconnect. Po wyniku niepewnym Agent nie ponawia mutacji — najpierw
+wymaga uzgodnienia stanu zewnętrznego.
+
 Brak konfiguracji Obsidiana lub Google nie zatrzymuje MCP: odpowiednie
 narzędzie zwróci kontrolowany błąd, a pozostałe pozostaną dostępne.
 

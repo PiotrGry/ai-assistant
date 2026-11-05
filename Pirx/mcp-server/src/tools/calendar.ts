@@ -2,6 +2,12 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
 import {
+  authorizationFailureSchema,
+  rejectedAuthorization,
+  type SingleUseHostAuthorization,
+} from "../authorization.js";
+
+import {
   calendarEventSchema,
   calendarInfoSchema,
   isDateOnly,
@@ -137,6 +143,7 @@ function structured(result: Record<string, unknown>) {
 export function registerCalendarTools(
   server: McpServer,
   calendar: CalendarOperations,
+  authorization: SingleUseHostAuthorization,
 ): void {
   server.registerTool(
     "calendar_list_calendars",
@@ -229,7 +236,7 @@ export function registerCalendarTools(
       description:
         "Create exactly one event. Timed values require explicit offsets; YYYY-MM-DD pairs create all-day events whose end date is exclusive.",
       inputSchema: createEventInputSchema,
-      outputSchema: z.object({ event: calendarEventSchema }),
+      outputSchema: z.union([z.object({ event: calendarEventSchema }), authorizationFailureSchema]),
       annotations: {
         readOnlyHint: false,
         idempotentHint: false,
@@ -237,7 +244,10 @@ export function registerCalendarTools(
         openWorldHint: true,
       },
     },
-    async ({ calendarId, summary, start, end, timeZone, description, location, attendees }) => {
+    async (input, context) => {
+      const decision = authorization.consume(context.mcpReq._meta, "calendar_create_event", input);
+      if (!decision.ok) return rejectedAuthorization(decision.failure);
+      const { calendarId, summary, start, end, timeZone, description, location, attendees } = input;
       const event: CalendarEventFields = {
         summary,
         start,
@@ -258,7 +268,7 @@ export function registerCalendarTools(
       description:
         "Patch exactly one event by ID. Only supplied fields are changed; omitted fields are preserved.",
       inputSchema: updateEventInputSchema,
-      outputSchema: z.object({ event: calendarEventSchema }),
+      outputSchema: z.union([z.object({ event: calendarEventSchema }), authorizationFailureSchema]),
       annotations: {
         readOnlyHint: false,
         idempotentHint: true,
@@ -266,7 +276,10 @@ export function registerCalendarTools(
         openWorldHint: true,
       },
     },
-    async ({ calendarId, eventId, summary, start, end, timeZone, description, location, attendees }) => {
+    async (input, context) => {
+      const decision = authorization.consume(context.mcpReq._meta, "calendar_update_event", input);
+      if (!decision.ok) return rejectedAuthorization(decision.failure);
+      const { calendarId, eventId, summary, start, end, timeZone, description, location, attendees } = input;
       const update: CalendarEventUpdate = {
         ...(summary !== undefined ? { summary } : {}),
         ...(start !== undefined ? { start } : {}),
@@ -289,7 +302,7 @@ export function registerCalendarTools(
         calendarId: calendarIdSchema,
         eventId: identifierSchema,
       }),
-      outputSchema: z.object({ eventId: z.string(), deleted: z.literal(true) }),
+      outputSchema: z.union([z.object({ eventId: z.string(), deleted: z.literal(true) }), authorizationFailureSchema]),
       annotations: {
         readOnlyHint: false,
         idempotentHint: false,
@@ -297,7 +310,10 @@ export function registerCalendarTools(
         openWorldHint: true,
       },
     },
-    async ({ calendarId, eventId }) => {
+    async (input, context) => {
+      const decision = authorization.consume(context.mcpReq._meta, "calendar_delete_event", input);
+      if (!decision.ok) return rejectedAuthorization(decision.failure);
+      const { calendarId, eventId } = input;
       await calendar.deleteEvent(calendarId, eventId);
       return structured({ eventId, deleted: true });
     },
