@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -97,4 +97,49 @@ test("błędna nazwa narzędzia nie wyłącza serwera MCP", async (context) => {
   assert.equal(hello.isError, false);
   assert.equal(hello.serverUnavailable, false);
   assert.equal(hello.text, '{"greeting":"Hello, Piotr!"}');
+});
+
+async function lines(filename: string): Promise<string[]> {
+  try { return (await readFile(filename, "utf8")).trim().split("\n").filter(Boolean); }
+  catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+}
+
+test("a real MCP process reconnects reads, never replays an interrupted mutation, and respects the supplied deadline", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-mcp-reconnect-"));
+  const testDirectory = dirname(fileURLToPath(import.meta.url));
+  const pirxDirectory = resolve(testDirectory, "..", "..", "..");
+  const fixture = resolve(pirxDirectory, "mcp-server", "dist-test", "test", "fixtures", "restarting-mcp-server.js");
+  const wrapper = join(root, "server.mjs");
+  await writeFile(wrapper, `process.env.PIRX_RECONNECT_FIXTURE_DIRECTORY=${JSON.stringify(root)};\nawait import(${JSON.stringify(pathToFileURL(fixture).href)});\n`, "utf8");
+  const client = new PirxMcpClient(wrapper, 2_000);
+  context.after(async () => { await client.close(); await rm(root, { recursive: true, force: true }); });
+
+  await client.connect();
+  const firstPid = Number((await lines(join(root, "starts.txt")))[0]);
+  assert.ok(Number.isSafeInteger(firstPid) && firstPid > 0);
+  process.kill(firstPid, "SIGKILL");
+
+  const recovered = await client.callTool("fixture_read", { value: "after restart" }, undefined, 1_024, 2_000);
+  assert.equal(recovered.outcome, "succeeded", recovered.text);
+  assert.deepEqual(JSON.parse(recovered.text), { value: "after restart" });
+  const restarted = await lines(join(root, "starts.txt"));
+  assert.ok(restarted.length >= 2);
+  assert.notEqual(Number(restarted.at(-1)), firstPid);
+  assert.ok(client.toolNames.includes("fixture_after_restart"));
+
+  const mutation = await client.callTool("fixture_write_then_exit", { value: "exactly-once" }, undefined, 1_024, 2_000);
+  assert.equal(mutation.outcome, "unknown");
+  assert.equal(mutation.serverUnavailable, true);
+  assert.deepEqual(await lines(join(root, "effects.txt")), ["exactly-once"]);
+
+  const count = await client.callTool("fixture_effect_count", {}, undefined, 1_024, 2_000);
+  assert.equal(count.outcome, "succeeded", count.text);
+  assert.deepEqual(JSON.parse(count.text), { count: 1 });
+  assert.deepEqual(await lines(join(root, "effects.txt")), ["exactly-once"]);
+
+  const startedAt = performance.now();
+  const stalled = await client.callTool("fixture_stall_read", {}, undefined, 1_024, 80);
+  const duration = performance.now() - startedAt;
+  assert.equal(stalled.outcome, "confirmed_failure");
+  assert.ok(duration < 500, `stalled read took ${duration} ms`);
 });

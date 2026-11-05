@@ -50,11 +50,27 @@ function childEnvironment(environment: NodeJS.ProcessEnv): Record<string, string
 }
 
 function isConnectionFailure(error: unknown): boolean {
-  return (
+  const typed = (
     error instanceof SdkError &&
     (error.code === SdkErrorCode.ConnectionClosed ||
       error.code === SdkErrorCode.NotConnected)
   );
+  const message = error instanceof Error ? error.message : String(error);
+  return typed || /(?:connection|transport) (?:is )?(?:closed|not connected)|not connected/iu.test(message);
+}
+
+function remainingMilliseconds(deadline: number): number {
+  return Math.max(0, Math.floor(deadline - performance.now()));
+}
+
+async function withinDeadline<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error(`${label}: brak pozostałego budżetu czasu.`);
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} przekroczyło pozostały budżet ${timeoutMs} ms.`)), timeoutMs);
+  });
+  try { return await Promise.race([promise, timeout]); }
+  finally { if (timer !== undefined) clearTimeout(timer); }
 }
 
 export class PirxMcpClient {
@@ -66,6 +82,8 @@ export class PirxMcpClient {
   #client: Client | undefined;
   #tools: ListedMcpTool[] = [];
   #unavailableReason: string | undefined;
+  #reconnectFailures = 0;
+  #nextReconnectAt = 0;
 
   constructor(
     serverEntry: string,
@@ -85,6 +103,10 @@ export class PirxMcpClient {
 
   get isAvailable(): boolean {
     return this.#client !== undefined && this.#unavailableReason === undefined;
+  }
+
+  get unavailableReason(): string | undefined {
+    return this.#unavailableReason;
   }
 
   isReadOnlyTool(name: string): boolean {
@@ -109,15 +131,45 @@ export class PirxMcpClient {
     );
   }
 
-  async connect(): Promise<void> {
+  async connect(maximumDurationMs: number = this.#toolTimeoutMs): Promise<void> {
+    const budget = Math.min(this.#toolTimeoutMs, Math.floor(maximumDurationMs));
+    if (!Number.isSafeInteger(budget) || budget <= 0) throw new Error("Nie można połączyć MCP bez dodatniego budżetu czasu.");
+    if (this.isAvailable) return;
+    await this.#openConnection(performance.now() + budget);
+  }
+
+  async ensureConnected(maximumDurationMs: number): Promise<boolean> {
+    if (this.isAvailable) return true;
+    const budget = Math.min(this.#toolTimeoutMs, Math.floor(maximumDurationMs));
+    if (!Number.isSafeInteger(budget) || budget <= 0) return false;
+    const deadline = performance.now() + budget;
+    const waitMs = Math.max(0, Math.ceil(this.#nextReconnectAt - performance.now()));
+    if (waitMs > 0) {
+      if (waitMs >= remainingMilliseconds(deadline)) return false;
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, waitMs));
+    }
     try {
-      await access(this.#serverEntry);
+      await this.#openConnection(deadline);
+      return true;
     } catch {
-      throw new Error(
+      return false;
+    }
+  }
+
+  async #openConnection(deadline: number): Promise<void> {
+    try {
+      await withinDeadline(access(this.#serverEntry), remainingMilliseconds(deadline), "Sprawdzenie serwera MCP");
+    } catch {
+      const error = new Error(
         `Brak zbudowanego serwera MCP: ${this.#serverEntry}. Uruchom najpierw pnpm build.`,
       );
+      this.#markUnavailable(error.message);
+      throw error;
     }
 
+    const previous = this.#client;
+    this.#client = undefined;
+    if (previous !== undefined) void previous.close().catch(() => undefined);
     const environment = childEnvironment(process.env);
     environment.PIRX_MCP_AUTH_SECRET = this.#authorizationSecret;
     const transport = new StdioClientTransport({
@@ -133,20 +185,22 @@ export class PirxMcpClient {
     });
 
     try {
-      await client.connect(transport, { timeout: this.#toolTimeoutMs });
+      await client.connect(transport, { timeout: remainingMilliseconds(deadline) });
 
       const response = await client.listTools(undefined, {
-        timeout: this.#toolTimeoutMs,
+        timeout: remainingMilliseconds(deadline),
       });
 
       this.#tools = response.tools;
       this.#client = client;
       this.#unavailableReason = undefined;
+      this.#reconnectFailures = 0;
+      this.#nextReconnectAt = 0;
     } catch (error: unknown) {
       await client.close().catch(() => undefined);
 
       const detail = error instanceof Error ? error.message : String(error);
-
+      this.#markUnavailable(detail);
       throw new Error(`Nie udało się uruchomić serwera MCP: ${detail}`);
     }
   }
@@ -156,8 +210,14 @@ export class PirxMcpClient {
     arguments_: Record<string, unknown>,
     authorization?: Pick<HostToolAuthorization, "operationId">,
     maximumResultCharacters: number = this.#maxToolResultCharacters,
+    maximumDurationMs: number = this.#toolTimeoutMs,
   ): Promise<ToolExecution> {
-    if (this.#client === undefined || this.#unavailableReason !== undefined) {
+    const budget = Math.min(this.#toolTimeoutMs, Math.floor(maximumDurationMs));
+    if (!Number.isSafeInteger(budget) || budget <= 0) {
+      return { text: "Nie wykonano wywołania MCP: budżet czasu został wyczerpany przed dispatch.", isError: true, serverUnavailable: false, outcome: "failed_before_execution" };
+    }
+    const deadline = performance.now() + budget;
+    if (!await this.ensureConnected(remainingMilliseconds(deadline))) {
       const reason = this.#unavailableReason ?? "brak aktywnego połączenia";
 
       return {
@@ -177,73 +237,68 @@ export class PirxMcpClient {
       };
     }
 
-    const mutating = !this.isReadOnlyTool(name);
-    let dispatched = false;
-    try {
-      const request = {
-        name,
-        arguments: arguments_,
-        ...(authorization === undefined
-          ? {}
-          : {
-              _meta: {
-                [HOST_AUTHORIZATION_META_KEY]: createHostAuthorization(
-                  this.#authorizationSecret,
-                  name,
-                  arguments_,
-                  authorization.operationId,
-                ),
-              },
-            }),
-      };
-      dispatched = true;
-      const result = await this.#client.callTool(request, { timeout: this.#toolTimeoutMs });
-      const details = result.structuredContent as Record<string, unknown> | undefined;
-      const correlationId = typeof details?.correlationId === "string" && /^[A-Za-z0-9._:-]{1,128}$/u.test(details.correlationId)
-        ? details.correlationId
-        : undefined;
-      const outcome = details?.remoteOutcome === "unknown" || details?.outcome === "unknown" ||
-        (mutating && result.isError === true && details?.remoteOutcome !== "not_accepted")
-        ? "unknown"
-        : result.isError === true ? "confirmed_failure" : "succeeded";
-
-      return {
-        text: toolResultToText(result, Math.max(256, Math.min(this.#maxToolResultCharacters, maximumResultCharacters)), name),
-        isError: outcome !== "succeeded",
-        outcome,
-        ...(correlationId === undefined ? {} : { correlationId }),
-        serverUnavailable: false,
-      };
-    } catch (error: unknown) {
-      const detail = error instanceof Error ? error.message : String(error);
-      const outcome = !dispatched ? "failed_before_execution" : mutating || isConnectionFailure(error) ? "unknown" : "confirmed_failure";
-
-      if (error instanceof ProtocolError) {
+    let mutating = !this.isReadOnlyTool(name);
+    const request = {
+      name,
+      arguments: arguments_,
+      ...(authorization === undefined ? {} : { _meta: { [HOST_AUTHORIZATION_META_KEY]: createHostAuthorization(this.#authorizationSecret, name, arguments_, authorization.operationId) } }),
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const client = this.#client;
+      if (client === undefined || remainingMilliseconds(deadline) <= 0) {
+        return { text: "Nie wykonano wywołania MCP: połączenie lub budżet czasu skończyły się przed dispatch.", isError: true, serverUnavailable: client === undefined, outcome: "failed_before_execution" };
+      }
+      let dispatched = false;
+      try {
+        dispatched = true;
+        const result = await client.callTool(request, { timeout: remainingMilliseconds(deadline) });
+        const details = result.structuredContent as Record<string, unknown> | undefined;
+        const correlationId = typeof details?.correlationId === "string" && /^[A-Za-z0-9._:-]{1,128}$/u.test(details.correlationId) ? details.correlationId : undefined;
+        const outcome = details?.remoteOutcome === "unknown" || details?.outcome === "unknown" || (mutating && result.isError === true && details?.remoteOutcome !== "not_accepted")
+          ? "unknown" : result.isError === true ? "confirmed_failure" : "succeeded";
         return {
-          text: `Błąd wywołania narzędzia ${name}: ${detail}`,
-          isError: true,
-          serverUnavailable: false,
-          outcome,
+          text: toolResultToText(result, Math.max(256, Math.min(this.#maxToolResultCharacters, maximumResultCharacters)), name),
+          isError: outcome !== "succeeded", outcome,
+          ...(correlationId === undefined ? {} : { correlationId }), serverUnavailable: false,
+        };
+      } catch (error: unknown) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const connectionFailure = isConnectionFailure(error);
+        if (connectionFailure) {
+          this.#loseConnection(detail);
+          if (!mutating && attempt === 0 && remainingMilliseconds(deadline) > 0 && await this.ensureConnected(remainingMilliseconds(deadline))) {
+            const refreshed = this.#tools.find((tool) => tool.name === name);
+            if (refreshed !== undefined && refreshed.annotations?.readOnlyHint === true) {
+              mutating = false;
+              continue;
+            }
+          }
+        }
+        const outcome = !dispatched ? "failed_before_execution" : mutating ? "unknown" : "confirmed_failure";
+        if (error instanceof ProtocolError && !connectionFailure) {
+          return { text: `Błąd wywołania narzędzia ${name}: ${detail}`, isError: true, serverUnavailable: false, outcome };
+        }
+        return {
+          text: connectionFailure ? `Serwer MCP jest niedostępny: ${detail}` : `Błąd wywołania narzędzia ${name}: ${detail}`,
+          isError: true, serverUnavailable: connectionFailure, outcome,
         };
       }
-
-      if (isConnectionFailure(error)) {
-        this.#unavailableReason = detail;
-        return {
-          text: `Serwer MCP jest niedostępny: ${detail}`,
-          isError: true,
-          serverUnavailable: true,
-          outcome,
-        };
-      }
-
-      return {
-        text: `Błąd wywołania narzędzia ${name}: ${detail}`,
-        isError: true,
-        serverUnavailable: false,
-        outcome,
-      };
     }
+    return { text: `Nie udało się wykonać odczytu ${name} po jednym kontrolowanym reconnect.`, isError: true, serverUnavailable: true, outcome: "confirmed_failure" };
+  }
+
+  #markUnavailable(reason: string): void {
+    this.#unavailableReason = reason;
+    this.#reconnectFailures = Math.min(this.#reconnectFailures + 1, 8);
+    const backoffMs = Math.min(1_000, 25 * 2 ** (this.#reconnectFailures - 1));
+    this.#nextReconnectAt = performance.now() + backoffMs;
+  }
+
+  #loseConnection(reason: string): void {
+    const client = this.#client;
+    this.#client = undefined;
+    this.#markUnavailable(reason);
+    if (client !== undefined) void client.close().catch(() => undefined);
   }
 
   async close(): Promise<void> {
@@ -251,6 +306,9 @@ export class PirxMcpClient {
 
     this.#client = undefined;
     this.#tools = [];
+    this.#unavailableReason = undefined;
+    this.#reconnectFailures = 0;
+    this.#nextReconnectAt = 0;
 
     if (client !== undefined) {
       await client.close().catch(() => undefined);

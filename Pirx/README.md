@@ -34,6 +34,12 @@ Docelowy runtime lokalnej asystentki składa się z dwóch procesów:
 - `agent` — rozmowa z Ollamą, pętla wywołań narzędzi i logi sesji,
 - `mcp-server` — narzędzia udostępniane agentowi przez MCP po `stdio`.
 
+Jeżeli MCP nie uruchomi się albo zakończy proces, chat pozostaje dostępny bez
+narzędzi i pokazuje stan niedostępności. Kolejna tura wykonuje ograniczony
+reconnect i ponownie pobiera katalog narzędzi. Bezpieczny odczyt może zostać
+powtórzony jeden raz po utracie połączenia; mutacja po dispatch nigdy nie jest
+automatycznie ponawiana i pozostaje w stanie niepewnym do reconciliation.
+
 Pythonowy katalog `pirx-mcp` pozostaje referencją na czas migracji.
 
 ## Wymagania

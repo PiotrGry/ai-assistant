@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { mutationId, SqliteActionLedger } from "../src/action-ledger.js";
 import { SqliteStore } from "../src/storage/sqlite.js";
-import { PirxAgent } from "../src/agent.js";
+import { PirxAgent, type AgentHooks } from "../src/agent.js";
 import type { AgentConfig } from "../src/config.js";
 import type {
   ContextBuildInput,
@@ -101,6 +101,7 @@ async function createContinuationAgent(
   context: TestContext,
   replies: readonly Record<string, unknown>[],
   overrides: Partial<AgentConfig> = {},
+  hooks: AgentHooks = {},
 ): Promise<{ readonly agent: PirxAgent; readonly ollama: ScriptedOllama }> {
   const ollama = await startScriptedOllama(replies);
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "pirx-continuation-test-"));
@@ -123,7 +124,7 @@ async function createContinuationAgent(
     toolTimeoutMs: 30_000,
     continuationCheck: true,
     ...overrides,
-  });
+  }, hooks);
   context.after(async () => {
     await agent.close();
     await ollama.close();
@@ -131,6 +132,21 @@ async function createContinuationAgent(
   });
   return { agent, ollama };
 }
+
+test("chat starts without MCP and keeps the unavailable state bounded to tools", async (context) => {
+  const notices: string[] = [];
+  const { agent, ollama } = await createContinuationAgent(context, [
+    { role: "assistant", content: "Mogę nadal odpowiedzieć bez narzędzi." },
+  ], { mcpServerEntry: "/definitely/missing/pirx-mcp-server.js", toolTimeoutMs: 100 }, {
+    onMcpUnavailable: (reason) => notices.push(reason),
+  });
+  assert.equal(agent.mcpAvailable, false);
+  const turn = await agent.chat("Czy chat działa?");
+  assert.equal(turn.content, "Mogę nadal odpowiedzieć bez narzędzi.");
+  assert.equal(ollama.requests[0]?.tools, undefined);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0]!, /MCP.*niedostępny/iu);
+});
 
 test("continuation check runs a tool the model only announced, then ends on the final answer", async (context) => {
   const { agent, ollama } = await createContinuationAgent(context, [
