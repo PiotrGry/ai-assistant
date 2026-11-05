@@ -53,7 +53,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
       return 0;
     }
     const store = RuntimeSqliteStore.open({ filename: config.databasePath, environment: host.env, mode: "existing" });
-    const worker = new ProductionClaudeWorker({ store, repositories: config.repositories });
+    const worker = new ProductionClaudeWorker({ store, repositories: config.repositories, environment: host.env });
     runtime = new ProductionRuntime(store, {
       workerId: config.workerId, provider: config.provider, workerCapabilities: config.workerCapabilities,
       repositories: config.repositories.map(({ repository, repositoryRoot, baseBranch, baseRevision }) => ({ repository, repositoryRoot, baseBranch, baseRevision })),

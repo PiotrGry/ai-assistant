@@ -59,6 +59,11 @@ task pirx:test
 task pirx:start
 ```
 
+Pełny kontrakt źródeł konfiguracji, ich pierwszeństwa, właścicieli oraz
+przekazywania pomiędzy procesami opisuje
+[`docs/configuration.md`](docs/configuration.md). Nie utrzymuj osobnych kopii
+tych samych ustawień w skryptach uruchomieniowych.
+
 Nowoczesny interfejs terminalowy uruchom osobno:
 
 ```bash
@@ -138,8 +143,8 @@ Logi sesji trafiają do głównego katalogu `logs/` i nie są wersjonowane.
 
 ## Obsidian
 
-Domyślnym vaultem jest `Pirx/vault`. Możesz użyć innego vaulta, ustawiając
-zmienną środowiskową przed uruchomieniem:
+Obsidian jest wyłączony, dopóki nie wskażesz jawnie vaulta. Ustaw zmienną
+środowiskową przed uruchomieniem:
 
 ```bash
 export PIRX_OBSIDIAN_VAULT=/bezwzgledna/sciezka/do/vaulta

@@ -9,6 +9,7 @@ import {
 } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import type { Tool } from "ollama";
+import { MCP_CHILD_ENVIRONMENT_KEYS } from "@pirx/config";
 import { modelToolSchema } from "./model-tool-schema.js";
 
 import { toolResultToText } from "./tool-result.js";
@@ -37,52 +38,9 @@ interface ListedMcpTool {
     | undefined;
 }
 
-const CHILD_ENVIRONMENT_KEYS = [
-  "HOME",
-  "LANG",
-  "LC_ALL",
-  "LOGNAME",
-  "PATH",
-  "SHELL",
-  "TEMP",
-  "TMPDIR",
-  "TZ",
-  "USER",
-  "XDG_CONFIG_HOME",
-  "XDG_DATA_HOME",
-  "XDG_RUNTIME_DIR",
-  "DBUS_SESSION_BUS_ADDRESS",
-  "PIRX_ORCHESTRATOR_CONFIG",
-  "PIRX_ORCHESTRATOR_DATABASE",
-  "PIRX_ORCHESTRATOR_SERVICE_ENABLED",
-  "PIRX_GPU_DB",
-  "PIRX_OBSIDIAN_VAULT",
-  "PIRX_GOOGLE_CREDENTIALS_FILE",
-  "PIRX_GOOGLE_TOKEN_FILE",
-  "PIRX_GOOGLE_CALENDAR_ID",
-  "PIRX_GOOGLE_CALENDAR_TIMEZONE",
-  "PIRX_GOOGLE_TIMEOUT_MS",
-  "PIRX_GOOGLE_AUTH_TIMEOUT_MS",
-  "PIRX_STORAGE_FILE",
-  "GH_CONFIG_DIR",
-  "PIRX_GITHUB_OWNER",
-  "PIRX_GITHUB_REPOSITORY",
-  "PIRX_GITHUB_PROJECT_OWNER",
-  "PIRX_GITHUB_PROJECT_NUMBER",
-  "PIRX_GITHUB_API_URL",
-  "PIRX_GITHUB_TIMEOUT_MS",
-  "PIRX_GITHUB_POC_ISSUE",
-  "PIRX_GITHUB_SHIPMENT_POC",
-  "PIRX_GITHUB_SHIPMENT_POC_STATE_FILE",
-  "PIRX_GITHUB_SHIPMENT_CYCLE",
-  "PIRX_GITHUB_FAILURE_HANDOFF_POC",
-  "PIRX_GITHUB_FAILURE_HANDOFF_POC_STATE_FILE",
-  "PIRX_CODEX_EXECUTABLE",
-] as const;
-
 function childEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
   const result: Record<string, string> = {};
-  for (const key of CHILD_ENVIRONMENT_KEYS) {
+  for (const key of MCP_CHILD_ENVIRONMENT_KEYS) {
     const value = environment[key];
     if (value !== undefined) {
       result[key] = value;

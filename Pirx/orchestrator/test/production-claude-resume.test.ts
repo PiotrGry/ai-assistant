@@ -38,11 +38,12 @@ test("production Claude resumes an assigned successor from its predecessor check
     const request = createWorkerRequest({ task: task.value, attempt: successor.attempt, workerId: "worker", provider: "claude-code", repository: { owner: "PiotrGry", repository: "ai-assistant" }, workspace: { branch: "pirx/review", worktree }, capabilityGrant: { grantedCapabilities: ["repository.read"], resourceScope: { repository: "PiotrGry/ai-assistant", branch: "pirx/review", worktree } }, correlationId: "resume-production-correlation", limits: { timeoutMs: 1000, maxOutputBytes: 16384, maxErrorBytes: 16384 }, resumeContextReference: checkpoint.value.id });
     assert.equal(request.ok, true); if (!request.ok) return;
     let calls = 0;
-    const worker = new ProductionClaudeWorker({ store, repositories: [{ repository: "PiotrGry/ai-assistant", repositoryRoot: root, remoteName: "origin", testCommands: [] }], runner: { async runStructured(input) {
+    const worker = new ProductionClaudeWorker({ store, environment: { OLLAMA_MODEL: "advisor-model", OLLAMA_BASE_URL: "http://127.0.0.1:11435", OLLAMA_NUM_CTX: "32768", OLLAMA_MAX_OUTPUT_TOKENS: "2048", OLLAMA_TEMPERATURE: "0.2" }, repositories: [{ repository: "PiotrGry/ai-assistant", repositoryRoot: root, remoteName: "origin", testCommands: [] }], runner: { async runStructured(input) {
       calls++;
       const advisor = JSON.parse(input.workerProfile!.advisorConfig!).mcpServers.pirx_advisor;
       assert.equal(advisor.command, process.execPath);
       assert.deepEqual(advisor.args.slice(1), [store.filename, request.value.taskId, request.value.attemptId]);
+      assert.deepEqual(advisor.env, { OLLAMA_MODEL: "advisor-model", OLLAMA_BASE_URL: "http://127.0.0.1:11435", OLLAMA_NUM_CTX: "32768", OLLAMA_MAX_OUTPUT_TOKENS: "2048", OLLAMA_TEMPERATURE: "0.2" });
       assert.match(input.prompt, /"mode":"resume"/u);
       assert.match(input.prompt, /resume-production-attempt-1/u);
       return { outcome: "success", requestId: input.requestId, durationMs: 1, exitCode: 0, structuredOutput: { kind: "worker_result", schemaVersion: 1, taskId: request.value.taskId, attemptId: request.value.attemptId, correlationId: request.value.correlationId, outcome: "BLOCKED", reason: "Fixture completed without repository mutations" } };
