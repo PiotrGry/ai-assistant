@@ -9,7 +9,7 @@ import {
 } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import type { Tool } from "ollama";
-import { MCP_CHILD_ENVIRONMENT_KEYS } from "@pirx/config";
+import { MCP_CHILD_ENVIRONMENT_KEYS, type ToolProfile } from "@pirx/config";
 import { modelToolSchema } from "./model-tool-schema.js";
 
 import { toolResultToText } from "./tool-result.js";
@@ -79,6 +79,7 @@ export class PirxMcpClient {
   readonly #maxToolResultCharacters: number;
   #authorizationSecret: string;
   readonly #rotateAuthorizationSecret: boolean;
+  readonly #toolProfile: ToolProfile | undefined;
 
   #client: Client | undefined;
   #tools: ListedMcpTool[] = [];
@@ -91,12 +92,14 @@ export class PirxMcpClient {
     toolTimeoutMs: number,
     maxToolResultCharacters = 12_000,
     authorizationSecret?: string,
+    toolProfile?: ToolProfile,
   ) {
     this.#serverEntry = serverEntry;
     this.#toolTimeoutMs = toolTimeoutMs;
     this.#maxToolResultCharacters = maxToolResultCharacters;
     this.#authorizationSecret = authorizationSecret ?? randomBytes(32).toString("base64url");
     this.#rotateAuthorizationSecret = authorizationSecret === undefined;
+    this.#toolProfile = toolProfile;
   }
 
   get toolNames(): readonly string[] {
@@ -174,6 +177,7 @@ export class PirxMcpClient {
     if (previous !== undefined) void previous.close().catch(() => undefined);
     if (this.#rotateAuthorizationSecret) this.#authorizationSecret = randomBytes(32).toString("base64url");
     const environment = childEnvironment(process.env);
+    if (this.#toolProfile !== undefined) environment.PIRX_TOOL_PROFILE = this.#toolProfile;
     environment.PIRX_MCP_AUTH_SECRET = this.#authorizationSecret;
     const transport = new StdioClientTransport({
       command: process.execPath,

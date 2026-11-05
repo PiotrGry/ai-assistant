@@ -61,6 +61,11 @@ orchestrator.json + daemon environment
 The agent never forwards its whole environment to MCP. Host identity plus
 registered settings whose `forwardToMcp` metadata is true are copied into a new
 environment. Chat model settings are not sent to the main MCP server.
+`PIRX_TOOL_PROFILE` is resolved once by the CLI/TUI and forwarded explicitly;
+the MCP child registers only that profile's tool groups. The safe default is
+`personal`. `development` excludes private Calendar/Obsidian tools, while
+`operations` adds daemon control and observability to the development set.
+Unknown values fail startup and never fall back to a wider catalog.
 `PIRX_STORAGE_FILE` is the deliberate exception among chat-owned paths: MCP
 needs the resolved path only to prove that the runtime database is not the chat
 database. The path is sensitive metadata and must not be logged.
@@ -86,6 +91,7 @@ process into the main MCP child.
 | `PIRX_CONTINUATION_CHECK`, `PIRX_LLM_TIMEOUT_MS`, `PIRX_TOOL_TIMEOUT_MS` | chat | no | no |
 | `PIRX_STORAGE_FILE` | chat | yes | yes, alias protection only |
 | `PIRX_STORAGE_MODE`, `PIRX_RESOURCE_SAMPLE_INTERVAL_MS` | chat | no | no |
+| `PIRX_TOOL_PROFILE` (`personal`, `development`, `operations`) | chat | no | yes |
 | `PIRX_ORCHESTRATOR_CONFIG`, `PIRX_ORCHESTRATOR_DATABASE` | runtime | yes | yes |
 | `PIRX_ORCHESTRATOR_SERVICE_ENABLED` | runtime | no | yes |
 | `PIRX_GPU_DB` | observability | yes | yes |

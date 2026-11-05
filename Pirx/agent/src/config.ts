@@ -1,4 +1,4 @@
-import { resolveModelSettings } from "@pirx/config";
+import { resolveModelSettings, resolveToolProfile, type ToolProfile } from "@pirx/config";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 export type StorageMode = "metrics_only" | "redacted" | "full_local";
 
 export interface AgentConfig {
+  readonly toolProfile?: ToolProfile;
   readonly model: string;
   readonly numCtx: number;
   readonly keepAlive: string;
@@ -110,6 +111,7 @@ export function loadConfig(
 
   return {
     ...modelSettings,
+    toolProfile: resolveToolProfile(environment),
     keepAlive: environment.OLLAMA_KEEP_ALIVE ?? "10m",
 
     contextSafetyMarginTokens: positiveInteger(

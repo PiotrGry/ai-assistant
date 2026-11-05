@@ -8,6 +8,29 @@ export interface ProfileSettingDefinition {
   readonly forwardToMcp: boolean;
 }
 
+export const TOOL_PROFILES = ["personal", "development", "operations"] as const;
+export type ToolProfile = typeof TOOL_PROFILES[number];
+export type ToolScope = "common" | "personal" | "development" | "operations";
+
+/** One explicit visibility matrix shared by chat entry points and MCP. */
+export const TOOL_PROFILE_SCOPES: Readonly<Record<ToolProfile, ReadonlySet<ToolScope>>> = Object.freeze({
+  personal: new Set<ToolScope>(["common", "personal"]),
+  development: new Set<ToolScope>(["common", "development"]),
+  operations: new Set<ToolScope>(["common", "development", "operations"]),
+});
+
+export function resolveToolProfile(environment: NodeJS.ProcessEnv): ToolProfile {
+  const value = environment.PIRX_TOOL_PROFILE;
+  if (value === undefined) return "personal";
+  const profile = value.trim();
+  if ((TOOL_PROFILES as readonly string[]).includes(profile)) return profile as ToolProfile;
+  throw new Error(`PIRX_TOOL_PROFILE must be one of: ${TOOL_PROFILES.join(", ")}.`);
+}
+
+export function toolProfileAllows(profile: ToolProfile, scope: ToolScope): boolean {
+  return TOOL_PROFILE_SCOPES[profile].has(scope);
+}
+
 const chat = { owner: "chat", sensitive: false, forwardToMcp: false } as const;
 const runtime = { owner: "runtime", sensitive: false, forwardToMcp: true } as const;
 const integration = { owner: "integration", sensitive: false, forwardToMcp: true } as const;
@@ -39,6 +62,7 @@ export const PROFILE_SETTING_DEFINITIONS = Object.freeze({
   PIRX_STORAGE_FILE: { ...chat, sensitive: true, forwardToMcp: true },
   PIRX_STORAGE_MODE: chat,
   PIRX_RESOURCE_SAMPLE_INTERVAL_MS: chat,
+  PIRX_TOOL_PROFILE: { ...chat, forwardToMcp: true },
   PIRX_ORCHESTRATOR_CONFIG: { ...runtime, sensitive: true },
   PIRX_ORCHESTRATOR_DATABASE: { ...runtime, sensitive: true },
   PIRX_ORCHESTRATOR_SERVICE_ENABLED: runtime,

@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { PirxMcpClient } from "../src/mcp-client.js";
 import { initializeHostEnvironment } from "../src/startup-environment.js";
+import { loadConfig } from "../src/config.js";
 
 test("chat forwards runtime configuration to the real MCP child and can pause/resume its SQLite control", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pirx-chat-control-"));
@@ -21,21 +22,30 @@ test("chat forwards runtime configuration to the real MCP child and can pause/re
   const saved = process.env.PIRX_ORCHESTRATOR_DATABASE;
   const savedConfig = process.env.PIRX_CHAT_CONFIG;
   const savedXdgConfig = process.env.XDG_CONFIG_HOME;
+  const savedToolProfile = process.env.PIRX_TOOL_PROFILE;
   process.env.XDG_CONFIG_HOME = root;
   const configFile = join(root, "chat.json");
-  await writeFile(configFile, JSON.stringify({ PIRX_ORCHESTRATOR_DATABASE: filename }));
+  await writeFile(configFile, JSON.stringify({ PIRX_TOOL_PROFILE: "operations", PIRX_ORCHESTRATOR_DATABASE: filename }));
   process.env.PIRX_CHAT_CONFIG = configFile;
   delete process.env.PIRX_ORCHESTRATOR_DATABASE;
+  delete process.env.PIRX_TOOL_PROFILE;
   initializeHostEnvironment();
-  const client = new PirxMcpClient(resolve(directory, "mcp-server", "dist", "index.js"), 30_000);
+  const profile = loadConfig(process.env).toolProfile;
+  const client = new PirxMcpClient(resolve(directory, "mcp-server", "dist", "index.js"), 30_000, 12_000, undefined, profile);
   context.after(async () => {
     await client.close(); store.close();
     if (saved === undefined) delete process.env.PIRX_ORCHESTRATOR_DATABASE; else process.env.PIRX_ORCHESTRATOR_DATABASE = saved;
     if (savedXdgConfig === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = savedXdgConfig;
     if (savedConfig === undefined) delete process.env.PIRX_CHAT_CONFIG; else process.env.PIRX_CHAT_CONFIG = savedConfig;
+    if (savedToolProfile === undefined) delete process.env.PIRX_TOOL_PROFILE; else process.env.PIRX_TOOL_PROFILE = savedToolProfile;
     await rm(root, { recursive: true, force: true });
   });
   await client.connect();
+  assert.equal(profile, "operations");
+  assert.ok(client.toolNames.includes("pirx_orchestrator_status"));
+  assert.ok(client.toolNames.includes("github_issue_get"));
+  assert.ok(!client.toolNames.includes("obsidian_read"));
+  assert.ok(!client.toolNames.includes("calendar_list_events"));
   const status = await client.callTool("pirx_orchestrator_status", {});
   assert.equal(status.isError, false, status.text);
   assert.equal(JSON.parse(status.text).snapshot.observedState, "paused");

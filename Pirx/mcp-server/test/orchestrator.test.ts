@@ -31,7 +31,7 @@ test("MCP reads bounded status and requires exact authorization for pause/resume
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const control = new FakeControl();
   const secret = "orchestrator-test-secret";
-  const server = createMcpServer({ environment: {}, obsidianVault: new ObsidianVault(root), orchestratorControlPort: control, executionObservabilityPort: control, githubAuthorizationSecret: secret });
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations" }, obsidianVault: new ObsidianVault(root), orchestratorControlPort: control, executionObservabilityPort: control, githubAuthorizationSecret: secret });
   const client = new Client({ name: "pirx-orchestrator-test", version: "0.1.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   context.after(async () => { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); });
@@ -67,7 +67,7 @@ test("MCP reads bounded status and requires exact authorization for pause/resume
 test("unconfigured orchestrator tools remain listed and return controlled results", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pirx-orchestrator-unconfigured-"));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createMcpServer({ environment: { XDG_CONFIG_HOME: root }, obsidianVault: new ObsidianVault(root) });
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations", XDG_CONFIG_HOME: root }, obsidianVault: new ObsidianVault(root) });
   const client = new Client({ name: "pirx-orchestrator-unconfigured", version: "0.1.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   context.after(async () => { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); });
@@ -105,7 +105,7 @@ test("MCP reads a blocked Attempt diagnostic from SQLite and distinguishes a fai
   assert.equal(store.selection.synchronize({ taskId: task.value.id, queueOrder: 10, dependencyState: "known", blockers: [], synchronizedAt: at }).outcome, "success");
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createMcpServer({ environment: { XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_DATABASE: filename } });
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations", XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_DATABASE: filename } });
   const client = new Client({ name: "pirx-blocked-status-test", version: "0.1.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
@@ -168,7 +168,7 @@ test("MCP Task history pages persisted Attempts and resolves the repository expl
     assert.equal(store.tasks.update(done.value, { state: "in_progress", updatedAt: second.value.task.updatedAt }).outcome, "success");
   } finally { store.close(); }
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createMcpServer({ environment: { XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_DATABASE: filename } });
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations", XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_DATABASE: filename } });
   const client = new Client({ name: "pirx-task-history-test", version: "1" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   const lookup = async (arguments_: Record<string, unknown>) => {

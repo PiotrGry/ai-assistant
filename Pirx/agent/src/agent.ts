@@ -351,6 +351,8 @@ export class PirxAgent {
       config.mcpServerEntry,
       config.toolTimeoutMs,
       config.maxToolResultCharacters,
+      undefined,
+      config.toolProfile ?? "personal",
     );
     this.#messages = [{ role: "system", content: prompt.content }];
     this.#currentModel = config.model;

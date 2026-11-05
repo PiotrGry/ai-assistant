@@ -64,7 +64,7 @@ async function connectedServer() {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const calendarCreates: CalendarEventFields[] = [];
   const server = createMcpServer({
-    environment: {},
+    environment: { PIRX_TOOL_PROFILE: "personal" },
     obsidianVault: new ObsidianVault(root),
     calendar: fakeCalendar(calendarCreates),
     authorizationSecret,
@@ -77,7 +77,7 @@ async function connectedServer() {
   return { root, server, client, calendarCreates };
 }
 
-test("server exposes complete tools with safe annotations", async (context) => {
+test("personal profile exposes only personal tools with safe annotations", async (context) => {
   const fixture = await connectedServer();
   context.after(async () => {
     await fixture.client.close();
@@ -95,15 +95,6 @@ test("server exposes complete tools with safe annotations", async (context) => {
       "calendar_list_calendars",
       "calendar_list_events",
       "calendar_update_event",
-      "github_actions_watch",
-      "github_issue_close",
-      "github_issue_comment",
-      "github_issue_create",
-      "github_issue_get",
-      "github_issue_list",
-      "github_issue_reopen",
-      "github_issue_search",
-      "github_issue_update",
       "hello",
       "obsidian_add_link",
       "obsidian_append",
@@ -117,16 +108,6 @@ test("server exposes complete tools with safe annotations", async (context) => {
       "obsidian_read",
       "obsidian_search",
       "obsidian_write",
-      "pirx_agent_conversation",
-      "pirx_execution_report",
-      "pirx_orchestrator_control",
-      "pirx_orchestrator_diagnostic",
-      "pirx_orchestrator_logs",
-      "pirx_orchestrator_shutdown",
-      "pirx_orchestrator_start",
-      "pirx_orchestrator_status",
-      "pirx_resource_report",
-    "pirx_task_history",
       "system_info",
     ],
   );
@@ -137,19 +118,54 @@ test("server exposes complete tools with safe annotations", async (context) => {
   assert.equal(byName.get("calendar_create_event")?.annotations?.readOnlyHint, false);
   assert.equal(byName.get("calendar_create_event")?.annotations?.idempotentHint, false);
   assert.equal(byName.get("calendar_delete_event")?.annotations?.destructiveHint, true);
-  assert.equal(byName.get("github_actions_watch")?.annotations?.readOnlyHint, true);
-  assert.equal(byName.get("github_actions_watch")?.annotations?.idempotentHint, true);
-  assert.equal(byName.get("pirx_orchestrator_status")?.annotations?.readOnlyHint, true);
-  assert.equal(byName.get("pirx_execution_report")?.annotations?.readOnlyHint, true);
-  assert.equal(byName.get("pirx_execution_report")?.annotations?.idempotentHint, true);
-  assert.equal(byName.get("pirx_resource_report")?.annotations?.readOnlyHint, true);
-  assert.equal(byName.get("pirx_resource_report")?.annotations?.idempotentHint, true);
-  assert.equal(byName.get("pirx_orchestrator_control")?.annotations?.destructiveHint, true);
-  assert.equal(byName.get("pirx_orchestrator_shutdown")?.annotations?.destructiveHint, true);
   assert.equal(byName.get("obsidian_read")?.annotations?.readOnlyHint, true);
   assert.equal(byName.get("obsidian_write")?.annotations?.destructiveHint, true);
   assert.match(byName.get("calendar_get_event")?.description ?? "", /current external state/u);
   assert.match(byName.get("obsidian_read")?.description ?? "", /current external state/u);
+});
+
+test("development and operations profiles expose only their shared matrix and reject out-of-profile calls", async (context) => {
+  const fixtures: Array<{ client: Client; server: ReturnType<typeof createMcpServer> }> = [];
+  context.after(async () => {
+    for (const fixture of fixtures) {
+      await fixture.client.close();
+      await fixture.server.close();
+    }
+  });
+  const connect = async (profile: "development" | "operations") => {
+    const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: profile } });
+    const client = new Client({ name: `${profile}-profile-test`, version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    fixtures.push({ client, server });
+    return { client, names: (await client.listTools()).tools.map((tool) => tool.name) };
+  };
+
+  const development = await connect("development");
+  assert.ok(development.names.includes("github_issue_get"));
+  assert.ok(development.names.includes("github_actions_watch"));
+  assert.ok(development.names.includes("pirx_task_history"));
+  assert.ok(!development.names.includes("obsidian_read"));
+  assert.ok(!development.names.includes("calendar_list_events"));
+  assert.ok(!development.names.includes("pirx_orchestrator_status"));
+  await assert.rejects(
+    development.client.callTool({ name: "obsidian_read", arguments: { path: "private.md" } }),
+    /Tool obsidian_read not found/u,
+  );
+
+  const operations = await connect("operations");
+  assert.ok(operations.names.includes("github_issue_get"));
+  assert.ok(operations.names.includes("pirx_orchestrator_status"));
+  assert.ok(operations.names.includes("pirx_orchestrator_logs"));
+  assert.ok(operations.names.includes("pirx_resource_report"));
+  assert.ok(!operations.names.includes("obsidian_read"));
+  assert.ok(!operations.names.includes("calendar_list_events"));
+  await assert.rejects(
+    operations.client.callTool({ name: "calendar_list_events", arguments: {} }),
+    /Tool calendar_list_events not found/u,
+  );
+
+  assert.throws(() => createMcpServer({ environment: { PIRX_TOOL_PROFILE: "unbounded" } }), /PIRX_TOOL_PROFILE/u);
 });
 
 test("Calendar and Obsidian mutations require exact single-use host authorization while reads remain unchanged", async (context) => {
@@ -246,7 +262,7 @@ test("shipment POC is annotated as a mutating operation", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pirx-shipment-server-vault-"));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createMcpServer({
-    environment: {},
+    environment: { PIRX_TOOL_PROFILE: "operations" },
     obsidianVault: new ObsidianVault(root),
     calendar: fakeCalendar(),
     githubShipmentPocConfig: { token: "test", owner: "PiotrGry", repository: "zdrovena-reconciliation", apiUrl: "https://api.github.com", timeoutMs: 100 },
@@ -271,7 +287,7 @@ test("durable shipment cycle is listed as a mutating operation", async (context)
   const root = await mkdtemp(join(tmpdir(), "pirx-shipment-cycle-server-vault-"));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createMcpServer({
-    environment: { PIRX_GITHUB_SHIPMENT_CYCLE: "1" },
+    environment: { PIRX_TOOL_PROFILE: "operations", PIRX_GITHUB_SHIPMENT_CYCLE: "1" },
     obsidianVault: new ObsidianVault(root),
     calendar: fakeCalendar(),
     githubPocConfig: { token: "test", owner: "PiotrGry", repository: "ai-assistant", apiUrl: "https://api.github.com", timeoutMs: 100 },
@@ -289,7 +305,7 @@ test("failed-CI handoff POC is listed as mutating and denies missing host author
   const root = await mkdtemp(join(tmpdir(), "pirx-failure-handoff-server-vault-"));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createMcpServer({
-    environment: {},
+    environment: { PIRX_TOOL_PROFILE: "operations" },
     obsidianVault: new ObsidianVault(root),
     calendar: fakeCalendar(),
     githubFailureHandoffPocConfig: { token: "test", owner: "PiotrGry", repository: "zdrovena-reconciliation", apiUrl: "https://api.github.com", timeoutMs: 100 },

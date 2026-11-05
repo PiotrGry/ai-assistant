@@ -179,7 +179,7 @@ test("custom-persona chat receives orchestration routing and can inspect the dae
     { role: "assistant", content: "", tool_calls: [{ function: { name: "pirx_orchestrator_status", arguments: {} } }] },
     { role: "assistant", content: "Odczytałam stan usługi; wynik nie potwierdza uruchomienia workera." },
     { role: "assistant", content: "GOTOWE" },
-  ]);
+  ], { toolProfile: "operations" });
   const turn = await agent.chat("Rozwiąż Issue #462 z kolejki przez Claude.");
   const messages = ollama.requests[0]?.messages as Array<{ role: string; content: string }>;
   const system = messages.find((message) => message.role === "system")?.content ?? "";
@@ -189,6 +189,8 @@ test("custom-persona chat receives orchestration routing and can inspect the dae
   assert.match(system, /nie zmieniaj kolejności/u);
   const tools = ollama.requests[0]?.tools as Array<{ function: { name: string } }>;
   assert.ok(tools.some((tool) => tool.function.name === "pirx_orchestrator_start"));
+  assert.ok(!tools.some((tool) => tool.function.name === "obsidian_read"));
+  assert.ok(!tools.some((tool) => tool.function.name === "calendar_list_events"));
   assert.equal(turn.metrics.tool_calls, 1);
   assert.ok(turn.messages.some((message) => message.role === "tool" && message.tool_name === "pirx_orchestrator_status"));
 });
@@ -225,7 +227,7 @@ test("backend argument parse failure retries generation once without repeating c
     { backendError: 'llama-server returned invalid tool call arguments for "pirx_orchestrator_logs": unexpected end of JSON input' },
     { role: "assistant", content: "Mam już wynik wcześniejszej operacji." },
     { role: "assistant", content: "GOTOWE" },
-  ]);
+  ], { toolProfile: "operations" });
   const turn = await agent.chat("Sprawdź wynik.");
   assert.equal(turn.content, "Mam już wynik wcześniejszej operacji.");
   assert.equal(turn.metrics.tool_calls, 1);
@@ -241,7 +243,7 @@ test("argument generation recovery is bounded to one retry per turn, including c
   const error = { backendError: 'llama-server returned invalid tool call arguments for "pirx_orchestrator_logs": unexpected end of JSON input' };
   const { agent, ollama } = await createContinuationAgent(context, [
     { role: "assistant", content: "Sprawdzam." }, error, error,
-  ]);
+  ], { toolProfile: "operations" });
   const turn = await agent.chat("Sprawdź logi.");
   assert.equal(turn.metrics.done_reason, "invalid_tool_arguments");
   assert.equal(turn.metrics.model_calls, 3);
@@ -254,7 +256,7 @@ test("exhausted argument recovery preserves completed tool evidence in the conve
   const { agent, ollama } = await createContinuationAgent(context, [
     { role: "assistant", content: "", tool_calls: [{ function: { name: "hello", arguments: { name: "Piotr" } } }] },
     error, error,
-  ]);
+  ], { toolProfile: "operations" });
   const turn = await agent.chat("Sprawdź wynik.");
   assert.equal(turn.metrics.done_reason, "invalid_tool_arguments");
   assert.equal(turn.metrics.tool_calls, 1);
@@ -374,7 +376,7 @@ test("continuation and JSON recovery record the exact budgeted request", async (
     { role: "assistant", content: "Sprawdzam." },
     { backendError: 'llama-server returned invalid tool call arguments for "pirx_orchestrator_logs": unexpected end of JSON input' },
     { role: "assistant", content: "GOTOWE" },
-  ]);
+  ], { toolProfile: "operations" });
   const builds: ContextBuildInput[] = [];
   let sequence = 0;
   const recorder: OperationRecorder = { start: () => ({ id: `op-${sequence++}` }), finish: () => undefined, recordContextBuild: (_handle, input) => { builds.push(input); } };
@@ -520,6 +522,12 @@ test("agent wykonuje pełną pętlę Ollama → MCP → Ollama", async (context)
     turnId: "turn-test",
     operationRecorder,
   });
+
+  const modelTools = requests[0]?.tools as Array<{ function: { name: string } }>;
+  assert.ok(modelTools.some((tool) => tool.function.name === "obsidian_read"));
+  assert.ok(modelTools.some((tool) => tool.function.name === "calendar_list_events"));
+  assert.ok(!modelTools.some((tool) => tool.function.name === "github_issue_list"));
+  assert.ok(!modelTools.some((tool) => tool.function.name === "pirx_orchestrator_status"));
 
   assert.equal(turn.content, "Narzędzie odpowiedziało: Hello, Piotr!");
   assert.equal(turn.metrics.model_calls, 2);

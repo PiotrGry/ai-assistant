@@ -82,6 +82,24 @@ pnpm build
 pnpm tui
 ```
 
+Każda sesja ma jeden jawny profil narzędzi MCP:
+
+- `personal` (domyślny dla bezpośredniego `pnpm start`/`pnpm tui`) — system,
+  prywatny Obsidian i Google Calendar;
+- `development` — system, GitHub Issues/Actions oraz historia Tasków,
+  Attemptów i konsultacji;
+- `operations` — zakres development oraz status, diagnostyka, logi, zasoby i
+  sterowanie daemonem/shipmentem.
+
+Profile prywatny i operatorski nigdy nie są łączone. Nieznane
+`PIRX_TOOL_PROFILE` zatrzymuje start zamiast rozszerzać dostęp. Zwykłe
+`task Pirx` jawnie uruchamia dotychczasowy workflow orkiestracji jako
+`operations`; dostępne są też `task Pirx:personal`, `task Pirx:development` i
+`task Pirx:operations`. CLI i TUI używają tego samego resolvera, a MCP rejestruje
+wyłącznie narzędzia z rozstrzygniętego profilu, więc wywołanie narzędzia spoza
+profilu jest odrzucane przed handlerem. Dynamiczny wybór narzędzi w trakcie tury
+pozostaje poza tym zakresem.
+
 W TUI Enter wysyła wiadomość, Shift+Enter dodaje nową linię, Ctrl+O otwiera
 listę modeli zainstalowanych w Ollamie, a Ctrl+C kończy sesję. Pełnoekranowy
 widok pokazuje ostatnią część rozmowy, a pełna historia trafia również do

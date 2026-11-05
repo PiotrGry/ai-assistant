@@ -34,7 +34,7 @@ test("MCP requires exact host authorization before requesting service start", as
   const root = await mkdtemp(join(tmpdir(), "pirx-service-mcp-"));
   let calls = 0;
   const secret = "test-service-secret";
-  const server = createMcpServer({ environment: {}, obsidianVault: new ObsidianVault(root), githubAuthorizationSecret: secret, orchestratorServicePort: { async start() { calls++; return { outcome: "start_requested", message: "accepted; heartbeat not verified" }; } } });
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations" }, obsidianVault: new ObsidianVault(root), githubAuthorizationSecret: secret, orchestratorServicePort: { async start() { calls++; return { outcome: "start_requested", message: "accepted; heartbeat not verified" }; } } });
   const client = new Client({ name: "service-test", version: "1" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -61,7 +61,7 @@ test("invalid runtime profile rejects even an authorized service start", async (
   const root = await mkdtemp(join(tmpdir(), "pirx-invalid-profile-"));
   let calls = 0;
   const secret = "test-service-secret";
-  const server = createMcpServer({ environment: { PIRX_ORCHESTRATOR_CONFIG: join(root, "missing.json") }, obsidianVault: new ObsidianVault(root), githubAuthorizationSecret: secret,
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations", PIRX_ORCHESTRATOR_CONFIG: join(root, "missing.json") }, obsidianVault: new ObsidianVault(root), githubAuthorizationSecret: secret,
     orchestratorServicePort: { async start() { calls++; return { outcome: "start_requested", message: "accepted" }; } },
   });
   const client = new Client({ name: "invalid-config", version: "1" });

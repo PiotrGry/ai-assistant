@@ -10,11 +10,12 @@ test("shared host defaults configure a direct chat launch while explicit environ
   const root = await mkdtemp(join(tmpdir(), "pirx-startup-"));
   try {
     await mkdir(join(root, "pirx"));
-    await writeFile(join(root, "pirx", "chat.json"), JSON.stringify({ PIRX_OBSIDIAN_VAULT: "/data/explicit-vault", OLLAMA_NUM_CTX: "32768", PIRX_ORCHESTRATOR_DATABASE: "/data/runtime.sqlite", PIRX_ORCHESTRATOR_SERVICE_ENABLED: "true", PIRX_GITHUB_OWNER: "PiotrGry", PIRX_GITHUB_REPOSITORY: "zdrovena-reconciliation" }));
+    await writeFile(join(root, "pirx", "chat.json"), JSON.stringify({ PIRX_TOOL_PROFILE: "operations", PIRX_OBSIDIAN_VAULT: "/data/explicit-vault", OLLAMA_NUM_CTX: "32768", PIRX_ORCHESTRATOR_DATABASE: "/data/runtime.sqlite", PIRX_ORCHESTRATOR_SERVICE_ENABLED: "true", PIRX_GITHUB_OWNER: "PiotrGry", PIRX_GITHUB_REPOSITORY: "zdrovena-reconciliation" }));
     const environment: NodeJS.ProcessEnv = { XDG_CONFIG_HOME: root, PIRX_GITHUB_REPOSITORY: "explicit-repository" };
     initializeHostEnvironment(environment);
     assert.equal(loadConfig(environment).numCtx, 32768);
     assert.equal(environment.PIRX_OBSIDIAN_VAULT, "/data/explicit-vault");
+    assert.equal(loadConfig(environment).toolProfile, "operations");
     assert.equal(environment.PIRX_ORCHESTRATOR_DATABASE, "/data/runtime.sqlite");
     assert.equal(environment.PIRX_ORCHESTRATOR_SERVICE_ENABLED, "true");
     assert.equal(environment.PIRX_GITHUB_REPOSITORY, "explicit-repository");
@@ -64,5 +65,6 @@ test("shared profile respects HOME and model configuration is consistent with ex
     assert.ok(MCP_CHILD_ENVIRONMENT_KEYS.includes("PIRX_OBSIDIAN_VAULT"));
     assert.ok(!MCP_CHILD_ENVIRONMENT_KEYS.includes("OLLAMA_MODEL"));
     assert.ok(MCP_CHILD_ENVIRONMENT_KEYS.includes("PIRX_STORAGE_FILE"));
+    assert.ok(MCP_CHILD_ENVIRONMENT_KEYS.includes("PIRX_TOOL_PROFILE"));
   } finally { await rm(root, { recursive: true, force: true }); }
 });

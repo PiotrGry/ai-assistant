@@ -147,9 +147,12 @@ async function connected(options: {
 }) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createMcpServer({
-    environment: options.environment ?? {
-      PIRX_GITHUB_POC_ISSUE: "179",
-      PIRX_GOOGLE_CALENDAR_TIMEZONE: "UTC",
+    environment: {
+      PIRX_TOOL_PROFILE: "operations",
+      ...(options.environment ?? {
+        PIRX_GITHUB_POC_ISSUE: "179",
+        PIRX_GOOGLE_CALENDAR_TIMEZONE: "UTC",
+      }),
     },
     ...(options.transport === undefined ? {} : { githubPocTransport: options.transport }),
     ...(options.config === undefined ? {} : { githubPocConfig: options.config }),
