@@ -376,28 +376,41 @@ export class GitHubProjectSynchronizer {
     let added = false;
     if (item.outcome === "not_found") {
       const addedItem = await this.#addItem(schema.value, issue.nodeId, correlationId);
-      if (addedItem.outcome !== "synchronized" || addedItem.value === undefined) return addedItem as GitHubProjectResult<GitHubProjectItem>;
-      item = success({ id: addedItem.value.id, issueNodeId: issue.nodeId, values: Object.freeze({}) }, correlationId, "Issue was added to the Project.");
-      added = true;
+      if (addedItem.outcome === "unknown") {
+        const reconciled = await this.#findItem(schema.value, issue.nodeId, correlationId);
+        if (reconciled.outcome !== "synchronized" || reconciled.value === undefined) return addedItem as GitHubProjectResult<GitHubProjectItem>;
+        item = reconciled;
+        added = true;
+      } else {
+        if (addedItem.outcome !== "synchronized" || addedItem.value === undefined) return addedItem as GitHubProjectResult<GitHubProjectItem>;
+        item = success({ id: addedItem.value.id, issueNodeId: issue.nodeId, values: Object.freeze({}) }, correlationId, "Issue was added to the Project.");
+        added = true;
+      }
     }
     if (item.outcome !== "synchronized" || item.value === undefined) return item;
-    const pending = diff(schema.value, item.value, mapped.value);
-    if (pending.length === 0) return projectFailure(added ? "synchronized" : "no_op", correlationId, added ? "Issue was added; no metadata changes were required." : "Project metadata already matches the desired state.", { value: item.value, changedFields: [] });
+    let currentItem = item.value;
+    const pending = diff(schema.value, currentItem, mapped.value);
+    if (pending.length === 0) return projectFailure(added ? "synchronized" : "no_op", correlationId, added ? "Issue was added; no metadata changes were required." : "Project metadata already matches the desired state.", { value: currentItem, changedFields: [] });
     const changed: GitHubProjectFieldName[] = [];
     for (const name of pending) {
       const value = mapped.value[name];
       if (value === undefined) continue;
-      const update = await this.#updateField(schema.value, item.value.id, name, value, correlationId);
+      const update = await this.#updateField(schema.value, currentItem.id, name, value, correlationId);
       if (update.outcome !== "synchronized") {
         this.#schema.invalidate();
         const reread = await this.#findItem(schema.value, issue.nodeId, correlationId);
+        if (update.outcome === "unknown" && reread.outcome === "synchronized" && reread.value?.values[name] === value) {
+          currentItem = reread.value;
+          changed.push(name);
+          continue;
+        }
         const observed = reread.outcome === "synchronized" && reread.value !== undefined ? diff(schema.value, reread.value, mapped.value) : pending.filter((field) => !changed.includes(field));
         return projectFailure(changed.length > 0 || added ? "partial" : update.outcome, correlationId, `Project synchronization stopped after ${changed.length} field updates.`, { ...(update.providerOutcome === undefined ? {} : { providerOutcome: update.providerOutcome }), changedFields: changed, pendingFields: observed });
       }
       changed.push(name);
     }
     const finalItem = await this.#findItem(schema.value, issue.nodeId, correlationId);
-    return success(finalItem.outcome === "synchronized" && finalItem.value !== undefined ? finalItem.value : { ...item.value, values: mapped.value }, correlationId, added ? "Issue was added and Project metadata synchronized." : "Project metadata synchronized.", { changedFields: changed, pendingFields: [] });
+    return success(finalItem.outcome === "synchronized" && finalItem.value !== undefined ? finalItem.value : { ...currentItem, values: mapped.value }, correlationId, added ? "Issue was added and Project metadata synchronized." : "Project metadata synchronized.", { changedFields: changed, pendingFields: [] });
   }
 
   async #findItem(schema: GitHubProjectSchema, issueNodeId: string, correlationId: string): Promise<GitHubProjectResult<GitHubProjectItem>> {

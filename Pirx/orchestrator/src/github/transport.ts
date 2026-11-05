@@ -141,6 +141,48 @@ function responseWithBody<T>(response: Response, text: string, correlationId: st
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const PRE_EXECUTION_GRAPHQL_CODES = new Set([
+  "GRAPHQL_PARSE_FAILED",
+  "GRAPHQL_VALIDATION_FAILED",
+]);
+
+/**
+ * GraphQL only guarantees that parse/validation failures happened before
+ * execution. Resolver errors, including errors without `data`, are not proof
+ * that another mutation field or an external side effect did not run.
+ */
+function provenGraphQlPreExecutionRejection(body: Record<string, unknown>): boolean {
+  if ("data" in body || !Array.isArray(body.errors) || body.errors.length === 0) return false;
+  return body.errors.every((value) => {
+    if (!isRecord(value) || "path" in value || !isRecord(value.extensions)) return false;
+    const code = value.extensions.code;
+    return typeof code === "string" && PRE_EXECUTION_GRAPHQL_CODES.has(code.toUpperCase());
+  });
+}
+
+function graphQlFailure(
+  mutation: boolean,
+  provenNotExecuted: boolean,
+  code: "graphql_error" | "malformed_response",
+  message: string,
+  correlationId: string,
+  response: Response,
+): GitHubOperationResult<never> {
+  const uncertain = mutation && !provenNotExecuted;
+  return failure(
+    uncertain ? "unknown" : "permanent_error",
+    code,
+    message,
+    correlationId,
+    uncertain ? "unknown" : "not_accepted",
+    metadata(response),
+  );
+}
+
 function graphQlBody<T>(response: Response, text: string, correlationId: string, mutation: boolean): GitHubOperationResult<T> {
   if (!response.ok) {
     return responseResult(response, undefined as T, correlationId, mutation);
@@ -149,16 +191,23 @@ function graphQlBody<T>(response: Response, text: string, correlationId: string,
   try {
     body = JSON.parse(text);
   } catch {
-    return failure("permanent_error", "malformed_response", "GitHub returned malformed GraphQL JSON.", correlationId, mutation ? "unknown" : "not_accepted", metadata(response));
+    return graphQlFailure(mutation, false, "malformed_response", "GitHub returned malformed GraphQL JSON.", correlationId, response);
   }
-  if (typeof body !== "object" || body === null) {
-    return failure("permanent_error", "malformed_response", "GitHub returned an invalid GraphQL response.", correlationId, mutation ? "unknown" : "not_accepted", metadata(response));
+  if (!isRecord(body)) {
+    return graphQlFailure(mutation, false, "malformed_response", "GitHub returned an invalid GraphQL response.", correlationId, response);
   }
   if ("errors" in body && Array.isArray(body.errors) && body.errors.length > 0) {
-    return failure("permanent_error", "graphql_error", "GitHub GraphQL returned an operation error.", correlationId, mutation ? "unknown" : "not_accepted", metadata(response));
+    return graphQlFailure(
+      mutation,
+      provenGraphQlPreExecutionRejection(body),
+      "graphql_error",
+      "GitHub GraphQL returned an operation error.",
+      correlationId,
+      response,
+    );
   }
   if (!("data" in body)) {
-    return failure("permanent_error", "malformed_response", "GitHub returned an invalid GraphQL response.", correlationId, mutation ? "unknown" : "not_accepted", metadata(response));
+    return graphQlFailure(mutation, false, "malformed_response", "GitHub returned an invalid GraphQL response.", correlationId, response);
   }
   return responseResult(response, (body as { data: T }).data, correlationId, mutation);
 }
