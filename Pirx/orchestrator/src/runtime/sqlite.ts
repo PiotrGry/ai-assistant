@@ -110,7 +110,7 @@ import {
   type WorkerProviderRecoveryMetadata,
 } from "./worker-availability.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 33 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 34 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -947,6 +947,10 @@ const MIGRATIONS: readonly string[] = [
   CREATE INDEX runtime_agent_questions_task ON runtime_agent_questions(task_id, created_at);`,
   `ALTER TABLE runtime_orchestrator_control ADD COLUMN diagnostic_sequence INTEGER;
    ALTER TABLE runtime_orchestrator_control ADD COLUMN diagnostic_incomplete INTEGER NOT NULL DEFAULT 1 CHECK (diagnostic_incomplete IN (0, 1));`,
+  `ALTER TABLE runtime_agent_questions ADD COLUMN owner_host TEXT CHECK (owner_host IS NULL OR length(trim(owner_host)) BETWEEN 1 AND 255);
+   ALTER TABLE runtime_agent_questions ADD COLUMN owner_pid INTEGER CHECK (owner_pid IS NULL OR owner_pid > 0);
+   ALTER TABLE runtime_agent_questions ADD COLUMN failure_code TEXT CHECK (failure_code IS NULL OR failure_code IN ('advisor_unavailable', 'process_interrupted'));
+   CREATE INDEX runtime_agent_questions_attempt ON runtime_agent_questions(attempt_id, created_at, id);`,
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";

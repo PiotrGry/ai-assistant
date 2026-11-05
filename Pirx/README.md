@@ -20,14 +20,19 @@ wywołania modelu. Brak odpowiedzi oznacza błąd narzędzia; worker powinien
 zwrócić BLOCKED, jeśli nie może kontynuować bez wyjaśnienia.
 
 Pytania, odpowiedzi i błędy są zapisywane po redakcji sekretów w tabeli
-`runtime_agent_questions` w `runtime.sqlite` (migracja 32). Czat odczytuje
-historię narzędziem `pirx_agent_conversation` z `taskId` i kursorem `afterRow`.
-`pending` oznacza wywołanie bez zapisanego wyniku, również po przerwaniu procesu.
-Ta funkcja nie wysyła automatycznych powiadomień do TUI.
+`runtime_agent_questions` w `runtime.sqlite` (utworzonej w migracji 32,
+rozszerzonej o recovery w migracji 34). Czat odczytuje po jednym ograniczonym
+wpisie narzędziem `pirx_agent_conversation` z `taskId` i stabilnym kursorem
+`afterRow`/`nextAfterRow`. `pending_status` rozróżnia aktywnego właściciela,
+osierocone wywołanie i właściciela, którego nie da się bezpiecznie potwierdzić.
+Replay tego samego `requestId` nie uruchamia drugiej konsultacji; udowodniony
+martwy lokalny proces kończy rekord jako `process_interrupted`. Ta funkcja nie
+wysyła automatycznych powiadomień do TUI.
 
-Po aktualizacji trzeba zbudować cały workspace (`pnpm build`) i wdrożyć
-razem pakiety orchestrator, mcp-server oraz agent. Stary runtime ze schematem
-31 nie może otwierać bazy po migracji 32; przed wdrożeniem zachowaj kopię bazy.
+Po aktualizacji trzeba zbudować cały workspace (`pnpm build`) i wdrożyć razem
+pakiety orchestrator, mcp-server oraz agent. Starszy build nie może otwierać
+bazy po migracji 34; przed wdrożeniem zachowaj zweryfikowaną kopię bazy i
+uruchom jawny tryb migracji bieżącym buildem.
 
 Docelowy runtime lokalnej asystentki składa się z dwóch procesów:
 
