@@ -17,6 +17,9 @@ import {
   type OrchestratorControlRequest,
   type OrchestratorControlRequestResult,
   type OrchestratorStatusSnapshot,
+  type OperatorDecisionAcceptance,
+  type OperatorDecisionInput,
+  type OperatorQuestionRecord,
   type StorageResult,
   type UtcTimestamp,
 } from "@pirx/orchestrator";
@@ -28,6 +31,8 @@ export interface OrchestratorControlToolPort {
   request(input: OrchestratorControlRequest): OrchestratorControlRequestResult;
   shutdown(input: HostShutdownCommand): HostShutdownCommandResult;
   diagnostic?(sequence: number, offset: number, length: number): StorageResult<OrchestratorDiagnosticChunk>;
+  operatorQuestions?(): StorageResult<readonly OperatorQuestionRecord[]>;
+  answerOperatorQuestion?(input: OperatorDecisionInput): StorageResult<OperatorDecisionAcceptance>;
 }
 
 export interface ExecutionObservabilityToolPort {
@@ -63,6 +68,8 @@ export class SqliteOrchestratorControlToolPort implements OrchestratorControlToo
     return result;
   }
   public diagnostic(sequence: number, offset: number, length: number): StorageResult<OrchestratorDiagnosticChunk> { return this.#withStore((_store, repository) => repository.diagnostic(sequence, offset, length), "read_only"); }
+  public operatorQuestions(): StorageResult<readonly OperatorQuestionRecord[]> { return this.#withStore((store) => store.operatorDecisions.listOpen(), "read_only"); }
+  public answerOperatorQuestion(input: OperatorDecisionInput): StorageResult<OperatorDecisionAcceptance> { return this.#withStore((store) => store.operatorDecisions.answer(input)); }
   public request(input: OrchestratorControlRequest): OrchestratorControlRequestResult {
     const value = this.#withStore((_store, repository) => ({ outcome: "success" as const, value: repository.request(input) }));
     return value.outcome === "success" ? value.value : { outcome: "storage_error", operationId: input.operationId, message: value.message };
@@ -100,6 +107,7 @@ const controlOutputSchema = z.union([
   z.object({ outcome: z.enum(["authorization_required", "unconfigured", "conflict", "invalid_request", "unavailable"]), operationId: z.string(), message: z.string() }),
 ]);
 const operationIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u);
+const operatorQuestionSchema = z.object({ schemaVersion: z.literal(1), id: z.string(), taskId: z.string(), sourceAttemptId: z.string(), checkpointId: z.string(), prompt: z.string(), state: z.enum(["open", "answered", "expired", "cancelled"]), openedAt: z.string(), updatedAt: z.string(), expiresAt: z.string().optional(), version: z.number().int().positive() });
 const shutdownInputSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("arm"), operationId: operationIdSchema, target: z.enum(["queue_drained", "next_checkpoint"]), reason: z.string().trim().min(1).max(256) }).strict(),
   z.object({ action: z.literal("cancel"), operationId: operationIdSchema, requestOperationId: operationIdSchema, reason: z.string().trim().min(1).max(256) }).strict(),
@@ -160,6 +168,36 @@ export function registerOrchestratorTools(server: McpServer, options: { readonly
     if (options.port?.diagnostic === undefined) return structured({ outcome: "unconfigured", message: "Orchestrator diagnostics are not configured." }, true);
     const value = options.port.diagnostic(input.sequence, input.offset ?? 0, input.length ?? 6_000);
     return value.outcome === "success" ? structured({ outcome: "success", diagnostic: value.value }) : structured({ outcome: value.outcome === "not_found" ? "not_found" : value.outcome === "invalid_record" ? "invalid_request" : "unavailable", message: value.message }, true);
+  });
+
+  server.registerTool("pirx_operator_questions", {
+    title: "List pending Pirx operator questions",
+    description: "List bounded durable questions that a worker explicitly left for a human decision. This does not answer questions, resume work, or inspect provider transcripts.",
+    inputSchema: z.object({}).strict(),
+    outputSchema: z.union([z.object({ outcome: z.literal("success"), questions: z.array(operatorQuestionSchema) }), z.object({ outcome: z.enum(["unconfigured", "unavailable"]), message: z.string() })]),
+    annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+  }, async () => {
+    if (options.port?.operatorQuestions === undefined) return structured({ outcome: "unconfigured", message: options.configurationError ?? "Operator decisions are not configured." }, true);
+    const value = options.port.operatorQuestions();
+    return value.outcome === "success" ? structured({ outcome: "success", questions: value.value }) : structured({ outcome: "unavailable", message: value.message }, true);
+  });
+
+  server.registerTool("pirx_operator_decision", {
+    title: "Answer one Pirx operator question",
+    description: "Durably answer one exact pending operator question. The answer creates resume context; the normal daemon must still acquire a Lease and schedule the successor Attempt.",
+    inputSchema: z.object({ questionId: operationIdSchema, expectedVersion: z.number().int().positive(), operationId: operationIdSchema, answer: z.string().trim().min(1).max(2_000) }).strict(),
+    outputSchema: z.union([
+      z.object({ outcome: z.enum(["accepted", "replayed"]), questionId: z.string(), taskId: z.string(), state: z.literal("answered"), version: z.number().int().positive(), resumeCheckpointId: z.string(), message: z.string() }),
+      z.object({ outcome: z.enum(["authorization_required", "unconfigured", "not_found", "conflict", "invalid_request", "unavailable"]), questionId: z.string(), message: z.string() }),
+    ]),
+    annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: false },
+  }, async (input, context) => {
+    const arguments_ = { questionId: input.questionId, expectedVersion: input.expectedVersion, operationId: input.operationId, answer: input.answer };
+    if (verifyHostAuthorization(options.authorizationSecret, context.mcpReq._meta, "pirx_operator_decision", arguments_) === undefined) return structured({ outcome: "authorization_required", questionId: input.questionId, message: "Exact host authorization is required for an operator decision." }, true);
+    if (options.port?.answerOperatorQuestion === undefined) return structured({ outcome: "unconfigured", questionId: input.questionId, message: options.configurationError ?? "Operator decisions are not configured." }, true);
+    const value = options.port.answerOperatorQuestion({ ...arguments_, decidedBy: "mcp-chat", decidedAt: now() });
+    if (value.outcome === "success") return structured({ outcome: value.value.replayed ? "replayed" : "accepted", questionId: value.value.question.id, taskId: value.value.question.taskId, state: "answered", version: value.value.question.version, resumeCheckpointId: value.value.checkpoint.id, message: value.value.replayed ? "The same durable operator decision was already accepted." : "The operator decision was accepted; the normal scheduler may resume the Task after acquiring a Lease." });
+    return structured({ outcome: value.outcome === "not_found" ? "not_found" : value.outcome === "conflict" ? "conflict" : value.outcome === "invalid_record" ? "invalid_request" : "unavailable", questionId: input.questionId, message: value.message }, true);
   });
 
   server.registerTool("pirx_execution_report", {

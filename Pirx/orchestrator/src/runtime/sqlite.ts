@@ -27,6 +27,7 @@ import {
   utcTimestamp,
 } from "./task-domain.js";
 import {
+  createCheckpoint,
   deserializeCheckpoint,
   serializeCheckpoint,
   validateCheckpoint,
@@ -110,7 +111,7 @@ import {
   type WorkerProviderRecoveryMetadata,
 } from "./worker-availability.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 34 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 35 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -220,6 +221,55 @@ export interface RuntimeTransaction {
   readonly shipmentCycles: ShipmentCycleRepository;
   readonly retryDecisions: RetryDecisionRepository;
   readonly workerAvailability: WorkerAvailabilityRepository;
+  readonly operatorDecisions: OperatorDecisionRepository;
+}
+
+export const OPERATOR_DECISION_SCHEMA_VERSION = 1 as const;
+export type OperatorQuestionState = "open" | "answered" | "expired" | "cancelled";
+export interface OperatorQuestionRecord {
+  readonly schemaVersion: typeof OPERATOR_DECISION_SCHEMA_VERSION;
+  readonly id: string;
+  readonly taskId: string;
+  readonly sourceAttemptId: string;
+  readonly checkpointId: string;
+  readonly prompt: string;
+  readonly state: OperatorQuestionState;
+  readonly openedAt: string;
+  readonly updatedAt: string;
+  readonly expiresAt?: string;
+  readonly version: number;
+}
+export interface OperatorDecisionRecord {
+  readonly questionId: string;
+  readonly operationId: string;
+  readonly answer: string;
+  readonly decidedBy: string;
+  readonly decidedAt: string;
+  readonly questionVersion: number;
+  readonly resumeCheckpointId: string;
+}
+export interface OperatorQuestionInput {
+  readonly id: string;
+  readonly taskId: string;
+  readonly sourceAttemptId: string;
+  readonly checkpointId: string;
+  readonly prompt: string;
+  readonly openedAt: string;
+  readonly expiresAt?: string;
+}
+export interface OperatorDecisionInput {
+  readonly questionId: string;
+  readonly expectedVersion: number;
+  readonly operationId: string;
+  readonly answer: string;
+  readonly decidedBy: string;
+  readonly decidedAt: string;
+}
+export interface OperatorDecisionAcceptance {
+  readonly replayed: boolean;
+  readonly question: OperatorQuestionRecord;
+  readonly decision: OperatorDecisionRecord;
+  readonly checkpoint: Checkpoint;
 }
 
 export class RuntimeStorageError extends Error {
@@ -951,6 +1001,29 @@ const MIGRATIONS: readonly string[] = [
    ALTER TABLE runtime_agent_questions ADD COLUMN owner_pid INTEGER CHECK (owner_pid IS NULL OR owner_pid > 0);
    ALTER TABLE runtime_agent_questions ADD COLUMN failure_code TEXT CHECK (failure_code IS NULL OR failure_code IN ('advisor_unavailable', 'process_interrupted'));
    CREATE INDEX runtime_agent_questions_attempt ON runtime_agent_questions(attempt_id, created_at, id);`,
+  `CREATE TABLE runtime_operator_questions (
+    id TEXT PRIMARY KEY CHECK (length(trim(id)) BETWEEN 1 AND 128),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    task_id TEXT NOT NULL REFERENCES runtime_tasks(id),
+    source_attempt_id TEXT NOT NULL UNIQUE REFERENCES runtime_attempts(id),
+    checkpoint_id TEXT NOT NULL REFERENCES runtime_checkpoints(id),
+    prompt TEXT NOT NULL CHECK (length(trim(prompt)) BETWEEN 1 AND 2000),
+    state TEXT NOT NULL CHECK (state IN ('open', 'answered', 'expired', 'cancelled')),
+    opened_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    expires_at TEXT,
+    version INTEGER NOT NULL CHECK (version > 0)
+  );
+  CREATE INDEX runtime_operator_questions_task ON runtime_operator_questions(task_id, state, opened_at, id);
+  CREATE TABLE runtime_operator_decisions (
+    question_id TEXT PRIMARY KEY REFERENCES runtime_operator_questions(id),
+    operation_id TEXT NOT NULL UNIQUE CHECK (length(trim(operation_id)) BETWEEN 1 AND 128),
+    answer TEXT NOT NULL CHECK (length(trim(answer)) BETWEEN 1 AND 2000),
+    decided_by TEXT NOT NULL CHECK (length(trim(decided_by)) BETWEEN 1 AND 128),
+    decided_at TEXT NOT NULL,
+    question_version INTEGER NOT NULL CHECK (question_version > 0),
+    resume_checkpoint_id TEXT NOT NULL UNIQUE REFERENCES runtime_checkpoints(id)
+  );`,
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -1316,6 +1389,126 @@ export class CheckpointRepository {
   }
 }
 
+const OPERATOR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const OPERATOR_SECRET_PATTERN = /(?:bearer\s+|authorization\s*:|password\s*=|token\s*=|secret\s*=|private[_ -]?key|connection[_ -]?string)/iu;
+
+function canonicalOperatorTimestamp(value: string): boolean {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+}
+
+function operatorQuestionFromRow(row: Record<string, unknown>): StorageResult<OperatorQuestionRecord> {
+  if (row.schema_version !== 1 || typeof row.id !== "string" || typeof row.task_id !== "string" || typeof row.source_attempt_id !== "string" || typeof row.checkpoint_id !== "string" || typeof row.prompt !== "string" || !["open", "answered", "expired", "cancelled"].includes(String(row.state)) || typeof row.opened_at !== "string" || typeof row.updated_at !== "string" || !Number.isSafeInteger(row.version) || Number(row.version) <= 0) return invalidRecord();
+  if (!canonicalOperatorTimestamp(row.opened_at) || !canonicalOperatorTimestamp(row.updated_at) || (row.expires_at !== null && row.expires_at !== undefined && (typeof row.expires_at !== "string" || !canonicalOperatorTimestamp(row.expires_at)))) return invalidRecord();
+  return success(Object.freeze({ schemaVersion: 1, id: row.id, taskId: row.task_id, sourceAttemptId: row.source_attempt_id, checkpointId: row.checkpoint_id, prompt: row.prompt, state: row.state as OperatorQuestionState, openedAt: row.opened_at, updatedAt: row.updated_at, ...(typeof row.expires_at === "string" ? { expiresAt: row.expires_at } : {}), version: Number(row.version) }));
+}
+
+function operatorDecisionFromRow(row: Record<string, unknown>): StorageResult<OperatorDecisionRecord> {
+  if (typeof row.question_id !== "string" || typeof row.operation_id !== "string" || typeof row.answer !== "string" || typeof row.decided_by !== "string" || typeof row.decided_at !== "string" || !canonicalOperatorTimestamp(row.decided_at) || !Number.isSafeInteger(row.question_version) || Number(row.question_version) <= 0 || typeof row.resume_checkpoint_id !== "string") return invalidRecord();
+  return success(Object.freeze({ questionId: row.question_id, operationId: row.operation_id, answer: row.answer, decidedBy: row.decided_by, decidedAt: row.decided_at, questionVersion: Number(row.question_version), resumeCheckpointId: row.resume_checkpoint_id }));
+}
+
+export class OperatorDecisionRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+
+  public open(input: OperatorQuestionInput): StorageResult<OperatorQuestionRecord> {
+    if (![input.id, input.taskId, input.sourceAttemptId, input.checkpointId].every((value) => typeof value === "string" && OPERATOR_ID_PATTERN.test(value)) || typeof input.prompt !== "string" || input.prompt.trim().length === 0 || input.prompt.length > 2_000 || !canonicalOperatorTimestamp(input.openedAt) || (input.expiresAt !== undefined && (!canonicalOperatorTimestamp(input.expiresAt) || input.expiresAt <= input.openedAt))) return { outcome: "invalid_record", message: "Operator question input is invalid." };
+    return this.#store.execute(() => {
+      try {
+        const existing = this.get(input.id);
+        if (existing.outcome === "success") return existing.value.taskId === input.taskId && existing.value.sourceAttemptId === input.sourceAttemptId && existing.value.checkpointId === input.checkpointId && existing.value.prompt === input.prompt && existing.value.openedAt === input.openedAt && existing.value.expiresAt === input.expiresAt ? existing : conflict("Operator question ID conflicts with different content.");
+        if (existing.outcome !== "not_found") return existing;
+        const task = this.#store.tasks.get(input.taskId); const attempt = this.#store.attempts.get(input.sourceAttemptId); const checkpoint = this.#store.checkpoints.get(input.checkpointId);
+        if (task.outcome !== "success" || attempt.outcome !== "success" || checkpoint.outcome !== "success") return notFound("Operator question source was not found.");
+        if (task.value.state !== "blocked" || attempt.value.taskId !== input.taskId || attempt.value.state !== "terminal" || attempt.value.result !== "BLOCKED" || attempt.value.diagnostic?.code !== "operator_input_required" || checkpoint.value.taskId !== input.taskId || checkpoint.value.previousAttemptId !== input.sourceAttemptId || checkpoint.value.currentState !== "blocked") return conflict("Operator question source does not match a blocked operator-input Attempt and Checkpoint.");
+        this.#store.database.prepare("INSERT INTO runtime_operator_questions (id, schema_version, task_id, source_attempt_id, checkpoint_id, prompt, state, opened_at, updated_at, expires_at, version) VALUES (?, 1, ?, ?, ?, ?, 'open', ?, ?, ?, 1)").run(input.id, input.taskId, input.sourceAttemptId, input.checkpointId, input.prompt.trim(), input.openedAt, input.openedAt, input.expiresAt ?? null);
+        return this.get(input.id);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public get(id: string): StorageResult<OperatorQuestionRecord> {
+    if (typeof id !== "string" || !OPERATOR_ID_PATTERN.test(id)) return { outcome: "invalid_record", message: "Operator question ID is invalid." };
+    return this.#store.execute(() => {
+      try { const row = this.#store.database.prepare("SELECT * FROM runtime_operator_questions WHERE id = ?").get(id) as Record<string, unknown> | undefined; return row === undefined ? notFound("Operator question was not found.") : operatorQuestionFromRow(row); }
+      catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public latestByAttempt(attemptId: string): StorageResult<OperatorQuestionRecord> {
+    return this.#store.execute(() => {
+      try { const row = this.#store.database.prepare("SELECT * FROM runtime_operator_questions WHERE source_attempt_id = ? ORDER BY opened_at DESC, id DESC LIMIT 1").get(attemptId) as Record<string, unknown> | undefined; return row === undefined ? notFound("No operator question was found for the Attempt.") : operatorQuestionFromRow(row); }
+      catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public listOpen(): StorageResult<readonly OperatorQuestionRecord[]> {
+    return this.#store.execute(() => {
+      try {
+        const rows = this.#store.database.prepare("SELECT * FROM runtime_operator_questions WHERE state = 'open' ORDER BY opened_at, id").all() as Record<string, unknown>[];
+        const values: OperatorQuestionRecord[] = [];
+        for (const row of rows) { const parsed = operatorQuestionFromRow(row); if (parsed.outcome !== "success") return parsed; values.push(parsed.value); }
+        return success(Object.freeze(values));
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public decisionForQuestion(questionId: string): StorageResult<OperatorDecisionRecord> {
+    return this.#store.execute(() => {
+      try { const row = this.#store.database.prepare("SELECT * FROM runtime_operator_decisions WHERE question_id = ?").get(questionId) as Record<string, unknown> | undefined; return row === undefined ? notFound("Operator decision was not found.") : operatorDecisionFromRow(row); }
+      catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  public answer(input: OperatorDecisionInput): StorageResult<OperatorDecisionAcceptance> {
+    if (![input.questionId, input.operationId, input.decidedBy].every((value) => typeof value === "string" && OPERATOR_ID_PATTERN.test(value)) || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion <= 0 || typeof input.answer !== "string" || input.answer.trim().length === 0 || input.answer.length > 2_000 || OPERATOR_SECRET_PATTERN.test(input.answer) || !canonicalOperatorTimestamp(input.decidedAt)) return { outcome: "invalid_record", message: "Operator decision input is invalid or contains secret-like material." };
+    return this.#store.transaction(({ checkpoints }) => {
+      try {
+        const byOperation = this.#store.database.prepare("SELECT * FROM runtime_operator_decisions WHERE operation_id = ?").get(input.operationId) as Record<string, unknown> | undefined;
+        if (byOperation !== undefined) return this.#replay(byOperation, input);
+        const question = this.get(input.questionId);
+        if (question.outcome !== "success") return question;
+        const prior = this.#store.database.prepare("SELECT * FROM runtime_operator_decisions WHERE question_id = ?").get(input.questionId) as Record<string, unknown> | undefined;
+        if (prior !== undefined) return this.#replay(prior, input, true);
+        if (question.value.state !== "open" || question.value.version !== input.expectedVersion) return conflict("Operator question state or version is stale.");
+        if (question.value.expiresAt !== undefined && input.decidedAt > question.value.expiresAt) return conflict("Operator question has expired.");
+        const source = checkpoints.get(question.value.checkpointId);
+        if (source.outcome !== "success") return source;
+        const resumeCheckpointId = (`operator:${createHash("sha256").update(`${input.questionId}:${input.expectedVersion}`).digest("hex").slice(0, 48)}`) as Checkpoint["id"];
+        const created = createCheckpoint({
+          ...source.value,
+          id: resumeCheckpointId,
+          createdAt: input.decidedAt as UtcTimestamp,
+          findings: [...source.value.findings, `Operator decision: ${input.answer.trim()}`],
+          evidence: [...source.value.evidence, { reference: `operator-decision:${input.questionId}`, summary: "An authorized operator decision was durably accepted." }],
+          lastAction: "accepted an authorized operator decision",
+          resumeInstruction: `Continue the assigned Task using this operator decision: ${input.answer.trim()}`,
+        });
+        if (!created.ok) return { outcome: "invalid_record" as const, message: "Operator decision could not produce a valid resume Checkpoint." };
+        const storedCheckpoint = checkpoints.save(created.value);
+        if (storedCheckpoint.outcome !== "success") return storedCheckpoint;
+        this.#store.database.prepare("INSERT INTO runtime_operator_decisions (question_id, operation_id, answer, decided_by, decided_at, question_version, resume_checkpoint_id) VALUES (?, ?, ?, ?, ?, ?, ?)").run(input.questionId, input.operationId, input.answer.trim(), input.decidedBy, input.decidedAt, input.expectedVersion, storedCheckpoint.value.id);
+        const updated = this.#store.database.prepare("UPDATE runtime_operator_questions SET state = 'answered', updated_at = ?, version = version + 1 WHERE id = ? AND state = 'open' AND version = ?").run(input.decidedAt, input.questionId, input.expectedVersion);
+        if (updated.changes !== 1) return conflict("Operator question compare-and-set failed.");
+        const acceptedQuestion = this.get(input.questionId); const decisionRow = this.#store.database.prepare("SELECT * FROM runtime_operator_decisions WHERE question_id = ?").get(input.questionId) as Record<string, unknown>;
+        const decision = operatorDecisionFromRow(decisionRow);
+        if (acceptedQuestion.outcome !== "success" || decision.outcome !== "success") return invalidRecord();
+        return success({ replayed: false, question: acceptedQuestion.value, decision: decision.value, checkpoint: storedCheckpoint.value });
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+
+  #replay(row: Record<string, unknown>, input: OperatorDecisionInput, allowEquivalentOperation = false): StorageResult<OperatorDecisionAcceptance> {
+    const decision = operatorDecisionFromRow(row);
+    if (decision.outcome !== "success") return decision;
+    const operationMatches = decision.value.operationId === input.operationId || allowEquivalentOperation;
+    if (!operationMatches || decision.value.questionId !== input.questionId || decision.value.answer !== input.answer.trim() || decision.value.decidedBy !== input.decidedBy || decision.value.questionVersion !== input.expectedVersion) return conflict("Operator decision replay conflicts with the durable decision.");
+    const question = this.get(decision.value.questionId); const checkpoint = this.#store.checkpoints.get(decision.value.resumeCheckpointId);
+    if (question.outcome !== "success" || checkpoint.outcome !== "success") return invalidRecord();
+    return success({ replayed: true, question: question.value, decision: decision.value, checkpoint: checkpoint.value });
+  }
+}
+
 function leaseFromRow(row: Record<string, unknown>): StorageResult<LeaseRecord> {
   try {
     if (typeof row.id !== "string" || typeof row.task_id !== "string" || typeof row.worker_id !== "string" || typeof row.acquired_at !== "string" || typeof row.renewed_at !== "string" || typeof row.expires_at !== "string" || typeof row.state !== "string" || typeof row.ownership_token !== "string" || typeof row.version !== "number" || !["active", "released", "recovered", "uncertain"].includes(row.state)) return invalidRecord();
@@ -1387,12 +1580,23 @@ export class LeaseRepository {
       try {
         const task = this.#store.database.prepare("SELECT state FROM runtime_tasks WHERE id = ?").get(input.taskId) as { state: string } | undefined;
         if (task === undefined) return notFound("Task was not found.");
-        if (task.state !== "ready" && task.state !== "in_progress" && task.state !== "failed") return conflict("Task is not eligible for a Lease in its current state.");
+        if (task.state !== "ready" && task.state !== "in_progress" && task.state !== "failed" && task.state !== "blocked") return conflict("Task is not eligible for a Lease in its current state.");
         if (task.state === "failed") {
           const latestAttempt = this.#store.database.prepare("SELECT id, state, result FROM runtime_attempts WHERE task_id = ? ORDER BY ordinal DESC LIMIT 1").get(input.taskId) as { id: string; state: string; result: string | null } | undefined;
           const latestCheckpoint = this.#store.database.prepare("SELECT previous_attempt_id, trigger, json_extract(content_json, '$.currentState') AS current_state FROM runtime_checkpoints WHERE task_id = ? ORDER BY created_sequence DESC, created_at DESC, id DESC LIMIT 1").get(input.taskId) as { previous_attempt_id: string; trigger: string; current_state: string } | undefined;
           const expectedTrigger = latestAttempt?.result === "QUOTA_EXHAUSTED" ? "PROVIDER_QUOTA" : latestAttempt?.result === "FAILED" ? "RECOVERABLE_FAILURE" : undefined;
           if (latestAttempt?.state !== "terminal" || expectedTrigger === undefined || latestCheckpoint?.previous_attempt_id !== latestAttempt.id || latestCheckpoint.trigger !== expectedTrigger || latestCheckpoint.current_state !== "failed") return conflict("Failed Task is not an eligible checkpointed resume.");
+        }
+        if (task.state === "blocked") {
+          const history = this.#store.attempts.listByTask(input.taskId);
+          if (history.outcome !== "success") return history;
+          const latest = history.value.at(-1);
+          if (latest?.state !== "terminal" || latest.result !== "BLOCKED" || latest.diagnostic?.code !== "operator_input_required") return conflict("Blocked Task is not waiting on an operator decision.");
+          const question = this.#store.operatorDecisions.latestByAttempt(latest.id);
+          if (question.outcome !== "success" || question.value.state !== "answered") return conflict("Blocked Task has no answered operator decision.");
+          const decision = this.#store.operatorDecisions.decisionForQuestion(question.value.id);
+          const checkpoint = this.#store.checkpoints.latestByTask(input.taskId);
+          if (decision.outcome !== "success" || checkpoint.outcome !== "success" || decision.value.resumeCheckpointId !== checkpoint.value.id || checkpoint.value.previousAttemptId !== latest.id || checkpoint.value.currentState !== "blocked") return conflict("Blocked Task operator decision does not match its latest Checkpoint.");
         }
         const taskLease = this.#store.database.prepare("SELECT id FROM runtime_leases WHERE task_id = ? AND state = 'active'").get(input.taskId);
         if (taskLease !== undefined) return conflict("Task already has an active Lease.");
@@ -1544,9 +1748,25 @@ export class TaskSelectionRepository {
   public constructor(store: RuntimeSqliteStore) { this.#store = store; }
 
   #retryReadiness(task: TaskSnapshot): { readonly runnable: boolean; readonly reconciliationReason?: string } {
-    if (task.state !== "in_progress" && task.state !== "failed") return { runnable: false };
+    if (task.state !== "in_progress" && task.state !== "failed" && task.state !== "blocked") return { runnable: false };
     const history = this.#store.attempts.listByTask(task.id);
     if (history.outcome !== "success") return { runnable: false, reconciliationReason: `attempt_history_unavailable:${task.id}` };
+    if (task.state === "blocked") {
+      const latest = history.value[history.value.length - 1];
+      if (latest?.state !== "terminal" || latest.result !== "BLOCKED" || latest.diagnostic?.code !== "operator_input_required") return { runnable: false };
+      const question = this.#store.operatorDecisions.latestByAttempt(latest.id);
+      if (question.outcome === "not_found" || (question.outcome === "success" && question.value.state === "open")) return { runnable: false };
+      if (question.outcome !== "success") return { runnable: false, reconciliationReason: `operator_question_unavailable:${task.id}` };
+      if (question.value.state !== "answered") return { runnable: false };
+      const decision = this.#store.operatorDecisions.decisionForQuestion(question.value.id);
+      const checkpoint = this.#store.checkpoints.latestByTask(task.id);
+      if (decision.outcome !== "success" || checkpoint.outcome !== "success") return { runnable: false, reconciliationReason: `operator_decision_unavailable:${task.id}` };
+      if (decision.value.resumeCheckpointId !== checkpoint.value.id || checkpoint.value.previousAttemptId !== latest.id || checkpoint.value.trigger !== "RECOVERABLE_FAILURE" || checkpoint.value.currentState !== "blocked") return { runnable: false, reconciliationReason: `operator_resume_checkpoint_mismatch:${task.id}` };
+      const activeLease = this.#store.leases.getActiveByTask(task.id);
+      if (activeLease.outcome === "success") return { runnable: false, reconciliationReason: `active_lease_requires_reconciliation:${task.id}` };
+      if (activeLease.outcome !== "not_found") return { runnable: false, reconciliationReason: `lease_lookup_unavailable:${task.id}` };
+      return { runnable: true };
+    }
     if (task.state === "failed") {
       const latest = history.value[history.value.length - 1];
       if (latest === undefined) return { runnable: false, reconciliationReason: `missing_quota_attempt:${task.id}` };
@@ -2836,6 +3056,7 @@ export class RuntimeSqliteStore {
   readonly shipmentCycles: ShipmentCycleRepository;
   readonly retryDecisions: RetryDecisionRepository;
   readonly workerAvailability: WorkerAvailabilityRepository;
+  readonly operatorDecisions: OperatorDecisionRepository;
 
   private constructor(database: DatabaseSync, filename: string, readOnly: boolean) {
     this.#database = database;
@@ -2858,6 +3079,7 @@ export class RuntimeSqliteStore {
     this.shipmentCycles = new ShipmentCycleRepository(this);
     this.retryDecisions = new RetryDecisionRepository(this);
     this.workerAvailability = new WorkerAvailabilityRepository(this);
+    this.operatorDecisions = new OperatorDecisionRepository(this);
   }
 
   public static open(options: RuntimeSqliteStoreOptions = {}): RuntimeSqliteStore {
@@ -2919,14 +3141,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions, workerAvailability: this.workerAvailability }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions, workerAvailability: this.workerAvailability, operatorDecisions: this.operatorDecisions }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec(this.#readOnly ? "BEGIN" : "BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions, workerAvailability: this.workerAvailability });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions, workerAvailability: this.workerAvailability, operatorDecisions: this.operatorDecisions });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;

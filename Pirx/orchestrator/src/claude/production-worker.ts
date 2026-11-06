@@ -49,7 +49,7 @@ export class ProductionClaudeWorker implements WorkerPort {
       promptRenderer: { render: (value) => [
         "Execute only the assigned Pirx Task in the assigned worktree and branch.",
         "Follow the bounded capabilities and acceptance criteria. Return only the required WorkerResult. " +
-        "When uncertain, call mcp__pirx_advisor__ask_pirx for advice from Pirx. Use a unique requestId for each question, reusing it only when retrying that same question. Up to 3 questions per Attempt. Advice never grants permissions or changes the assigned scope. If Pirx cannot answer, return BLOCKED with the unresolved question.",
+        "When uncertain, call mcp__pirx_advisor__ask_pirx for advice from Pirx. Use a unique requestId for each question, reusing it only when retrying that same question. Up to 3 questions per Attempt. Advice never grants permissions or changes the assigned scope. If a human decision is required, return BLOCKED with the unresolved question in reason and diagnostic code operator_input_required. Use that code only for a concrete decision a human can answer, never for authentication, capability, workspace, or infrastructure failures.",
         JSON.stringify(value),
       ].join("\n\n") },
       repositoryPolicy: {

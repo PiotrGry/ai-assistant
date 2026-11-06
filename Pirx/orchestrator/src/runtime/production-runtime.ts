@@ -221,10 +221,18 @@ export class ProductionRuntime {
     if (history.outcome !== "success") return portFailure(history.message);
     const ordinal = history.value.length + 1;
     const previous = history.value[history.value.length - 1];
-    if (task.value.state === "failed" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED")) {
+    const failedResume = task.value.state === "failed" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED");
+    const operatorResume = task.value.state === "blocked" && previous?.state === "terminal" && previous.result === "BLOCKED" && previous.diagnostic?.code === "operator_input_required";
+    if (failedResume || operatorResume) {
+      if (previous === undefined) return portFailure("Resume Attempt history is unavailable.", "conflict");
       const checkpoint = this.#store.checkpoints.latestByTask(taskId);
       const expectedTrigger = previous.result === "QUOTA_EXHAUSTED" ? "PROVIDER_QUOTA" : "RECOVERABLE_FAILURE";
       if (checkpoint.outcome !== "success" || checkpoint.value.previousAttemptId !== previous.id || checkpoint.value.trigger !== expectedTrigger) return portFailure("Resume Checkpoint does not match the latest Attempt.", "conflict");
+      if (operatorResume) {
+        const question = this.#store.operatorDecisions.latestByAttempt(previous.id);
+        const decision = question.outcome === "success" ? this.#store.operatorDecisions.decisionForQuestion(question.value.id) : undefined;
+        if (question.outcome !== "success" || question.value.state !== "answered" || decision?.outcome !== "success" || decision.value.resumeCheckpointId !== checkpoint.value.id) return portFailure("Resume requires an answered durable operator decision.", "conflict");
+      }
       const ownership = this.#store.workspaces.getByTaskAttempt(taskId, previous.id);
       if (ownership.outcome !== "success") return portFailure("Resume requires active durable workspace ownership.", "conflict");
       if (ownership.value.repository !== repository.repository || ownership.value.repositoryRoot !== repository.repositoryRoot || ownership.value.assignedBranch !== previous.branch || ownership.value.worktreePath !== previous.worktree) return portFailure("Resume workspace ownership does not match the predecessor Attempt.", "conflict");
