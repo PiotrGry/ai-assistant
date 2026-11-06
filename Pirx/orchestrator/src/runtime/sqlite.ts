@@ -110,8 +110,15 @@ import {
   type WorkerAvailabilityRecord,
   type WorkerProviderRecoveryMetadata,
 } from "./worker-availability.js";
+import {
+  WORK_INTAKE_STATES,
+  workIntakeId,
+  type WorkIntakeInput,
+  type WorkIntakeRecord,
+  type WorkIntakeTransition,
+} from "./work-intake.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 35 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 36 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -222,6 +229,7 @@ export interface RuntimeTransaction {
   readonly retryDecisions: RetryDecisionRepository;
   readonly workerAvailability: WorkerAvailabilityRepository;
   readonly operatorDecisions: OperatorDecisionRepository;
+  readonly workIntakes: WorkIntakeRepository;
 }
 
 export const OPERATOR_DECISION_SCHEMA_VERSION = 1 as const;
@@ -1024,6 +1032,29 @@ const MIGRATIONS: readonly string[] = [
     question_version INTEGER NOT NULL CHECK (question_version > 0),
     resume_checkpoint_id TEXT NOT NULL UNIQUE REFERENCES runtime_checkpoints(id)
   );`,
+  `CREATE TABLE runtime_work_intakes (
+    id TEXT PRIMARY KEY CHECK (length(trim(id)) BETWEEN 1 AND 128),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    operation_id TEXT NOT NULL UNIQUE CHECK (length(trim(operation_id)) BETWEEN 1 AND 128),
+    repository TEXT NOT NULL CHECK (length(trim(repository)) BETWEEN 3 AND 256),
+    issue_number INTEGER NOT NULL CHECK (issue_number > 0),
+    goal TEXT NOT NULL CHECK (length(trim(goal)) BETWEEN 1 AND 2000),
+    acceptance_criteria_json TEXT NOT NULL CHECK (json_valid(acceptance_criteria_json)),
+    priority TEXT NOT NULL CHECK (priority IN ('P0', 'P1', 'P2', 'P3')),
+    risk TEXT NOT NULL CHECK (risk IN ('Low', 'Medium', 'High', 'Prod-sensitive')),
+    area TEXT NOT NULL CHECK (length(trim(area)) BETWEEN 1 AND 128),
+    work_type TEXT NOT NULL CHECK (work_type IN ('Task', 'Bug', 'Experiment')),
+    queue_order INTEGER NOT NULL CHECK (queue_order > 0),
+    state TEXT NOT NULL CHECK (state IN ('accepted', 'linking', 'linked', 'rejected', 'uncertain')),
+    issue_node_id TEXT,
+    task_id TEXT REFERENCES runtime_tasks(id),
+    accepted_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version > 0),
+    last_error TEXT,
+    content_hash TEXT NOT NULL CHECK (length(content_hash) = 64)
+  );
+  CREATE INDEX runtime_work_intakes_state ON runtime_work_intakes(state, accepted_at, id);`,
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -1506,6 +1537,78 @@ export class OperatorDecisionRepository {
     const question = this.get(decision.value.questionId); const checkpoint = this.#store.checkpoints.get(decision.value.resumeCheckpointId);
     if (question.outcome !== "success" || checkpoint.outcome !== "success") return invalidRecord();
     return success({ replayed: true, question: question.value, decision: decision.value, checkpoint: checkpoint.value });
+  }
+}
+
+const WORK_INTAKE_REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u;
+const WORK_INTAKE_AREAS = new Set(["Pirx Core", "GitHub", "Orchestrator", "Scheduler", "Checkpoint", "Agent Adapter", "Security", "Architecture Lab", "Research"]);
+function workIntakePayload(input: WorkIntakeInput): string {
+  return JSON.stringify({ repository: input.repository, issueNumber: input.issueNumber, goal: input.goal.trim(), acceptanceCriteria: [...input.acceptanceCriteria], priority: input.priority, risk: input.risk, area: input.area, workType: input.workType, queueOrder: input.queueOrder });
+}
+function validWorkIntakeInput(input: WorkIntakeInput): boolean {
+  return OPERATOR_ID_PATTERN.test(input.operationId) && WORK_INTAKE_REPOSITORY_PATTERN.test(input.repository) && Number.isSafeInteger(input.issueNumber) && input.issueNumber > 0 && typeof input.goal === "string" && input.goal.trim().length > 0 && input.goal.length <= 2_000 && Array.isArray(input.acceptanceCriteria) && input.acceptanceCriteria.length > 0 && input.acceptanceCriteria.length <= 40 && input.acceptanceCriteria.every((value) => typeof value === "string" && value.trim().length > 0 && value.length <= 512) && new Set(input.acceptanceCriteria).size === input.acceptanceCriteria.length && ["P0", "P1", "P2", "P3"].includes(input.priority) && ["Low", "Medium", "High", "Prod-sensitive"].includes(input.risk) && WORK_INTAKE_AREAS.has(input.area) && ["Task", "Bug", "Experiment"].includes(input.workType) && Number.isSafeInteger(input.queueOrder) && input.queueOrder > 0 && canonicalOperatorTimestamp(input.acceptedAt);
+}
+function workIntakeFromRow(row: Record<string, unknown>): StorageResult<WorkIntakeRecord> {
+  try {
+    const criteria = jsonParse(row.acceptance_criteria_json);
+    if (row.schema_version !== 1 || typeof row.id !== "string" || typeof row.operation_id !== "string" || typeof row.repository !== "string" || typeof row.issue_number !== "number" || typeof row.goal !== "string" || !Array.isArray(criteria) || !criteria.every((value) => typeof value === "string") || typeof row.priority !== "string" || typeof row.risk !== "string" || typeof row.area !== "string" || typeof row.work_type !== "string" || typeof row.queue_order !== "number" || typeof row.state !== "string" || !WORK_INTAKE_STATES.includes(row.state as WorkIntakeRecord["state"]) || typeof row.accepted_at !== "string" || typeof row.updated_at !== "string" || !canonicalOperatorTimestamp(row.accepted_at) || !canonicalOperatorTimestamp(row.updated_at) || !Number.isSafeInteger(row.version) || Number(row.version) <= 0 || typeof row.content_hash !== "string" || !/^[0-9a-f]{64}$/u.test(row.content_hash)) return invalidRecord();
+    const input: WorkIntakeInput = { operationId: row.operation_id, repository: row.repository, issueNumber: row.issue_number, goal: row.goal, acceptanceCriteria: criteria as string[], priority: row.priority as WorkIntakeRecord["priority"], risk: row.risk as WorkIntakeRecord["risk"], area: row.area, workType: row.work_type as WorkIntakeRecord["workType"], queueOrder: row.queue_order, acceptedAt: row.accepted_at as UtcTimestamp };
+    if (!validWorkIntakeInput(input) || workIntakeId(input.operationId) !== row.id || createHash("sha256").update(workIntakePayload(input)).digest("hex") !== row.content_hash) return invalidRecord();
+    if (row.issue_node_id !== null && typeof row.issue_node_id !== "string" || row.task_id !== null && typeof row.task_id !== "string" || row.last_error !== null && typeof row.last_error !== "string") return invalidRecord();
+    return success(Object.freeze({ schemaVersion: 1, id: row.id, ...input, acceptanceCriteria: Object.freeze([...input.acceptanceCriteria]), state: row.state as WorkIntakeRecord["state"], ...(typeof row.issue_node_id === "string" ? { issueNodeId: row.issue_node_id } : {}), ...(typeof row.task_id === "string" ? { taskId: row.task_id } : {}), updatedAt: row.updated_at as UtcTimestamp, version: Number(row.version), ...(typeof row.last_error === "string" ? { lastError: row.last_error } : {}), contentHash: row.content_hash }));
+  } catch { return invalidRecord(); }
+}
+
+export class WorkIntakeRepository {
+  readonly #store: RuntimeSqliteStore;
+  public constructor(store: RuntimeSqliteStore) { this.#store = store; }
+  public create(input: WorkIntakeInput): StorageResult<WorkIntakeRecord> {
+    if (!validWorkIntakeInput(input)) return { outcome: "invalid_record", message: "Work intake input is invalid." };
+    const id = workIntakeId(input.operationId); const payload = workIntakePayload(input); const contentHash = createHash("sha256").update(payload).digest("hex");
+    return this.#store.execute(() => {
+      try {
+        const existing = this.getByOperation(input.operationId);
+        if (existing.outcome === "success") return existing.value.contentHash === contentHash ? existing : conflict("Work intake operation ID conflicts with another payload.");
+        if (existing.outcome !== "not_found") return existing;
+        this.#store.database.prepare("INSERT INTO runtime_work_intakes (id, schema_version, operation_id, repository, issue_number, goal, acceptance_criteria_json, priority, risk, area, work_type, queue_order, state, issue_node_id, task_id, accepted_at, updated_at, version, last_error, content_hash) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', NULL, NULL, ?, ?, 1, NULL, ?)").run(id, input.operationId, input.repository, input.issueNumber, input.goal.trim(), jsonValue(input.acceptanceCriteria), input.priority, input.risk, input.area, input.workType, input.queueOrder, input.acceptedAt, input.acceptedAt, contentHash);
+        return this.get(id);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+  public get(id: string): StorageResult<WorkIntakeRecord> { return this.#get("id", id); }
+  public getByOperation(operationId: string): StorageResult<WorkIntakeRecord> { return this.#get("operation_id", operationId); }
+  public listPending(limit = 10): StorageResult<readonly WorkIntakeRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) return { outcome: "invalid_record", message: "Work intake page limit is invalid." };
+    return this.#store.execute(() => {
+      try {
+        const rows = this.#store.database.prepare("SELECT * FROM runtime_work_intakes WHERE state IN ('accepted','linking','uncertain') ORDER BY accepted_at, id LIMIT ?").all(limit) as Record<string, unknown>[];
+        const values: WorkIntakeRecord[] = [];
+        for (const row of rows) { const parsed = workIntakeFromRow(row); if (parsed.outcome !== "success") return parsed; values.push(parsed.value); }
+        return success(Object.freeze(values));
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+  public transition(input: WorkIntakeTransition): StorageResult<WorkIntakeRecord> {
+    if (!OPERATOR_ID_PATTERN.test(input.id) || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion <= 0 || !WORK_INTAKE_STATES.includes(input.state) || !canonicalOperatorTimestamp(input.updatedAt) || (input.issueNodeId !== undefined && !OPERATOR_ID_PATTERN.test(input.issueNodeId)) || (input.taskId !== undefined && !OPERATOR_ID_PATTERN.test(input.taskId)) || (input.lastError !== undefined && (input.lastError.trim().length === 0 || input.lastError.length > 256))) return { outcome: "invalid_record", message: "Work intake transition is invalid." };
+    return this.#store.execute(() => {
+      try {
+        const current = this.get(input.id); if (current.outcome !== "success") return current;
+        if (current.value.version !== input.expectedVersion) return conflict("Work intake version is stale.");
+        if (current.value.state === input.state && current.value.issueNodeId === input.issueNodeId && current.value.taskId === input.taskId && current.value.lastError === input.lastError) return current;
+        const terminal = current.value.state === "linked" || current.value.state === "rejected";
+        if (terminal || input.updatedAt < current.value.updatedAt || (input.state === "linked" && (input.taskId === undefined || input.issueNodeId === undefined))) return conflict("Work intake transition is not allowed.");
+        const result = this.#store.database.prepare("UPDATE runtime_work_intakes SET state = ?, issue_node_id = COALESCE(?, issue_node_id), task_id = COALESCE(?, task_id), updated_at = ?, version = version + 1, last_error = ? WHERE id = ? AND version = ?").run(input.state, input.issueNodeId ?? null, input.taskId ?? null, input.updatedAt, input.lastError ?? null, input.id, input.expectedVersion);
+        if (result.changes !== 1) return conflict("Work intake compare-and-set failed.");
+        return this.get(input.id);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+  #get(field: "id" | "operation_id", value: string): StorageResult<WorkIntakeRecord> {
+    if (typeof value !== "string" || !OPERATOR_ID_PATTERN.test(value)) return { outcome: "invalid_record", message: "Work intake identity is invalid." };
+    return this.#store.execute(() => {
+      try { const row = this.#store.database.prepare(`SELECT * FROM runtime_work_intakes WHERE ${field} = ?`).get(value) as Record<string, unknown> | undefined; return row === undefined ? notFound("Work intake was not found.") : workIntakeFromRow(row); }
+      catch (error: unknown) { return classifyStorageError(error); }
+    });
   }
 }
 
@@ -3057,6 +3160,7 @@ export class RuntimeSqliteStore {
   readonly retryDecisions: RetryDecisionRepository;
   readonly workerAvailability: WorkerAvailabilityRepository;
   readonly operatorDecisions: OperatorDecisionRepository;
+  readonly workIntakes: WorkIntakeRepository;
 
   private constructor(database: DatabaseSync, filename: string, readOnly: boolean) {
     this.#database = database;
@@ -3080,6 +3184,7 @@ export class RuntimeSqliteStore {
     this.retryDecisions = new RetryDecisionRepository(this);
     this.workerAvailability = new WorkerAvailabilityRepository(this);
     this.operatorDecisions = new OperatorDecisionRepository(this);
+    this.workIntakes = new WorkIntakeRepository(this);
   }
 
   public static open(options: RuntimeSqliteStoreOptions = {}): RuntimeSqliteStore {
@@ -3141,14 +3246,14 @@ export class RuntimeSqliteStore {
 
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
-      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions, workerAvailability: this.workerAvailability, operatorDecisions: this.operatorDecisions }); }
+      try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions, workerAvailability: this.workerAvailability, operatorDecisions: this.operatorDecisions, workIntakes: this.workIntakes }); }
       catch { return storageFailure(); }
     }
     try {
       this.assertOpen();
       this.#database.exec(this.#readOnly ? "BEGIN" : "BEGIN IMMEDIATE");
       this.#inTransaction = true;
-      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions, workerAvailability: this.workerAvailability, operatorDecisions: this.operatorDecisions });
+      const result = operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions, workerAvailability: this.workerAvailability, operatorDecisions: this.operatorDecisions, workIntakes: this.workIntakes });
       if (result.outcome === "success") this.#database.exec("COMMIT");
       else this.#database.exec("ROLLBACK");
       return result;

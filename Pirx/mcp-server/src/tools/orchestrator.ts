@@ -20,6 +20,8 @@ import {
   type OperatorDecisionAcceptance,
   type OperatorDecisionInput,
   type OperatorQuestionRecord,
+  type WorkIntakeInput,
+  type WorkIntakeRecord,
   type StorageResult,
   type UtcTimestamp,
 } from "@pirx/orchestrator";
@@ -33,6 +35,8 @@ export interface OrchestratorControlToolPort {
   diagnostic?(sequence: number, offset: number, length: number): StorageResult<OrchestratorDiagnosticChunk>;
   operatorQuestions?(): StorageResult<readonly OperatorQuestionRecord[]>;
   answerOperatorQuestion?(input: OperatorDecisionInput): StorageResult<OperatorDecisionAcceptance>;
+  submitWork?(input: WorkIntakeInput): StorageResult<WorkIntakeRecord>;
+  workStatus?(intakeId: string): StorageResult<WorkIntakeRecord>;
 }
 
 export interface ExecutionObservabilityToolPort {
@@ -70,6 +74,8 @@ export class SqliteOrchestratorControlToolPort implements OrchestratorControlToo
   public diagnostic(sequence: number, offset: number, length: number): StorageResult<OrchestratorDiagnosticChunk> { return this.#withStore((_store, repository) => repository.diagnostic(sequence, offset, length), "read_only"); }
   public operatorQuestions(): StorageResult<readonly OperatorQuestionRecord[]> { return this.#withStore((store) => store.operatorDecisions.listOpen(), "read_only"); }
   public answerOperatorQuestion(input: OperatorDecisionInput): StorageResult<OperatorDecisionAcceptance> { return this.#withStore((store) => store.operatorDecisions.answer(input)); }
+  public submitWork(input: WorkIntakeInput): StorageResult<WorkIntakeRecord> { return this.#withStore((store) => store.workIntakes.create(input)); }
+  public workStatus(intakeId: string): StorageResult<WorkIntakeRecord> { return this.#withStore((store) => store.workIntakes.get(intakeId), "read_only"); }
   public request(input: OrchestratorControlRequest): OrchestratorControlRequestResult {
     const value = this.#withStore((_store, repository) => ({ outcome: "success" as const, value: repository.request(input) }));
     return value.outcome === "success" ? value.value : { outcome: "storage_error", operationId: input.operationId, message: value.message };
@@ -108,6 +114,7 @@ const controlOutputSchema = z.union([
 ]);
 const operationIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u);
 const operatorQuestionSchema = z.object({ schemaVersion: z.literal(1), id: z.string(), taskId: z.string(), sourceAttemptId: z.string(), checkpointId: z.string(), prompt: z.string(), state: z.enum(["open", "answered", "expired", "cancelled"]), openedAt: z.string(), updatedAt: z.string(), expiresAt: z.string().optional(), version: z.number().int().positive() });
+const workIntakeSchema = z.object({ schemaVersion: z.literal(1), id: z.string(), operationId: z.string(), repository: z.string(), issueNumber: z.number().int().positive(), goal: z.string(), acceptanceCriteria: z.array(z.string()), priority: z.enum(["P0", "P1", "P2", "P3"]), risk: z.enum(["Low", "Medium", "High", "Prod-sensitive"]), area: z.string(), workType: z.enum(["Task", "Bug", "Experiment"]), queueOrder: z.number().int().positive(), state: z.enum(["accepted", "linking", "linked", "rejected", "uncertain"]), issueNodeId: z.string().optional(), taskId: z.string().optional(), acceptedAt: z.string(), updatedAt: z.string(), version: z.number().int().positive(), lastError: z.string().optional(), contentHash: z.string() });
 const shutdownInputSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("arm"), operationId: operationIdSchema, target: z.enum(["queue_drained", "next_checkpoint"]), reason: z.string().trim().min(1).max(256) }).strict(),
   z.object({ action: z.literal("cancel"), operationId: operationIdSchema, requestOperationId: operationIdSchema, reason: z.string().trim().min(1).max(256) }).strict(),
@@ -198,6 +205,34 @@ export function registerOrchestratorTools(server: McpServer, options: { readonly
     const value = options.port.answerOperatorQuestion({ ...arguments_, decidedBy: "mcp-chat", decidedAt: now() });
     if (value.outcome === "success") return structured({ outcome: value.value.replayed ? "replayed" : "accepted", questionId: value.value.question.id, taskId: value.value.question.taskId, state: "answered", version: value.value.question.version, resumeCheckpointId: value.value.checkpoint.id, message: value.value.replayed ? "The same durable operator decision was already accepted." : "The operator decision was accepted; the normal scheduler may resume the Task after acquiring a Lease." });
     return structured({ outcome: value.outcome === "not_found" ? "not_found" : value.outcome === "conflict" ? "conflict" : value.outcome === "invalid_record" ? "invalid_request" : "unavailable", questionId: input.questionId, message: value.message }, true);
+  });
+
+  server.registerTool("pirx_work_submit", {
+    title: "Submit tracked engineering work",
+    description: "Durably accept one already-refined GitHub Issue for later daemon intake. Acceptance is not Queue linkage, a Lease, an Attempt, or worker start. The daemon remains the sole consumer and scheduler.",
+    inputSchema: z.object({ operationId: operationIdSchema, repository: z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u), issueNumber: z.number().int().positive(), goal: z.string().trim().min(1).max(2_000), acceptanceCriteria: z.array(z.string().trim().min(1).max(512)).min(1).max(40), priority: z.enum(["P0", "P1", "P2", "P3"]), risk: z.enum(["Low", "Medium", "High", "Prod-sensitive"]), area: z.enum(["Pirx Core", "GitHub", "Orchestrator", "Scheduler", "Checkpoint", "Agent Adapter", "Security", "Architecture Lab", "Research"]), workType: z.enum(["Task", "Bug", "Experiment"]), queueOrder: z.number().int().positive() }).strict(),
+    outputSchema: z.union([z.object({ outcome: z.literal("accepted_pending"), intake: workIntakeSchema, message: z.string() }), z.object({ outcome: z.enum(["authorization_required", "unconfigured", "conflict", "invalid_request", "unavailable"]), operationId: z.string(), message: z.string() })]),
+    annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: false },
+  }, async (input, context) => {
+    const arguments_ = { ...input, acceptanceCriteria: [...input.acceptanceCriteria] };
+    if (verifyHostAuthorization(options.authorizationSecret, context.mcpReq._meta, "pirx_work_submit", arguments_) === undefined) return structured({ outcome: "authorization_required", operationId: input.operationId, message: "Exact host authorization is required to submit tracked work." }, true);
+    if (options.port?.submitWork === undefined) return structured({ outcome: "unconfigured", operationId: input.operationId, message: options.configurationError ?? "Work intake is not configured." }, true);
+    const value = options.port.submitWork({ ...arguments_, acceptedAt: now() });
+    if (value.outcome === "success") return structured({ outcome: "accepted_pending", intake: value.value, message: "Pirx durably accepted the request. The daemon may be offline; no Queue linkage, Lease, Attempt, or worker start is implied. Read pirx_work_status later." });
+    return structured({ outcome: value.outcome === "conflict" ? "conflict" : value.outcome === "invalid_record" ? "invalid_request" : "unavailable", operationId: input.operationId, message: value.message }, true);
+  });
+
+  server.registerTool("pirx_work_status", {
+    title: "Read tracked work intake status",
+    description: "Read one durable work-intake receipt after chat restart. accepted means only local durability; linking means Project metadata was applied; linked includes the runtime Task identity. uncertain and rejected are explicit.",
+    inputSchema: z.object({ intakeId: operationIdSchema }).strict(),
+    outputSchema: z.union([z.object({ outcome: z.literal("success"), intake: workIntakeSchema, message: z.string() }), z.object({ outcome: z.enum(["unconfigured", "not_found", "invalid_request", "unavailable"]), intakeId: z.string(), message: z.string() })]),
+    annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+  }, async (input) => {
+    if (options.port?.workStatus === undefined) return structured({ outcome: "unconfigured", intakeId: input.intakeId, message: options.configurationError ?? "Work intake is not configured." }, true);
+    const value = options.port.workStatus(input.intakeId);
+    if (value.outcome === "success") return structured({ outcome: "success", intake: value.value, message: value.value.state === "accepted" ? "The request is durable but not yet linked; the daemon may be offline." : value.value.state === "linked" ? "The request is linked to the runtime Task; scheduling still follows Queue and Lease policy." : `The durable intake is ${value.value.state}.` });
+    return structured({ outcome: value.outcome === "not_found" ? "not_found" : value.outcome === "invalid_record" ? "invalid_request" : "unavailable", intakeId: input.intakeId, message: value.message }, true);
   });
 
   server.registerTool("pirx_execution_report", {

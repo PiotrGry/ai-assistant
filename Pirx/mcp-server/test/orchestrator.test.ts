@@ -85,6 +85,68 @@ test("unconfigured orchestrator tools remain listed and return controlled result
   assert.match(JSON.stringify(report.structuredContent), /unconfigured/u);
 });
 
+test("MCP durably accepts tracked work without starting it and reads the receipt after chat restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-work-intake-mcp-"));
+  const filename = join(root, "runtime.sqlite");
+  const initialized = RuntimeSqliteStore.open({ filename });
+  initialized.close();
+  const secret = "work-intake-secret";
+  const arguments_ = {
+    operationId: "submit-work-246",
+    repository: "PiotrGry/ai-assistant",
+    issueNumber: 246,
+    goal: "Submit tracked work asynchronously",
+    acceptanceCriteria: ["request survives chat restart", "normal Queue creates the Task"],
+    priority: "P1" as const,
+    risk: "Medium" as const,
+    area: "Orchestrator" as const,
+    workType: "Task" as const,
+    queueOrder: 246,
+  };
+  let intakeId = "";
+  const connect = async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations", XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_DATABASE: filename }, authorizationSecret: secret });
+    const client = new Client({ name: "pirx-work-intake-test", version: "1" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    return { client, server };
+  };
+  try {
+    const firstChat = await connect();
+    try {
+      const denied = await firstChat.client.callTool({ name: "pirx_work_submit", arguments: arguments_ });
+      assert.equal(denied.isError, true);
+      const authorization = createHostAuthorization(secret, "pirx_work_submit", arguments_, arguments_.operationId);
+      const accepted = await firstChat.client.callTool({ name: "pirx_work_submit", arguments: arguments_, _meta: { [HOST_AUTHORIZATION_META_KEY]: authorization } });
+      assert.notEqual(accepted.isError, true);
+      assert.equal((accepted.structuredContent as { outcome: string }).outcome, "accepted_pending");
+      intakeId = (accepted.structuredContent as { intake: { id: string; state: string } }).intake.id;
+      assert.equal((accepted.structuredContent as { intake: { state: string } }).intake.state, "accepted");
+      const replay = await firstChat.client.callTool({ name: "pirx_work_submit", arguments: arguments_, _meta: { [HOST_AUTHORIZATION_META_KEY]: authorization } });
+      assert.equal((replay.structuredContent as { intake: { id: string } }).intake.id, intakeId);
+      const conflicting = { ...arguments_, goal: "Different scope" };
+      const conflict = await firstChat.client.callTool({ name: "pirx_work_submit", arguments: conflicting, _meta: { [HOST_AUTHORIZATION_META_KEY]: createHostAuthorization(secret, "pirx_work_submit", conflicting, conflicting.operationId) } });
+      assert.equal(conflict.isError, true);
+      assert.equal((conflict.structuredContent as { outcome: string }).outcome, "conflict");
+    } finally { await firstChat.client.close(); await firstChat.server.close(); }
+
+    const restartedChat = await connect();
+    try {
+      const status = await restartedChat.client.callTool({ name: "pirx_work_status", arguments: { intakeId } });
+      assert.notEqual(status.isError, true);
+      assert.equal((status.structuredContent as { intake: { operationId: string; state: string } }).intake.operationId, arguments_.operationId);
+      assert.equal((status.structuredContent as { intake: { state: string } }).intake.state, "accepted");
+    } finally { await restartedChat.client.close(); await restartedChat.server.close(); }
+    const verify = RuntimeSqliteStore.open({ filename, mode: "existing" });
+    try {
+      const tasks = verify.tasks.list();
+      const attempts = verify.attempts.listByTask("missing");
+      assert.equal(tasks.outcome === "success" ? tasks.value.length : -1, 0);
+      assert.equal(attempts.outcome === "success" ? attempts.value.length : -1, 0);
+    } finally { verify.close(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("MCP lists a durable operator question and accepts one exactly authorized idempotent decision", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pirx-operator-mcp-"));
   const filename = join(root, "runtime.sqlite");

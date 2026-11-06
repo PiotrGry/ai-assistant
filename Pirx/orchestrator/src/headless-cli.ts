@@ -4,6 +4,8 @@ import { ProductionClaudeWorker } from "./claude/production-worker.js";
 import { loadGitHubConfig, type GitHubConfig } from "./github/config.js";
 import { GitHubActionsGateway } from "./github/ci-watch.js";
 import { GitHubCiGatewayAdapter } from "./github/ci-adapter.js";
+import { GitHubIssueReader } from "./github/issue-read.js";
+import { GitHubProjectSynchronizer } from "./github/project-sync.js";
 import { GitHubPullRequestGateway } from "./github/pull-request.js";
 import { GitHubQueueSnapshotReader } from "./github/queue-snapshot.js";
 import { GitHubTransport } from "./github/transport.js";
@@ -18,6 +20,7 @@ import { ProductionRuntime } from "./runtime/production-runtime.js";
 import { ReleaseMergeCoordinator } from "./runtime/release-merge.js";
 import { ShipmentCycleCoordinator } from "./runtime/shipment-coordinator.js";
 import { backupRuntimeBeforeMigration, RuntimeSqliteStore, RuntimeStorageError } from "./runtime/sqlite.js";
+import { WorkIntakeCoordinator, WorkIntakeQueueReconciler } from "./runtime/work-intake.js";
 
 export interface HeadlessCliProcess {
   readonly env: NodeJS.ProcessEnv;
@@ -81,7 +84,13 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
     const queue = options.queue ?? (() => {
       const reader = new GitHubQueueSnapshotReader(projectGitHub.transport, projectGitHub.githubConfig);
       const synchronizer = new GitHubQueueSynchronizer(store, { workerCapabilities: config.workerCapabilities, repositories: config.repositories.map((item) => item.repository) });
-      return new GitHubQueueReconciler(reader, synchronizer);
+      const normalQueue = new GitHubQueueReconciler(reader, synchronizer);
+      const project = new GitHubProjectSynchronizer(projectGitHub.transport, projectGitHub.githubConfig);
+      const intake = new WorkIntakeCoordinator(store, new Map(deliveryRepositories.map((item) => [item.repository.repository, {
+        reader: new GitHubIssueReader(item.transport, item.githubConfig),
+        project,
+      }])));
+      return new WorkIntakeQueueReconciler(intake, normalQueue);
     })();
     const delivery = options.delivery ?? new HeadlessDeliveryCoordinator(store, deliveryRepositories.map((item) => ({
       config: item.repository,

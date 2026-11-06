@@ -586,6 +586,7 @@ export {
   AttemptRepository,
   CheckpointRepository,
   OperatorDecisionRepository,
+  WorkIntakeRepository,
   CiCorrelationRepository,
   CiFailureEvidenceRepository,
   FeatureMergeRepository,
@@ -629,6 +630,22 @@ export {
   type PullRequestProvenanceRecord,
   type ShipmentCyclePatch,
 } from "./runtime/sqlite.js";
+export {
+  WORK_INTAKE_SCHEMA_VERSION,
+  WORK_INTAKE_STATES,
+  WorkIntakeCoordinator,
+  WorkIntakeQueueReconciler,
+  workIntakeId,
+  type WorkIntakeInput,
+  type WorkIntakeRecord,
+  type WorkIntakeState,
+  type WorkIntakeTransition,
+  type WorkIntakeIssuePort,
+  type WorkIntakeProjectPort,
+  type WorkIntakeRepositoryGateway,
+  type WorkIntakeReconcileResult,
+  type WorkIntakeQueuePort,
+} from "./runtime/work-intake.js";
 export {
   FEATURE_MERGE_LIMITS,
   FEATURE_MERGE_SCHEMA_VERSION,
