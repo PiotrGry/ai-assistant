@@ -34,7 +34,7 @@ test("MCP requires exact host authorization before requesting service start", as
   const root = await mkdtemp(join(tmpdir(), "pirx-service-mcp-"));
   let calls = 0;
   const secret = "test-service-secret";
-  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations" }, obsidianVault: new ObsidianVault(root), githubAuthorizationSecret: secret, orchestratorServicePort: { async start() { calls++; return { outcome: "start_requested", message: "accepted; heartbeat not verified" }; } } });
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations", XDG_CONFIG_HOME: root, HOME: root, PIRX_ORCHESTRATOR_DATABASE: join(root, "runtime.sqlite") }, obsidianVault: new ObsidianVault(root), githubAuthorizationSecret: secret, orchestratorServicePort: { async start() { calls++; return { outcome: "start_requested", message: "accepted; heartbeat not verified" }; } } });
   const client = new Client({ name: "service-test", version: "1" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

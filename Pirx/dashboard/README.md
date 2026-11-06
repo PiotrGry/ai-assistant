@@ -13,6 +13,12 @@ Cztery dashboardy tylko do odczytu: wydajność modeli, narzędzia i błędy, ro
 Wymaga Dockera, `sops` i klucza age w `~/.config/sops/age/keys.txt`.
 Stan Grafany leży w `~/.local/share/pirx-grafana`.
 
+Skrypt respektuje jawne ścieżki `PIRX_STORAGE_FILE` i `PIRX_GPU_DB`. Osobno
+można ustawić `PIRX_DASHBOARD_EXPORT_DIR` oraz `PIRX_GRAFANA_DATA_DIR`.
+`up.sh` kanonizuje je i przekazuje Compose tylko katalogi źródłowe potrzebne
+networkless exporterowi do spójnego odczytu SQLite wraz z WAL/SHM. Grafana nie
+widzi tych katalogów: dostaje wyłącznie snapshoty w trybie read-only.
+
 ## Dostęp z Maca
 
 ```bash
@@ -88,6 +94,10 @@ Snapshot nie wymaga zapisu WAL/SHM przez Grafanę. Przy błędzie zachowuje popr
 snapshot, a `docker compose logs exporter` podaje nazwę bazy, typ błędu i czas
 ostatniego udanego eksportu. Dashboard może więc pokazywać starsze dane.
 
-Compose nadal zakłada UID/GID 1000 i domyślne ścieżki źródłowe. Jeżeli używasz
-innego UID lub niestandardowego `PIRX_STORAGE_FILE`/`PIRX_GPU_DB`, dostosuj mounty
-exportera i UID obu kontenerów; nie montuj runtime do Grafany.
+`up.sh` domyślnie uruchamia oba kontenery z bieżącym UID/GID. Jawne
+`PIRX_DASHBOARD_UID` i `PIRX_DASHBOARD_GID` są potrzebne tylko przy innym
+właścicielu katalogów. Snapshoty mają tryb `0444`, katalogi danych `0700`, a
+Grafana ma mount eksportu `:ro`. Nie montuj runtime SQLite ani katalogu źródłowego
+bezpośrednio do Grafany. `full_local` zawiera treść rozmów; wybierz
+`PIRX_STORAGE_MODE=redacted` lub `metrics_only`, jeżeli dashboard nie powinien
+przechowywać pełnych promptów i wyników narzędzi.
