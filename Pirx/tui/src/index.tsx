@@ -4,6 +4,7 @@ import { PirxAgent, SessionLogger, loadConfig, initializeHostEnvironment } from 
 
 import { App } from "./app.js";
 import { TuiEventBus } from "./events.js";
+import { restoreHistory } from "./restored-history.js";
 
 async function main(): Promise<void> {
   initializeHostEnvironment();
@@ -29,6 +30,11 @@ async function main(): Promise<void> {
     const detail = error instanceof Error ? error.message : String(error);
     recordingNotice = `Sesja nie będzie zapisana: ${detail}`;
   }
+  const restored = restoreHistory(
+    logger?.restoredTranscript,
+    logger?.storageMode ?? config.storageMode ?? "redacted",
+  );
+  recordingNotice = recordingNotice ?? restored.notice;
 
   let instance: ReturnType<typeof render> | undefined;
 
@@ -36,7 +42,13 @@ async function main(): Promise<void> {
     // Deliberately use the normal terminal buffer. An alternate screen would
     // hide chat history from native scrolling, selection, and clipboard UX.
     instance = render(
-      <App agent={agent} events={events} recorder={logger} initialNotice={recordingNotice} />,
+      <App
+        agent={agent}
+        events={events}
+        recorder={logger}
+        initialNotice={recordingNotice}
+        initialHistory={restored.items}
+      />,
       {
         exitOnCtrlC: false,
       },

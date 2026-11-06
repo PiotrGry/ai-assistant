@@ -16,6 +16,18 @@ export interface HistoryLine {
   readonly emphasis?: boolean;
 }
 
+export interface HistoryRenderPlan {
+  readonly scrollbackItems: readonly ChatItem[];
+  readonly liveItems: readonly ChatItem[];
+}
+
+// Completed items have one rendering owner. Keeping the live collection empty
+// prevents Ink re-renders (typing, resize, tool completion) from duplicating
+// content already committed to the terminal's native scrollback.
+export function planHistoryRendering(items: readonly ChatItem[]): HistoryRenderPlan {
+  return { scrollbackItems: items, liveItems: [] };
+}
+
 type TableAlignment = "left" | "center" | "right";
 
 interface FormattedContentLine {

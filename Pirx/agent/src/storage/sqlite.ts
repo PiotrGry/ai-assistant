@@ -116,6 +116,31 @@ export interface ResourceSummary {
   readonly observedGpuUtilizationPeakPercent: number | null;
 }
 
+export interface StoredTranscriptMessage {
+  readonly sequence: number;
+  readonly role: string;
+  readonly content?: string;
+  readonly toolName?: string;
+  readonly payload: Record<string, unknown>;
+}
+
+export interface StoredTranscriptTurn {
+  readonly id: string;
+  readonly sequence: number;
+  readonly status: "completed" | "failed";
+  readonly userPrompt: string;
+  readonly payload: Record<string, unknown>;
+  readonly messages: readonly StoredTranscriptMessage[];
+}
+
+export interface StoredSessionTranscript {
+  readonly sessionId: string;
+  readonly status: "completed" | "failed";
+  readonly storageMode: string | undefined;
+  readonly omittedTurnCount: number;
+  readonly turns: readonly StoredTranscriptTurn[];
+}
+
 function json(value: unknown): string {
   return JSON.stringify(value);
 }
@@ -322,6 +347,94 @@ export class SqliteStore {
     return this.#database
       .prepare("SELECT 1 AS found FROM sessions WHERE id = ?")
       .get(id) !== undefined;
+  }
+
+  latestFinishedSessionTranscript(maxTurns: number): StoredSessionTranscript | undefined {
+    this.#assertOpen();
+    if (!Number.isSafeInteger(maxTurns) || maxTurns <= 0) {
+      throw new Error(`maxTurns must be a positive safe integer: ${maxTurns}`);
+    }
+    const session = this.#database.prepare(`
+      SELECT s.id, s.status, e.payload_json
+      FROM sessions s JOIN run_environments e ON e.id = s.environment_id
+      WHERE s.status IN ('completed', 'failed')
+      ORDER BY s.started_at DESC, s.rowid DESC
+      LIMIT 1`).get() as { id: string; status: "completed" | "failed"; payload_json: string } | undefined;
+    if (session === undefined) return undefined;
+
+    const environment = JSON.parse(session.payload_json) as Record<string, unknown>;
+    const storageMode = typeof environment.storage_mode === "string"
+      ? environment.storage_mode
+      : undefined;
+    if (storageMode !== "full_local") {
+      return {
+        sessionId: session.id,
+        status: session.status,
+        storageMode,
+        omittedTurnCount: 0,
+        turns: [],
+      };
+    }
+    const transcriptWhere = `
+      FROM turns t
+      JOIN sessions s ON s.id = t.session_id
+      JOIN run_environments e ON e.id = s.environment_id
+      WHERE s.status IN ('completed', 'failed')
+        AND t.status IN ('completed', 'failed')
+        AND json_extract(e.payload_json, '$.storage_mode') = 'full_local'`;
+    const total = this.#database.prepare(
+      `SELECT COUNT(*) AS count ${transcriptWhere}`,
+    ).get() as { count: number };
+    const rows = this.#database.prepare(`
+      SELECT id, sequence, status, user_prompt, payload_json
+      FROM (
+        SELECT t.id, t.sequence, t.status, t.user_prompt, t.payload_json,
+          s.started_at AS session_started_at
+        ${transcriptWhere}
+        ORDER BY s.started_at DESC, s.rowid DESC, t.sequence DESC
+        LIMIT ?
+      )
+      ORDER BY session_started_at ASC, sequence ASC`).all(maxTurns) as Array<{
+        id: string;
+        sequence: number;
+        status: "completed" | "failed";
+        user_prompt: string;
+        payload_json: string;
+      }>;
+    const turns = rows.map((turn): StoredTranscriptTurn => {
+      const messages = this.#database.prepare(`
+        SELECT sequence, role, content, tool_name, payload_json
+        FROM messages
+        WHERE turn_id = ?
+        ORDER BY sequence ASC`).all(turn.id) as Array<{
+          sequence: number;
+          role: string;
+          content: string | null;
+          tool_name: string | null;
+          payload_json: string;
+        }>;
+      return {
+        id: turn.id,
+        sequence: turn.sequence,
+        status: turn.status,
+        userPrompt: turn.user_prompt,
+        payload: JSON.parse(turn.payload_json) as Record<string, unknown>,
+        messages: messages.map((message) => ({
+          sequence: message.sequence,
+          role: message.role,
+          ...(message.content === null ? {} : { content: message.content }),
+          ...(message.tool_name === null ? {} : { toolName: message.tool_name }),
+          payload: JSON.parse(message.payload_json) as Record<string, unknown>,
+        })),
+      };
+    });
+    return {
+      sessionId: session.id,
+      status: session.status,
+      storageMode,
+      omittedTurnCount: Math.max(0, total.count - rows.length),
+      turns,
+    };
   }
 
   transaction<T>(operation: () => T): T {
