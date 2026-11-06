@@ -331,6 +331,7 @@ export {
 } from "./codex/cli-runner.js";
 export {
   CLAUDE_CLI_ENV_ALLOWLIST,
+  CLAUDE_CODE_WORKER_SETTINGS,
   CLAUDE_ROUND_TRIP_OUTCOMES,
   CLAUDE_TERMINATION_GRACE_MS,
   DEFAULT_CLAUDE_STDERR_BYTES,
@@ -338,6 +339,7 @@ export {
   DEFAULT_CLAUDE_TIMEOUT_MS,
   MAX_CLAUDE_OUTPUT_BYTES,
   MAX_CLAUDE_TIMEOUT_MS,
+  MINIMUM_CLAUDE_CODE_WORKER_VERSION,
   buildClaudeArguments,
   buildClaudeHandoffArguments,
   buildClaudeStructuredArguments,
@@ -356,6 +358,7 @@ export {
   type ClaudeRoundTripSuccess,
   type ClaudeSpawn,
   type ClaudeSpawnOptions,
+  type ClaudeVersionProbe,
 } from "./claude/cli-runner.js";
 export {
   CLAUDE_CODE_WORKER_PROFILE_LIMITS,

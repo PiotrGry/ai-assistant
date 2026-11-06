@@ -1,6 +1,7 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -31,7 +32,7 @@ test("MCP configuration uses the existing environment-based approach", () => {
   assert.equal(config.googleCalendar.requestTimeoutMs, 4_321);
   assert.equal(config.googleCalendar.authorizationTimeoutMs, 9_876);
   assert.equal(config.githubPocIssue, 179);
-  assert.equal(config.orchestratorDatabasePath, resolve("/tmp/pirx-runtime.sqlite"));
+  assert.equal(config.orchestratorDatabasePath, join(realpathSync("/tmp"), "pirx-runtime.sqlite"));
   assert.equal(config.orchestratorConfigurationSource, "database_override");
   assert.equal(config.orchestratorProfilePath, undefined);
   assert.equal(config.resourceDatabasePath, resolve("/tmp/pirx-resources.sqlite"));
@@ -92,7 +93,7 @@ function validConfig(directory = "/tmp/pirx-headless"): Record<string, unknown> 
 }
 
 test("MCP and the daemon use the same runtime profile and reject a conflicting legacy path", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "pirx-shared-profile-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pirx-shared-profile-")));
   context.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, "pirx"));
   const path = join(root, "pirx", "orchestrator.json");

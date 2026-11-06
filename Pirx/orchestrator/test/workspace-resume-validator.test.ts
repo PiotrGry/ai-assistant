@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -36,7 +36,7 @@ interface Fixture {
 }
 
 async function fixture(): Promise<Fixture> {
-  const directory = await mkdtemp(join(tmpdir(), "pirx-workspace-resume-test-"));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "pirx-workspace-resume-test-")));
   const repositoryRoot = join(directory, "repository");
   const worktreePath = join(directory, "worktree");
   await execFile("git", ["init", repositoryRoot]);
