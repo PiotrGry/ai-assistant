@@ -101,11 +101,13 @@ profilu jest odrzucane przed handlerem. Dynamiczny wybór narzędzi w trakcie tu
 pozostaje poza tym zakresem.
 
 W TUI Enter wysyła wiadomość, Shift+Enter dodaje nową linię, Ctrl+O otwiera
-listę modeli zainstalowanych w Ollamie, a Ctrl+C kończy sesję. Pełnoekranowy
-widok pokazuje ostatnią część rozmowy, a pełna historia trafia również do
-zwykłego bufora terminala: kółko myszy przewija, przeciągnięcie zaznacza tekst,
-a Cmd+C (macOS) lub Ctrl+Shift+C (Linux/Windows) kopiuje zaznaczenie. `pnpm
-start` pozostaje dotychczasowym interfejsem CLI.
+listę modeli zainstalowanych w Ollamie, a Ctrl+C kończy sesję. Każdy zakończony
+element rozmowy trafia dokładnie raz do zwykłego bufora terminala: kółko myszy
+przewija, przeciągnięcie zaznacza tekst, a Cmd+C (macOS) lub Ctrl+Shift+C
+(Linux/Windows) kopiuje zaznaczenie. Przy restarcie TUI odtwarza do 50 ostatnich
+pełnych tur tylko w trybie `full_local`; jest to historia interfejsu, nie
+wznowienie kontekstu modelu, i nie wykonuje ponownie narzędzi. `pnpm start`
+pozostaje dotychczasowym interfejsem CLI.
 
 Agent domyślnie używa modelu `hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL` i Ollamy pod `http://localhost:11434`. Ustawienia można nadpisać zmiennymi:
 

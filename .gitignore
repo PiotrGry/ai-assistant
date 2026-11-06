@@ -21,6 +21,9 @@ node_modules/
 logs/
 # Pamiec dlugoterminowa asystenta - stan runtime
 memory/
+# Local Obsidian content. Existing historical files remain tracked until their
+# owner makes a separate, explicit retention/history decision.
+Pirx/vault/
 
 # Pirx local SQLite runtime state, including WAL/journal sidecars
 *.sqlite
