@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createCheckpoint, type Checkpoint, type CheckpointInput } from "./checkpoint.js";
 import { transitionAttempt, transitionTask, type AttemptSnapshot, type TaskSnapshot, type UtcTimestamp } from "./task-domain.js";
 import { invokeWorker, validateWorkerRequest, type WorkerPort, type WorkerRequest, type WorkerResult } from "./worker-contract.js";
@@ -66,6 +67,7 @@ function taskAfterResult(task: TaskSnapshot, result: WorkerResult, at: UtcTimest
   const transition = result.outcome === "BLOCKED" ? { type: "block" as const, reason } : result.outcome === "CANCELLED" ? { type: "cancel" as const, reason } : { type: "fail" as const, reason };
   return transitionTask(task, "in_progress", transition, at);
 }
+function operatorQuestionId(attemptId: string): string { return `operator:${createHash("sha256").update(attemptId).digest("hex").slice(0, 40)}`; }
 
 export class WorkerLifecycleCoordinator {
   readonly #store: RuntimeSqliteStore;
@@ -131,7 +133,7 @@ export class WorkerLifecycleCoordinator {
   }
 
   #recordTerminal(value: WorkerRequest, result: WorkerResult) {
-    return this.#store.transaction(({ tasks, attempts, checkpoints, workspaces }) => {
+    return this.#store.transaction(({ tasks, attempts, checkpoints, workspaces, operatorDecisions }) => {
       const task = tasks.get(value.taskId); const attempt = attempts.get(value.attemptId);
       if (task.outcome !== "success" || attempt.outcome !== "success") return { outcome: "storage_error" as const, message: "Assigned Task or Attempt could not be read while recording the result." };
       if (attempt.value.state !== "running") return { outcome: "conflict" as const, message: "Attempt changed before its terminal result was persisted." };
@@ -162,6 +164,10 @@ export class WorkerLifecycleCoordinator {
       if (checkpoint !== undefined) {
         const storedCheckpoint = checkpoints.save(checkpoint);
         if (storedCheckpoint.outcome !== "success") return storedCheckpoint;
+        if (result.outcome === "BLOCKED" && result.diagnostic?.code === "operator_input_required") {
+          const opened = operatorDecisions.open({ id: operatorQuestionId(storedAttempt.value.id), taskId: storedTask.value.id, sourceAttemptId: storedAttempt.value.id, checkpointId: storedCheckpoint.value.id, prompt: result.reason, openedAt: at });
+          if (opened.outcome !== "success") return opened;
+        }
       }
       return { outcome: "success" as const, value: { task: storedTask.value, attempt: storedAttempt.value, ...(checkpoint === undefined ? {} : { checkpoint }) } };
     });

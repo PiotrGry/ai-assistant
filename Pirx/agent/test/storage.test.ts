@@ -1,5 +1,6 @@
 import { hostname } from "node:os";
 import assert from "node:assert/strict";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
@@ -7,6 +8,40 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { SqliteStore, STORAGE_SCHEMA_VERSION } from "../src/storage/sqlite.js";
+
+async function waitForReady(child: ChildProcessWithoutNullStreams): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    const onData = (value: Buffer) => {
+      stdout += value.toString("utf8");
+      if (stdout.includes("READY\n")) {
+        cleanup();
+        resolve();
+      }
+    };
+    const onErrorData = (value: Buffer) => { stderr += value.toString("utf8"); };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      cleanup();
+      reject(new Error(`Session owner exited before READY (code=${String(code)}, signal=${String(signal)}): ${stderr}`));
+    };
+    const cleanup = () => {
+      child.stdout.off("data", onData);
+      child.stderr.off("data", onErrorData);
+      child.off("exit", onExit);
+    };
+    child.stdout.on("data", onData);
+    child.stderr.on("data", onErrorData);
+    child.once("exit", onExit);
+  });
+}
+
+async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  child.kill("SIGTERM");
+  await exited;
+}
 
 test("SQLite store creates the versioned durable schema and keeps relations", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pirx-storage-test-"));
@@ -110,6 +145,36 @@ test("SQLite store rejects orphan records and remains reopenable", async () => {
   }
 });
 
+test("SQLite store rejects a newer schema before changing the database", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-storage-future-schema-"));
+  const filename = join(directory, "pirx.db");
+  const future = new DatabaseSync(filename);
+  future.exec(`
+    CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+    INSERT INTO schema_migrations (version, applied_at) VALUES (999, '2026-01-01T00:00:00.000Z');
+    CREATE TABLE future_only (id TEXT PRIMARY KEY);
+    INSERT INTO future_only (id) VALUES ('preserve-me');
+  `);
+  future.close();
+  const before = await readFile(filename);
+
+  assert.throws(
+    () => SqliteStore.open({ filename }),
+    /Unsupported storage schema version: 999/u,
+  );
+  assert.deepEqual(await readFile(filename), before);
+
+  const observed = new DatabaseSync(filename, { readOnly: true });
+  try {
+    assert.equal(observed.prepare("SELECT id FROM future_only").get()?.id, "preserve-me");
+    assert.equal(observed.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'sessions'").get()?.n, 0);
+    assert.equal(observed.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 999);
+  } finally {
+    observed.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("SQLite recovery closes interrupted work without hiding MCP uncertainty", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pirx-storage-recovery-test-"));
   const filename = join(directory, "pirx.db");
@@ -180,6 +245,78 @@ test("SQLite recovery closes interrupted work without hiding MCP uncertainty", a
     ]);
   } finally {
     database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("recovery preserves another live process and recovers its MCP operation once after exit", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-storage-process-owner-"));
+  const filename = join(directory, "pirx.db");
+  const storageModule = new URL("../src/storage/sqlite.js", import.meta.url).href;
+  const childScript = `
+    import { hostname } from "node:os";
+    import { SqliteStore } from ${JSON.stringify(storageModule)};
+    const [filename, sessionId] = process.argv.slice(1);
+    const store = SqliteStore.open({ filename });
+    const startedAt = "2026-09-09T10:00:00.000Z";
+    store.insertRunEnvironment({ id: "child-env", createdAt: startedAt, payload: { process_id: process.pid, process_hostname: hostname() } });
+    store.insertSession({ id: sessionId, environmentId: "child-env", startedAt, status: "active" });
+    store.insertTurn({ id: "child-turn", sessionId, sequence: 0, startedAt, status: "started", userPrompt: "child", payload: {} });
+    store.insertOperation({ id: "child-mcp", sessionId, turnId: "child-turn", sequence: 0, kind: "mcp", startedAt, status: "started", payload: { tool_name: "fixture_mutation" } });
+    process.stdout.write(${JSON.stringify("READY\n")});
+    setInterval(() => undefined, 1_000);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", childScript, filename, "child-session"]);
+  let store: SqliteStore | undefined;
+  try {
+    await waitForReady(child);
+    store = SqliteStore.open({ filename });
+    store.insertRunEnvironment({
+      id: "parent-env",
+      createdAt: "2026-09-09T10:00:01.000Z",
+      payload: { process_id: process.pid, process_hostname: hostname() },
+    });
+    store.insertSession({ id: "parent-session", environmentId: "parent-env", startedAt: "2026-09-09T10:00:01.000Z", status: "active" });
+    store.insertTurn({ id: "parent-turn", sessionId: "parent-session", sequence: 0, startedAt: "2026-09-09T10:00:01.000Z", status: "started", userPrompt: "parent", payload: {} });
+    store.insertOperation({ id: "parent-mcp", sessionId: "parent-session", turnId: "parent-turn", sequence: 0, kind: "mcp", startedAt: "2026-09-09T10:00:01.000Z", status: "started", payload: { tool_name: "fixture_mutation" } });
+
+    store.recoverInterrupted("2026-09-09T10:01:00.000Z");
+    let observed = new DatabaseSync(filename, { readOnly: true });
+    try {
+      assert.deepEqual(
+        observed.prepare("SELECT id, status FROM sessions ORDER BY id").all().map((row) => ({ ...row })),
+        [{ id: "child-session", status: "active" }, { id: "parent-session", status: "active" }],
+      );
+      assert.deepEqual(
+        observed.prepare("SELECT id, status FROM operations ORDER BY id").all().map((row) => ({ ...row })),
+        [{ id: "child-mcp", status: "started" }, { id: "parent-mcp", status: "started" }],
+      );
+    } finally { observed.close(); }
+
+    await stopChild(child);
+    store.recoverInterrupted("2026-09-09T10:02:00.000Z");
+    observed = new DatabaseSync(filename, { readOnly: true });
+    let recoveredEndedAt: string;
+    try {
+      const childSession = observed.prepare("SELECT status, ended_at FROM sessions WHERE id = 'child-session'").get() as { status: string; ended_at: string };
+      const childOperation = observed.prepare("SELECT status, error FROM operations WHERE id = 'child-mcp'").get() as { status: string; error: string };
+      assert.equal(childSession.status, "failed");
+      assert.equal(childOperation.status, "unknown");
+      assert.equal(childOperation.error, "process_restart");
+      assert.equal(observed.prepare("SELECT status FROM sessions WHERE id = 'parent-session'").get()?.status, "active");
+      assert.equal(observed.prepare("SELECT status FROM operations WHERE id = 'parent-mcp'").get()?.status, "started");
+      recoveredEndedAt = childSession.ended_at;
+    } finally { observed.close(); }
+
+    store.recoverInterrupted("2026-09-09T10:03:00.000Z");
+    observed = new DatabaseSync(filename, { readOnly: true });
+    try {
+      assert.equal(observed.prepare("SELECT ended_at FROM sessions WHERE id = 'child-session'").get()?.ended_at, recoveredEndedAt);
+      assert.equal(observed.prepare("SELECT status FROM operations WHERE id = 'child-mcp'").get()?.status, "unknown");
+    } finally { observed.close(); }
+  } finally {
+    await stopChild(child);
+    store?.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

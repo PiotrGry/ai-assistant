@@ -1,6 +1,7 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -31,14 +32,16 @@ test("MCP configuration uses the existing environment-based approach", () => {
   assert.equal(config.googleCalendar.requestTimeoutMs, 4_321);
   assert.equal(config.googleCalendar.authorizationTimeoutMs, 9_876);
   assert.equal(config.githubPocIssue, 179);
-  assert.equal(config.orchestratorDatabasePath, resolve("/tmp/pirx-runtime.sqlite"));
+  assert.equal(config.orchestratorDatabasePath, join(realpathSync("/tmp"), "pirx-runtime.sqlite"));
+  assert.equal(config.orchestratorConfigurationSource, "database_override");
+  assert.equal(config.orchestratorProfilePath, undefined);
   assert.equal(config.resourceDatabasePath, resolve("/tmp/pirx-resources.sqlite"));
   assert.equal(config.githubPocConfigurationError, undefined);
 });
 
-test("MCP configuration uses the project vault by default", () => {
+test("MCP configuration requires an explicit vault even when the repository has one", () => {
   const config = loadMcpServerConfig({});
-  assert.equal(config.obsidianVaultPath?.endsWith("/Pirx/vault"), true);
+  assert.equal(config.obsidianVaultPath, undefined);
   assert.equal(config.resourceDatabasePath.endsWith("/.local/share/pirx/gpu.sqlite"), true);
 });
 
@@ -90,7 +93,7 @@ function validConfig(directory = "/tmp/pirx-headless"): Record<string, unknown> 
 }
 
 test("MCP and the daemon use the same runtime profile and reject a conflicting legacy path", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "pirx-shared-profile-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pirx-shared-profile-")));
   context.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, "pirx"));
   const path = join(root, "pirx", "orchestrator.json");
@@ -98,13 +101,17 @@ test("MCP and the daemon use the same runtime profile and reject a conflicting l
   const environment = { XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_SERVICE_ENABLED: "true" };
   const config = loadMcpServerConfig(environment);
   assert.equal(config.orchestratorDatabasePath, join(root, "runtime.sqlite"));
+  assert.equal(config.orchestratorProfilePath, path);
+  assert.equal(config.orchestratorConfigurationSource, "default_profile");
   const conflict = loadMcpServerConfig({ ...environment, PIRX_ORCHESTRATOR_DATABASE: join(root, "wrong.sqlite") });
   assert.equal(conflict.orchestratorDatabasePath, undefined);
+  assert.equal(conflict.orchestratorConfigurationCode, "invalid_configuration");
   assert.match(conflict.orchestratorConfigurationError ?? "", /conflicts/u);
   const { loadHeadlessOrchestratorConfig } = await import("@pirx/orchestrator");
   assert.equal((await loadHeadlessOrchestratorConfig(environment)).databasePath, config.orchestratorDatabasePath);
   const missing = loadMcpServerConfig({ ...environment, PIRX_ORCHESTRATOR_CONFIG: join(root, "missing.json"), PIRX_ORCHESTRATOR_DATABASE: join(root, "runtime.sqlite") });
   assert.equal(missing.orchestratorDatabasePath, undefined);
+  assert.equal(missing.orchestratorConfigurationCode, "read_failure");
   assert.match(missing.orchestratorConfigurationError ?? "", /could not be read/u);
 });
 
@@ -126,4 +133,31 @@ test("invalid Calendar configuration does not prevent other MCP tools from start
     assert.equal(calendar.isError, true);
     assert.match(JSON.stringify(calendar), /PIRX_GOOGLE_TIMEOUT_MS/);
   } finally { await client.close(); await server.close(); }
+});
+
+
+test("Obsidian is opt-in and invalid paths do not disable other MCP tools", async () => {
+  const { createMcpServer } = await import("../src/server.js");
+  const root = await mkdtemp(join(tmpdir(), "pirx-vault-optin-"));
+  try {
+    await writeFile(join(root, "note.md"), "explicit-vault-content");
+    for (const environment of [{}, { PIRX_OBSIDIAN_VAULT: join(root, "missing") }, { PIRX_OBSIDIAN_VAULT: root }]) {
+      const server = createMcpServer({ environment });
+      const client = new Client({ name: "vault-optin", version: "1" });
+      const [a, b] = InMemoryTransport.createLinkedPair();
+      try {
+        await Promise.all([server.connect(b), client.connect(a)]);
+        const note = await client.callTool({ name: "obsidian_read", arguments: { path: "note.md" } });
+        if (environment.PIRX_OBSIDIAN_VAULT === root) {
+          assert.notEqual(note.isError, true);
+          assert.match(JSON.stringify(note), /explicit-vault-content/);
+        } else {
+          assert.equal(note.isError, true);
+          assert.ok(!JSON.stringify(note).includes("explicit-vault-content"));
+        }
+        const hello = await client.callTool({ name: "hello", arguments: { name: "operator" } });
+        assert.notEqual(hello.isError, true);
+      } finally { await client.close(); await server.close(); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

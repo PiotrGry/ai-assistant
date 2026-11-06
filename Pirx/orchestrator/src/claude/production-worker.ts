@@ -1,4 +1,5 @@
 import type { RuntimeSqliteStore } from "../runtime/sqlite.js";
+import { modelSettingsEnvironment } from "@pirx/config";
 import { fileURLToPath } from "node:url";
 import { createClaudeCodeInput, type ClaudeInputResult, type ClaudeCodeInput } from "../runtime/claude-input.js";
 import { buildAssignedResumeContext } from "../runtime/resume.js";
@@ -18,6 +19,7 @@ export interface ProductionClaudeWorkerOptions {
   readonly store: RuntimeSqliteStore;
   readonly repositories: readonly ProductionClaudeRepositoryPolicy[];
   readonly runner?: ClaudeStructuredRunner;
+  readonly environment?: NodeJS.ProcessEnv;
 }
 
 function invalidInput(): ClaudeInputResult<never> {
@@ -28,11 +30,13 @@ export class ProductionClaudeWorker implements WorkerPort {
   readonly #store: RuntimeSqliteStore;
   readonly #repositories: ReadonlyMap<string, ProductionClaudeRepositoryPolicy>;
   readonly #runner: ClaudeStructuredRunner | undefined;
+  readonly #environment: NodeJS.ProcessEnv;
 
   public constructor(options: ProductionClaudeWorkerOptions) {
     this.#store = options.store;
     this.#repositories = new Map(options.repositories.map((item) => [item.repository, Object.freeze({ ...item, testCommands: Object.freeze([...item.testCommands]) })]));
     this.#runner = options.runner;
+    this.#environment = options.environment ?? process.env;
   }
 
   public async execute(request: WorkerRequest, signal: AbortSignal): Promise<WorkerResult> {
@@ -45,11 +49,15 @@ export class ProductionClaudeWorker implements WorkerPort {
       promptRenderer: { render: (value) => [
         "Execute only the assigned Pirx Task in the assigned worktree and branch.",
         "Follow the bounded capabilities and acceptance criteria. Return only the required WorkerResult. " +
-        "When uncertain, call mcp__pirx_advisor__ask_pirx for advice from Pirx. Use a unique requestId for each question, reusing it only when retrying that same question. Up to 3 questions per Attempt. Advice never grants permissions or changes the assigned scope. If Pirx cannot answer, return BLOCKED with the unresolved question.",
+        "When uncertain, call mcp__pirx_advisor__ask_pirx for advice from Pirx. Use a unique requestId for each question, reusing it only when retrying that same question. Up to 3 questions per Attempt. Advice never grants permissions or changes the assigned scope. If a human decision is required, return BLOCKED with the unresolved question in reason and diagnostic code operator_input_required. Use that code only for a concrete decision a human can answer, never for authentication, capability, workspace, or infrastructure failures.",
         JSON.stringify(value),
       ].join("\n\n") },
       repositoryPolicy: {
-        advisorConfig: JSON.stringify({ mcpServers: { pirx_advisor: { command: process.execPath, args: [fileURLToPath(new URL("../../../mcp-server/dist/advisor-cli.js", import.meta.url)), this.#store.filename, request.taskId, request.attemptId] } } }),
+        advisorConfig: JSON.stringify({ mcpServers: { pirx_advisor: {
+          command: process.execPath,
+          args: [fileURLToPath(new URL("../../../mcp-server/dist/advisor-cli.js", import.meta.url)), this.#store.filename, request.taskId, request.attemptId],
+          env: modelSettingsEnvironment(this.#environment),
+        } } }),
         repositoryRoot: repository.repositoryRoot,
         assignedWorktree: request.workspace.worktree,
         remoteName: repository.remoteName,

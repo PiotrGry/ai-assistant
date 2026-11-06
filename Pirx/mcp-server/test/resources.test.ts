@@ -87,7 +87,7 @@ test("MCP exposes the read-only report as one bounded call", async (context) => 
   const calls: unknown[] = [];
   const port: ResourceReportPort = { report(input) { calls.push(input); return { outcome: "no_data", window: { from: new Date(input.nowMs - 60_000).toISOString(), to: new Date(input.nowMs).toISOString() }, notices: ["cpu_unavailable", "gpu_unavailable"] }; } };
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createMcpServer({ environment: {}, obsidianVault: new ObsidianVault(root), resourceReportPort: port });
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations" }, obsidianVault: new ObsidianVault(root), resourceReportPort: port });
   const client = new Client({ name: "pirx-resource-test", version: "0.1.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   context.after(async () => { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); });

@@ -153,7 +153,9 @@ export {
   HeadlessConfigurationError,
   loadHeadlessOrchestratorConfig,
   readHeadlessOrchestratorConfig,
+  resolveHeadlessOrchestratorConfigSelection,
   parseHeadlessOrchestratorConfig,
+  type HeadlessOrchestratorConfigSelection,
   type HeadlessOrchestratorConfig,
   type HeadlessDeliveryPolicyConfig,
   type HeadlessRepositoryConfig,
@@ -329,6 +331,7 @@ export {
 } from "./codex/cli-runner.js";
 export {
   CLAUDE_CLI_ENV_ALLOWLIST,
+  CLAUDE_CODE_WORKER_SETTINGS,
   CLAUDE_ROUND_TRIP_OUTCOMES,
   CLAUDE_TERMINATION_GRACE_MS,
   DEFAULT_CLAUDE_STDERR_BYTES,
@@ -336,6 +339,7 @@ export {
   DEFAULT_CLAUDE_TIMEOUT_MS,
   MAX_CLAUDE_OUTPUT_BYTES,
   MAX_CLAUDE_TIMEOUT_MS,
+  MINIMUM_CLAUDE_CODE_WORKER_VERSION,
   buildClaudeArguments,
   buildClaudeHandoffArguments,
   buildClaudeStructuredArguments,
@@ -354,6 +358,7 @@ export {
   type ClaudeRoundTripSuccess,
   type ClaudeSpawn,
   type ClaudeSpawnOptions,
+  type ClaudeVersionProbe,
 } from "./claude/cli-runner.js";
 export {
   CLAUDE_CODE_WORKER_PROFILE_LIMITS,
@@ -579,9 +584,12 @@ export {
 } from "./runtime/safety-policy.js";
 export {
   DEFAULT_RUNTIME_BUSY_TIMEOUT_MS,
+  OPERATOR_DECISION_SCHEMA_VERSION,
   RUNTIME_STORAGE_SCHEMA_VERSION,
   AttemptRepository,
   CheckpointRepository,
+  OperatorDecisionRepository,
+  WorkIntakeRepository,
   CiCorrelationRepository,
   CiFailureEvidenceRepository,
   FeatureMergeRepository,
@@ -600,6 +608,12 @@ export {
   resolveRuntimeStoragePath,
   type RuntimeSqliteStoreOptions,
   type RuntimeTransaction,
+  type OperatorQuestionState,
+  type OperatorQuestionRecord,
+  type OperatorDecisionRecord,
+  type OperatorQuestionInput,
+  type OperatorDecisionInput,
+  type OperatorDecisionAcceptance,
   type RuntimeProjectionInput,
   type RuntimeProjectionRecord,
   type RuntimeProjectionStatus,
@@ -619,6 +633,22 @@ export {
   type PullRequestProvenanceRecord,
   type ShipmentCyclePatch,
 } from "./runtime/sqlite.js";
+export {
+  WORK_INTAKE_SCHEMA_VERSION,
+  WORK_INTAKE_STATES,
+  WorkIntakeCoordinator,
+  WorkIntakeQueueReconciler,
+  workIntakeId,
+  type WorkIntakeInput,
+  type WorkIntakeRecord,
+  type WorkIntakeState,
+  type WorkIntakeTransition,
+  type WorkIntakeIssuePort,
+  type WorkIntakeProjectPort,
+  type WorkIntakeRepositoryGateway,
+  type WorkIntakeReconcileResult,
+  type WorkIntakeQueuePort,
+} from "./runtime/work-intake.js";
 export {
   FEATURE_MERGE_LIMITS,
   FEATURE_MERGE_SCHEMA_VERSION,

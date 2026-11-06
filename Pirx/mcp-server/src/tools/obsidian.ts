@@ -1,6 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
+import {
+  authorizationFailureSchema,
+  rejectedAuthorization,
+  type SingleUseHostAuthorization,
+} from "../authorization.js";
 import { backlinks, outgoingLinks } from "../obsidian/graph.js";
 import { normalizeNotePath, type ObsidianVault } from "../obsidian/vaults.js";
 
@@ -34,6 +39,7 @@ function structured(result: Record<string, unknown>) {
 export function registerObsidianTools(
   server: McpServer,
   vault: ObsidianVault | undefined,
+  authorization: SingleUseHostAuthorization,
 ): void {
   server.registerTool(
     "obsidian_exists",
@@ -83,7 +89,7 @@ export function registerObsidianTools(
       description:
         "Create a new Markdown note. This never overwrites an existing note.",
       inputSchema: z.object({ path: notePathSchema, content: noteContentSchema }),
-      outputSchema: pathResultSchema.extend({ created: z.literal(true) }),
+      outputSchema: z.union([pathResultSchema.extend({ created: z.literal(true) }), authorizationFailureSchema]),
       annotations: {
         readOnlyHint: false,
         idempotentHint: false,
@@ -91,7 +97,10 @@ export function registerObsidianTools(
         openWorldHint: false,
       },
     },
-    async ({ path, content }) => {
+    async (input, context) => {
+      const decision = authorization.consume(context.mcpReq._meta, "obsidian_create", input);
+      if (!decision.ok) return rejectedAuthorization(decision.failure);
+      const { path, content } = input;
       await configuredVault(vault).create(path, content);
       return structured({ path: normalizeNotePath(path), created: true });
     },
@@ -104,7 +113,7 @@ export function registerObsidianTools(
       description:
         "Replace the contents of an existing Markdown note. This fails if the note does not exist.",
       inputSchema: z.object({ path: notePathSchema, content: noteContentSchema }),
-      outputSchema: pathResultSchema.extend({ written: z.literal(true) }),
+      outputSchema: z.union([pathResultSchema.extend({ written: z.literal(true) }), authorizationFailureSchema]),
       annotations: {
         readOnlyHint: false,
         idempotentHint: true,
@@ -112,7 +121,10 @@ export function registerObsidianTools(
         openWorldHint: false,
       },
     },
-    async ({ path, content }) => {
+    async (input, context) => {
+      const decision = authorization.consume(context.mcpReq._meta, "obsidian_write", input);
+      if (!decision.ok) return rejectedAuthorization(decision.failure);
+      const { path, content } = input;
       await configuredVault(vault).write(path, content);
       return structured({ path: normalizeNotePath(path), written: true });
     },
@@ -128,7 +140,7 @@ export function registerObsidianTools(
         path: notePathSchema,
         content: noteContentSchema.min(1),
       }),
-      outputSchema: pathResultSchema.extend({ appended: z.literal(true) }),
+      outputSchema: z.union([pathResultSchema.extend({ appended: z.literal(true) }), authorizationFailureSchema]),
       annotations: {
         readOnlyHint: false,
         idempotentHint: false,
@@ -136,7 +148,10 @@ export function registerObsidianTools(
         openWorldHint: false,
       },
     },
-    async ({ path, content }) => {
+    async (input, context) => {
+      const decision = authorization.consume(context.mcpReq._meta, "obsidian_append", input);
+      if (!decision.ok) return rejectedAuthorization(decision.failure);
+      const { path, content } = input;
       await configuredVault(vault).append(path, content);
       return structured({ path: normalizeNotePath(path), appended: true });
     },
@@ -188,11 +203,11 @@ export function registerObsidianTools(
         source: notePathSchema,
         destination: notePathSchema,
       }),
-      outputSchema: z.object({
+      outputSchema: z.union([z.object({
         source: z.string(),
         destination: z.string(),
         moved: z.literal(true),
-      }),
+      }), authorizationFailureSchema]),
       annotations: {
         readOnlyHint: false,
         idempotentHint: false,
@@ -200,7 +215,10 @@ export function registerObsidianTools(
         openWorldHint: false,
       },
     },
-    async ({ source, destination }) => {
+    async (input, context) => {
+      const decision = authorization.consume(context.mcpReq._meta, "obsidian_move", input);
+      if (!decision.ok) return rejectedAuthorization(decision.failure);
+      const { source, destination } = input;
       await configuredVault(vault).move(source, destination);
       return structured({
         source: normalizeNotePath(source),
@@ -216,7 +234,7 @@ export function registerObsidianTools(
       title: "Delete an Obsidian note",
       description: "Delete exactly one existing Markdown note inside the configured vault.",
       inputSchema: z.object({ path: notePathSchema }),
-      outputSchema: pathResultSchema.extend({ deleted: z.literal(true) }),
+      outputSchema: z.union([pathResultSchema.extend({ deleted: z.literal(true) }), authorizationFailureSchema]),
       annotations: {
         readOnlyHint: false,
         idempotentHint: false,
@@ -224,7 +242,10 @@ export function registerObsidianTools(
         openWorldHint: false,
       },
     },
-    async ({ path }) => {
+    async (input, context) => {
+      const decision = authorization.consume(context.mcpReq._meta, "obsidian_delete", input);
+      if (!decision.ok) return rejectedAuthorization(decision.failure);
+      const { path } = input;
       await configuredVault(vault).delete(path);
       return structured({ path: normalizeNotePath(path), deleted: true });
     },
@@ -242,12 +263,12 @@ export function registerObsidianTools(
         alias: z.string().trim().min(1).max(300).optional(),
         heading: z.string().trim().min(1).max(300).optional(),
       }),
-      outputSchema: z.object({
+      outputSchema: z.union([z.object({
         path: z.string(),
         target: z.string(),
         link: z.string(),
         added: z.boolean(),
-      }),
+      }), authorizationFailureSchema]),
       annotations: {
         readOnlyHint: false,
         idempotentHint: true,
@@ -255,7 +276,10 @@ export function registerObsidianTools(
         openWorldHint: false,
       },
     },
-    async ({ path, target, alias, heading }) => {
+    async (input, context) => {
+      const decision = authorization.consume(context.mcpReq._meta, "obsidian_add_link", input);
+      if (!decision.ok) return rejectedAuthorization(decision.failure);
+      const { path, target, alias, heading } = input;
       const options = {
         ...(alias !== undefined ? { alias } : {}),
         ...(heading !== undefined ? { heading } : {}),

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildHistoryLines, type ChatItem } from "../src/history.js";
+import { buildHistoryLines, planHistoryRendering, type ChatItem } from "../src/history.js";
 
 test("history keeps question and answer lines independently scrollable", () => {
   const items: ChatItem[] = [
@@ -76,4 +76,19 @@ test("history keeps table-looking lines inside fenced Markdown code blocks uncha
     "└──────────────────────┘",
     "",
   ]);
+});
+
+test("completed history has one render owner across typing and resize rerenders", () => {
+  const items: ChatItem[] = [
+    { kind: "user", content: "long question" },
+    { kind: "tool", name: "github_issue_get", status: "done" },
+    { kind: "assistant", content: "answer" },
+  ];
+
+  for (const _rerenderCause of ["typing", "resize", "tool completion"]) {
+    const plan = planHistoryRendering(items);
+    assert.deepEqual(plan.scrollbackItems, items);
+    assert.deepEqual(plan.liveItems, []);
+    assert.equal(plan.scrollbackItems.length + plan.liveItems.length, items.length);
+  }
 });

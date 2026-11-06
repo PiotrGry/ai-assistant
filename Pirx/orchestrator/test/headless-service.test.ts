@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   HeadlessConfigurationError,
   HeadlessOrchestratorService,
+  loadGitHubConfig,
   RuntimeSqliteStore,
   SqliteHeadlessControlPort,
   parseHeadlessOrchestratorConfig,
@@ -277,9 +278,21 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) test(`CLI drains gracefully
     await writeFile(filename, JSON.stringify(validConfig(directory)), { mode: 0o600 });
     RuntimeSqliteStore.open({ filename: parseHeadlessOrchestratorConfig(validConfig(directory)).databasePath }).close();
     const host = new FixtureHost(filename, signal);
-    assert.equal(await runHeadlessCli(host, { queue: { reconcile: async () => ({ outcome: "synchronized" }) }, delivery: { reconcile: async () => ({ outcome: "idle", allowWorkerCycle: true }) }, githubConfigLoader: () => ({ token: "test-only", owner: "PiotrGry", repository: "ai-assistant", projectOwner: "PiotrGry", projectNumber: 3, apiUrl: "https://api.github.com", timeoutMs: 10_000 }) }), 0);
+    const githubEnvironments: NodeJS.ProcessEnv[] = [];
+    assert.equal(await runHeadlessCli(host, {
+      queue: { reconcile: async () => ({ outcome: "synchronized" }) },
+      delivery: { reconcile: async () => ({ outcome: "idle", allowWorkerCycle: true }) },
+      githubConfigLoader: (environment) => {
+        githubEnvironments.push(environment);
+        return loadGitHubConfig(environment, { tokenProvider: () => "test-only" });
+      },
+    }), 0);
     assert.equal(host.exitCode, 0);
     assert.equal(host.errors.length, 0);
     assert.equal(host.output.some((line) => line.includes('"event":"stopped"')), true);
+    assert.equal(githubEnvironments.length, 1);
+    assert.equal(githubEnvironments[0]?.PIRX_GITHUB_OWNER, "PiotrGry");
+    assert.equal(githubEnvironments[0]?.PIRX_GITHUB_REPOSITORY, "ai-assistant");
+    assert.equal(loadGitHubConfig(githubEnvironments[0], { tokenProvider: () => "test-only" }).writeTargetExplicit, undefined);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

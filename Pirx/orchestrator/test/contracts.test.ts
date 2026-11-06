@@ -53,7 +53,7 @@ test("loadGitHubConfig validates fields without exposing the token", () => {
 
 test("loadGitHubConfig defaults to the reconciliation repository", () => {
   assert.deepEqual(loadGitHubConfig({}, { tokenProvider: () => "token" }), {
-    token: "token", owner: "PiotrGry", repository: "zdrovena-reconciliation",
+    token: "token", owner: "PiotrGry", repository: "zdrovena-reconciliation", writeTargetExplicit: false,
     apiUrl: "https://api.github.com", timeoutMs: 10_000,
   });
 });
@@ -531,4 +531,52 @@ test("retry policy returns explicit cancellation while waiting", async () => {
   );
   assert.equal(decision.reason, "cancelled");
   assert.equal(decision.finalOutcome.outcome, "permanent_error");
+});
+
+
+test("fallback GitHub target is readable but cannot authorize a write", async () => {
+  let writes = 0;
+  const fallback = loadGitHubConfig({}, { tokenProvider: () => "fixture" });
+  const transport = new GitHubTransport(fallback, { fetch: async (_url, init) => { if (init?.method !== "GET") writes++; return response({}); } });
+  assert.equal((await transport.restRead({ method: "GET", path: "/repos/PiotrGry/zdrovena-reconciliation/issues" }, { correlationId: "read" })).outcome, "success");
+  const rest = await transport.restWrite({ method: "POST", path: "/repos/PiotrGry/zdrovena-reconciliation/issues" }, { correlationId: "write" });
+  const graphql = await transport.graphqlWrite({ query: "mutation { operation }" }, { correlationId: "graphql-write" });
+  assert.equal(rest.remoteOutcome, "not_accepted");
+  assert.equal(graphql.remoteOutcome, "not_accepted");
+  assert.equal(writes, 0);
+});
+
+test("GitHub transport never dispatches credentials over HTTP or to another origin", async () => {
+  let calls = 0;
+  const fetch: GitHubFetch = async () => { calls++; return response({}); };
+  assert.throws(() => loadGitHubConfig({ PIRX_GITHUB_API_URL: "http://example.test" }, { tokenProvider: () => "fixture" }), /HTTPS/);
+  const insecure = new GitHubTransport({ ...config, apiUrl: "http://example.test" }, { fetch });
+  assert.equal((await insecure.restRead({ method: "GET", path: "/issues" }, { correlationId: "insecure" })).remoteOutcome, "not_accepted");
+  const secure = new GitHubTransport(config, { fetch });
+  assert.equal((await secure.restWrite({ method: "POST", path: "https://another.test/issues" }, { correlationId: "other-origin" })).remoteOutcome, "not_accepted");
+  assert.equal(calls, 0);
+});
+
+
+test("GitHub deadline covers a stalled body after headers and preserves mutation uncertainty", async () => {
+  const keepAlive = setTimeout(() => {}, 2000);
+  try {
+    const transport = new GitHubTransport(config, { fetch: async () => {
+      return new Response(new ReadableStream<Uint8Array>());
+    } });
+    const start = Date.now();
+    const result = await transport.restWrite({ method: "POST", path: "/mutation" }, { correlationId: "stalled-body", timeoutMs: 20 });
+    assert.equal(result.outcome, "unknown");
+    assert.equal(result.remoteOutcome, "unknown");
+    assert.equal(errorCode(result), "timeout");
+    assert.ok(Date.now() - start < 1000);
+  } finally { clearTimeout(keepAlive); }
+});
+
+test("pre-dispatch cancellation does not execute a mutation", async () => {
+  let calls = 0;
+  const transport = new GitHubTransport(config, { fetch: async () => { calls++; return response({}); } });
+  const result = await transport.restWrite({ method: "POST", path: "/mutation" }, { correlationId: "already-cancelled", signal: AbortSignal.abort() });
+  assert.equal(result.remoteOutcome, "not_accepted");
+  assert.equal(calls, 0);
 });

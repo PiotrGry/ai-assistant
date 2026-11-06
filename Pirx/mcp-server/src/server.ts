@@ -1,5 +1,6 @@
 import { managedRuntimeBinding } from "./runtime-binding.js";
 import { McpServer } from "@modelcontextprotocol/server";
+import { resolveToolProfile, toolProfileAllows } from "@pirx/config";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -40,6 +41,7 @@ import { registerOrchestratorTools, SqliteExecutionObservabilityToolPort, Sqlite
 import { registerResourceTools, SqliteResourceReportPort, type ResourceReportPort } from "./tools/resources.js";
 import { registerOrchestratorServiceTool, SystemdOrchestratorServicePort, type OrchestratorServicePort } from "./tools/orchestrator-service.js";
 import { registerOrchestratorLogTool, SystemdOrchestratorLogsPort, type OrchestratorLogsPort } from "./tools/orchestrator-logs.js";
+import { SingleUseHostAuthorization } from "./authorization.js";
 import { CodexCliRunner } from "@pirx/orchestrator";
 import {
   FileGitHubFailureHandoffPocStore,
@@ -55,6 +57,8 @@ export interface McpServerOptions {
   readonly calendar?: CalendarOperations;
   readonly githubPocTransport?: GitHubPocTransport;
   readonly githubPocConfig?: GitHubConfig;
+  readonly authorizationSecret?: string;
+  /** @deprecated Use authorizationSecret. Kept for existing embedded callers. */
   readonly githubAuthorizationSecret?: string;
   readonly githubShipmentPocConfig?: GitHubConfig;
   readonly githubShipmentPocTransport?: GitHubShipmentPocTransport;
@@ -76,8 +80,14 @@ function unavailableCalendar(message: string): CalendarOperations {
 
 export function createMcpServer(options: McpServerOptions = {}): McpServer {
   const environment = options.environment ?? process.env;
+  const toolProfile = resolveToolProfile(environment);
+  const personalTools = toolProfileAllows(toolProfile, "personal");
+  const developmentTools = toolProfileAllows(toolProfile, "development");
+  const operationsTools = toolProfileAllows(toolProfile, "operations");
+  const authorizationSecret = options.authorizationSecret ?? options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET;
+  const singleUseAuthorization = new SingleUseHostAuthorization(authorizationSecret);
   const config = loadMcpServerConfig(environment);
-  const checkBinding = managedRuntimeBinding(config.orchestratorDatabasePath, environment);
+  const checkBinding = managedRuntimeBinding(config.orchestratorDatabasePath, environment, config.orchestratorProfilePath);
   const obsidianVault =
     options.obsidianVault ??
     (config.obsidianVaultPath === undefined
@@ -95,24 +105,33 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   });
 
   registerHelloTool(server);
-  registerConversationLog(server, config.orchestratorDatabasePath, config.orchestratorConfigurationError, checkBinding);
-  registerTaskHistory(server, config.orchestratorDatabasePath, config.orchestratorConfigurationError, checkBinding);
   registerSystemTools(server);
-  registerObsidianTools(server, obsidianVault);
-  registerCalendarTools(server, calendar);
-  registerOrchestratorTools(server, {
-    port: options.orchestratorControlPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteOrchestratorControlToolPort(config.orchestratorDatabasePath, checkBinding)),
-    observabilityPort: options.executionObservabilityPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteExecutionObservabilityToolPort(config.orchestratorDatabasePath, checkBinding)),
-    authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
-    ...(config.orchestratorConfigurationError === undefined ? {} : { configurationError: config.orchestratorConfigurationError }),
-  });
-  registerResourceTools(server, { port: options.resourceReportPort ?? new SqliteResourceReportPort(config.resourceDatabasePath) });
-  registerOrchestratorLogTool(server, options.orchestratorLogsPort ?? new SystemdOrchestratorLogsPort({ environment }));
-  registerOrchestratorServiceTool(server, {
-    port: options.orchestratorServicePort ?? new SystemdOrchestratorServicePort({ environment, checkBinding }),
-    ...(config.orchestratorConfigurationError === undefined ? {} : { configurationError: config.orchestratorConfigurationError }),
-    authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
-  });
+  if (personalTools) {
+    registerObsidianTools(server, obsidianVault, singleUseAuthorization);
+    registerCalendarTools(server, calendar, singleUseAuthorization);
+  }
+  if (developmentTools) {
+    registerConversationLog(server, config.orchestratorDatabasePath, config.orchestratorConfigurationError, checkBinding);
+    registerTaskHistory(server, config.orchestratorDatabasePath, config.orchestratorConfigurationError, checkBinding);
+  }
+  if (operationsTools) {
+    registerOrchestratorTools(server, {
+      port: options.orchestratorControlPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteOrchestratorControlToolPort(config.orchestratorDatabasePath, checkBinding)),
+      observabilityPort: options.executionObservabilityPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteExecutionObservabilityToolPort(config.orchestratorDatabasePath, checkBinding)),
+      authorizationSecret,
+      ...(config.orchestratorConfigurationSource === undefined ? {} : { configuration: { source: config.orchestratorConfigurationSource, serviceManaged: environment.PIRX_ORCHESTRATOR_SERVICE_ENABLED === "true" } }),
+      ...(config.orchestratorConfigurationCode === undefined ? {} : { configurationCode: config.orchestratorConfigurationCode }),
+      ...(config.orchestratorConfigurationError === undefined ? {} : { configurationError: config.orchestratorConfigurationError }),
+    });
+    registerResourceTools(server, { port: options.resourceReportPort ?? new SqliteResourceReportPort(config.resourceDatabasePath) });
+    registerOrchestratorLogTool(server, options.orchestratorLogsPort ?? new SystemdOrchestratorLogsPort({ environment }));
+    registerOrchestratorServiceTool(server, {
+      port: options.orchestratorServicePort ?? new SystemdOrchestratorServicePort({ environment, checkBinding }),
+      ...(config.orchestratorConfigurationError === undefined ? {} : { configurationError: config.orchestratorConfigurationError }),
+      authorizationSecret,
+    });
+  }
+  if (!developmentTools) return server;
   // Issue tools are always listed; without configuration they return a controlled
   // `configuration` error naming what is missing instead of silently disappearing.
   let githubConfig = options.githubPocConfig;
@@ -144,7 +163,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
     : new GitHubActionsGateway(transport, githubConfig);
   registerGitHubIssueTools(server, {
     configurationError: githubConfigurationError,
-    authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
+    authorizationSecret,
     reader: githubReader,
     mutator: githubMutator,
   });
@@ -153,8 +172,8 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
     gateway: githubActionsGateway,
     configurationError: githubConfigurationError,
   });
-  const shipmentPocEnabled = options.githubShipmentPocConfig !== undefined || ["1", "true"].includes(environment.PIRX_GITHUB_SHIPMENT_POC?.trim().toLowerCase() ?? "");
-  const shipmentCycleEnabled = ["1", "true"].includes(environment.PIRX_GITHUB_SHIPMENT_CYCLE?.trim().toLowerCase() ?? "");
+  const shipmentPocEnabled = operationsTools && (options.githubShipmentPocConfig !== undefined || ["1", "true"].includes(environment.PIRX_GITHUB_SHIPMENT_POC?.trim().toLowerCase() ?? ""));
+  const shipmentCycleEnabled = operationsTools && ["1", "true"].includes(environment.PIRX_GITHUB_SHIPMENT_CYCLE?.trim().toLowerCase() ?? "");
   const shipmentEnabled = shipmentPocEnabled || shipmentCycleEnabled;
   let shipmentConfig = options.githubShipmentPocConfig;
   if (shipmentEnabled && shipmentConfig === undefined && githubConfig !== undefined) {
@@ -173,7 +192,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
       config: shipmentConfig,
       gateway: shipmentGateway,
       store: options.githubShipmentPocStore ?? new FileGitHubShipmentPocStore(stateFile),
-      authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
+      authorizationSecret,
       ...(githubConfigurationError === undefined ? {} : { configurationError: githubConfigurationError }),
     });
   }
@@ -181,7 +200,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
     registerGitHubShipmentCycleTool(server, {
       config: shipmentConfig,
       transport: shipmentTransport,
-      authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
+      authorizationSecret,
       environment,
       databasePath: config.orchestratorDatabasePath,
       checkBinding,
@@ -189,7 +208,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
       ...(githubConfigurationError === undefined ? {} : { configurationError: githubConfigurationError }),
     });
   }
-  const failureHandoffEnabled = options.githubFailureHandoffPocConfig !== undefined || ["1", "true"].includes(environment.PIRX_GITHUB_FAILURE_HANDOFF_POC?.trim().toLowerCase() ?? "");
+  const failureHandoffEnabled = operationsTools && (options.githubFailureHandoffPocConfig !== undefined || ["1", "true"].includes(environment.PIRX_GITHUB_FAILURE_HANDOFF_POC?.trim().toLowerCase() ?? ""));
   let failureHandoffConfig = options.githubFailureHandoffPocConfig;
   if (failureHandoffEnabled && failureHandoffConfig === undefined && githubConfig !== undefined) {
     failureHandoffConfig = { ...githubConfig, owner: "PiotrGry", repository: "zdrovena-reconciliation" };
@@ -207,17 +226,17 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
       gateway: failureHandoffTransport,
       store: options.githubFailureHandoffPocStore ?? new FileGitHubFailureHandoffPocStore(stateFile),
       codex: new CodexCliRunner(environment.PIRX_CODEX_EXECUTABLE === undefined ? {} : { executable: environment.PIRX_CODEX_EXECUTABLE }),
-      authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
+      authorizationSecret,
       ...(githubConfigurationError === undefined ? {} : { configurationError: githubConfigurationError }),
     });
   }
-  if ((environment.PIRX_GITHUB_POC_ISSUE?.trim().length ?? 0) > 0) {
+  if (operationsTools && (environment.PIRX_GITHUB_POC_ISSUE?.trim().length ?? 0) > 0) {
     registerGitHubPocTool(server, {
       issue: config.githubPocIssue,
       config: githubConfig,
       transport,
       configurationError: config.githubPocConfigurationError ?? githubConfigurationError,
-      authorizationSecret: options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET,
+      authorizationSecret,
       reader: githubReader,
       mutator: githubMutator,
     });

@@ -20,19 +20,30 @@ wywołania modelu. Brak odpowiedzi oznacza błąd narzędzia; worker powinien
 zwrócić BLOCKED, jeśli nie może kontynuować bez wyjaśnienia.
 
 Pytania, odpowiedzi i błędy są zapisywane po redakcji sekretów w tabeli
-`runtime_agent_questions` w `runtime.sqlite` (migracja 32). Czat odczytuje
-historię narzędziem `pirx_agent_conversation` z `taskId` i kursorem `afterRow`.
-`pending` oznacza wywołanie bez zapisanego wyniku, również po przerwaniu procesu.
-Ta funkcja nie wysyła automatycznych powiadomień do TUI.
+`runtime_agent_questions` w `runtime.sqlite` (utworzonej w migracji 32,
+rozszerzonej o recovery w migracji 34). Czat odczytuje po jednym ograniczonym
+wpisie narzędziem `pirx_agent_conversation` z `taskId` i stabilnym kursorem
+`afterRow`/`nextAfterRow`. `pending_status` rozróżnia aktywnego właściciela,
+osierocone wywołanie i właściciela, którego nie da się bezpiecznie potwierdzić.
+Replay tego samego `requestId` nie uruchamia drugiej konsultacji; udowodniony
+martwy lokalny proces kończy rekord jako `process_interrupted`. Ta funkcja nie
+wysyła automatycznych powiadomień do TUI.
 
-Po aktualizacji trzeba zbudować cały workspace (`pnpm build`) i wdrożyć
-razem pakiety orchestrator, mcp-server oraz agent. Stary runtime ze schematem
-31 nie może otwierać bazy po migracji 32; przed wdrożeniem zachowaj kopię bazy.
+Po aktualizacji trzeba zbudować cały workspace (`pnpm build`) i wdrożyć razem
+pakiety orchestrator, mcp-server oraz agent. Starszy build nie może otwierać
+bazy po migracji 34; przed wdrożeniem zachowaj zweryfikowaną kopię bazy i
+uruchom jawny tryb migracji bieżącym buildem.
 
 Docelowy runtime lokalnej asystentki składa się z dwóch procesów:
 
 - `agent` — rozmowa z Ollamą, pętla wywołań narzędzi i logi sesji,
 - `mcp-server` — narzędzia udostępniane agentowi przez MCP po `stdio`.
+
+Jeżeli MCP nie uruchomi się albo zakończy proces, chat pozostaje dostępny bez
+narzędzi i pokazuje stan niedostępności. Kolejna tura wykonuje ograniczony
+reconnect i ponownie pobiera katalog narzędzi. Bezpieczny odczyt może zostać
+powtórzony jeden raz po utracie połączenia; mutacja po dispatch nigdy nie jest
+automatycznie ponawiana i pozostaje w stanie niepewnym do reconciliation.
 
 Pythonowy katalog `pirx-mcp` pozostaje referencją na czas migracji.
 
@@ -59,6 +70,11 @@ task pirx:test
 task pirx:start
 ```
 
+Pełny kontrakt źródeł konfiguracji, ich pierwszeństwa, właścicieli oraz
+przekazywania pomiędzy procesami opisuje
+[`docs/configuration.md`](docs/configuration.md). Nie utrzymuj osobnych kopii
+tych samych ustawień w skryptach uruchomieniowych.
+
 Nowoczesny interfejs terminalowy uruchom osobno:
 
 ```bash
@@ -66,12 +82,32 @@ pnpm build
 pnpm tui
 ```
 
+Każda sesja ma jeden jawny profil narzędzi MCP:
+
+- `personal` (domyślny dla bezpośredniego `pnpm start`/`pnpm tui`) — system,
+  prywatny Obsidian i Google Calendar;
+- `development` — system, GitHub Issues/Actions oraz historia Tasków,
+  Attemptów i konsultacji;
+- `operations` — zakres development oraz status, diagnostyka, logi, zasoby i
+  sterowanie daemonem/shipmentem.
+
+Profile prywatny i operatorski nigdy nie są łączone. Nieznane
+`PIRX_TOOL_PROFILE` zatrzymuje start zamiast rozszerzać dostęp. Zwykłe
+`task Pirx` jawnie uruchamia dotychczasowy workflow orkiestracji jako
+`operations`; dostępne są też `task Pirx:personal`, `task Pirx:development` i
+`task Pirx:operations`. CLI i TUI używają tego samego resolvera, a MCP rejestruje
+wyłącznie narzędzia z rozstrzygniętego profilu, więc wywołanie narzędzia spoza
+profilu jest odrzucane przed handlerem. Dynamiczny wybór narzędzi w trakcie tury
+pozostaje poza tym zakresem.
+
 W TUI Enter wysyła wiadomość, Shift+Enter dodaje nową linię, Ctrl+O otwiera
-listę modeli zainstalowanych w Ollamie, a Ctrl+C kończy sesję. Pełnoekranowy
-widok pokazuje ostatnią część rozmowy, a pełna historia trafia również do
-zwykłego bufora terminala: kółko myszy przewija, przeciągnięcie zaznacza tekst,
-a Cmd+C (macOS) lub Ctrl+Shift+C (Linux/Windows) kopiuje zaznaczenie. `pnpm
-start` pozostaje dotychczasowym interfejsem CLI.
+listę modeli zainstalowanych w Ollamie, a Ctrl+C kończy sesję. Każdy zakończony
+element rozmowy trafia dokładnie raz do zwykłego bufora terminala: kółko myszy
+przewija, przeciągnięcie zaznacza tekst, a Cmd+C (macOS) lub Ctrl+Shift+C
+(Linux/Windows) kopiuje zaznaczenie. Przy restarcie TUI odtwarza do 50 ostatnich
+pełnych tur tylko w trybie `full_local`; jest to historia interfejsu, nie
+wznowienie kontekstu modelu, i nie wykonuje ponownie narzędzi. `pnpm start`
+pozostaje dotychczasowym interfejsem CLI.
 
 Agent domyślnie używa modelu `hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL` i Ollamy pod `http://localhost:11434`. Ustawienia można nadpisać zmiennymi:
 
@@ -138,8 +174,8 @@ Logi sesji trafiają do głównego katalogu `logs/` i nie są wersjonowane.
 
 ## Obsidian
 
-Domyślnym vaultem jest `Pirx/vault`. Możesz użyć innego vaulta, ustawiając
-zmienną środowiskową przed uruchomieniem:
+Obsidian jest wyłączony, dopóki nie wskażesz jawnie vaulta. Ustaw zmienną
+środowiskową przed uruchomieniem:
 
 ```bash
 export PIRX_OBSIDIAN_VAULT=/bezwzgledna/sciezka/do/vaulta
@@ -191,6 +227,16 @@ Dostępne narzędzia to `calendar_list_calendars`, `calendar_list_events`,
 wyłączny), a wydarzenia czasowe wymagają ISO 8601 z `Z` albo jawnym offsetem.
 Żądania sieciowe mają timeout i nie są automatycznie ponawiane — szczególnie
 tworzenie wydarzeń jest wykonywane najwyżej raz na wywołanie narzędzia.
+
+Każda mutacja Calendar i Obsidian wymaga podpisanej autoryzacji hosta związanej
+z dokładną nazwą narzędzia, celem i skrótem wszystkich argumentów. Jedno
+`operationId` autoryzuje tylko jeden dispatch i jest zużywane przed efektem;
+zmiana argumentów albo ponowne użycie podpisu jest odrzucane. Stabilny klucz
+idempotencji i wynik próby pozostają w trwałym action ledgerze Agenta. Odczyty
+nie wymagają autoryzacji i zachowują dotychczasowy UX. Sekret podpisu jest
+rotowany przy każdym połączeniu MCP, więc autoryzacja ze starego procesu nie
+działa po reconnect. Po wyniku niepewnym Agent nie ponawia mutacji — najpierw
+wymaga uzgodnienia stanu zewnętrznego.
 
 Brak konfiguracji Obsidiana lub Google nie zatrzymuje MCP: odpowiednie
 narzędzie zwróci kontrolowany błąd, a pozostałe pozostaną dostępne.
@@ -247,3 +293,27 @@ zawiera tokenów, logów jobów ani surowych odpowiedzi GitHuba.
 ## LazyVim
 
 W `:LazyExtras` włącz `lang.typescript`, zrestartuj Neovim i otwórz dowolny plik z `agent/src` albo `mcp-server/src`. `:LspInfo` powinno wtedy pokazać `vtsls`; serwer językowy sam odczyta tutejszy `tsconfig` i zależności z workspace.
+
+
+### Explicit Obsidian opt-in
+
+Set `PIRX_OBSIDIAN_VAULT` to the vault you want Pirx to access, either in the
+existing chat profile or the launch environment (explicit environment wins).
+There is no automatic fallback to the repository vault. Missing configuration
+leaves Obsidian unavailable; an invalid configured path fails only the Obsidian
+operation and never selects another vault. Other MCP integrations remain usable.
+
+
+### GitHub write target
+
+A fallback repository is only a read default. To enable mutations, explicitly set
+both `PIRX_GITHUB_OWNER` and `PIRX_GITHUB_REPOSITORY` in the launch environment or
+supported chat profile. Daemon repository entries supply their explicit targets.
+GitHub token transport requires HTTPS; redirects and cross-origin request URLs
+are rejected. Tests use injected transports rather than a production HTTP bypass.
+
+
+`calendar_list_events` returns one bounded page: `events`, `complete`, and optional
+`nextPageToken`. Continue with that token as `pageToken` and unchanged calendar,
+range and page-size parameters. An empty page with a token is not an empty calendar.
+A failed subsequent page is an error, not proof that the previous page was complete.

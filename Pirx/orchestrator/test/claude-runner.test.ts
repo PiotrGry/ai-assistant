@@ -11,7 +11,9 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import {
   ClaudeCodeCliRunner,
+  MINIMUM_CLAUDE_CODE_WORKER_VERSION,
   type ClaudeSpawn,
+  type ClaudeCodeWorkerProfile,
   buildClaudeArguments,
   buildClaudeHandoffArguments,
 } from "../src/index.js";
@@ -264,5 +266,69 @@ test("missing structured output preserves sanitized provider evidence", async ()
     assert.equal(result.diagnostic.code, "missing_structured_output");
     assert.match(result.diagnostic.providerMessage ?? "", /provider fixture/u);
     assert.doesNotMatch(result.diagnostic.providerMessage ?? "", /never-expose/u);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+function workerProfile(cwd: string): ClaudeCodeWorkerProfile {
+  return {
+    schemaVersion: 1,
+    cwd,
+    tools: ["Read", "Edit", "Bash"],
+    allowedTools: ["Read", "Edit", "Bash(node test.js)"],
+    disallowedTools: ["mcp__*"],
+    permissionMode: "dontAsk",
+    maxTurns: 8,
+    remoteName: "origin",
+    assignedBranch: "pirx/test",
+    testCommands: ["node test.js"],
+  };
+}
+
+test("fails closed before code-worker invocation when Claude Code lacks isolation support", async () => {
+  const value = await fixture();
+  let processInvocations = 0;
+  try {
+    const result = await new ClaudeCodeCliRunner({
+      executable: value.executable,
+      environment: { PATH: process.env.PATH, HOME: process.env.HOME },
+      versionProbe: async () => "2.1.59 (Claude Code)",
+      spawnProcess: (file, args, options) => { processInvocations += 1; return spawn(file, [...args], options); },
+    }).runStructured({ requestId: "old-version", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root) });
+    assert.equal(result.outcome, "unsupported_version");
+    assert.equal(result.diagnostic.code, "permission_denied");
+    assert.match(result.diagnostic.providerMessage ?? "", new RegExp(MINIMUM_CLAUDE_CODE_WORKER_VERSION.replaceAll(".", "\\."), "u"));
+    assert.equal(processInvocations, 0);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("runs isolated code workers only after one successful cached compatibility probe", async () => {
+  const value = await fixture();
+  let probes = 0;
+  try {
+    const instance = new ClaudeCodeCliRunner({
+      executable: value.executable,
+      environment: { PATH: process.env.PATH, HOME: process.env.HOME },
+      additionalEnvironment: { PIRX_FAKE_MODE: "success" },
+      versionProbe: async () => { probes += 1; return `${MINIMUM_CLAUDE_CODE_WORKER_VERSION} (Claude Code)`; },
+    });
+    for (const requestId of ["supported-1", "supported-2"]) {
+      const result = await instance.runStructured({ requestId, cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root) });
+      assert.equal(result.outcome, "success");
+    }
+    assert.equal(probes, 1);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("rejects a worker profile bound to a different cwd before probing or spawning", async () => {
+  const value = await fixture();
+  let probes = 0;
+  try {
+    const result = await new ClaudeCodeCliRunner({
+      executable: value.executable,
+      versionProbe: async () => { probes += 1; return `${MINIMUM_CLAUDE_CODE_WORKER_VERSION} (Claude Code)`; },
+    }).runStructured({ requestId: "cwd-mismatch", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(join(value.root, "other")) });
+    assert.equal(result.outcome, "process_error");
+    assert.equal(result.diagnostic.code, "permission_denied");
+    assert.equal(probes, 0);
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });

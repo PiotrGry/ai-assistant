@@ -37,15 +37,17 @@ def snapshot(source: Path, destination: Path, required: set[str]) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--chat-source", type=Path, required=True)
+    parser.add_argument("--gpu-source", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--watch", action="store_true")
     args = parser.parse_args()
     while True:
         failed = False
+        sources = {"pirx.sqlite": args.chat_source, "gpu.sqlite": args.gpu_source}
         for name, required in SOURCES.items():
             try:
-                snapshot(args.source / name, args.destination / name, required)
+                snapshot(sources[name], args.destination / name, required)
                 print(f"snapshot_ready database={name} timestamp={int(time.time())}", flush=True)
             except (OSError, sqlite3.Error, ValueError, TimeoutError) as error:
                 failed = True

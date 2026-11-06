@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 
 export interface GitHubConfig {
   readonly token: string;
+  /** False when the loader supplied a read-only fallback target. */
+  readonly writeTargetExplicit?: boolean;
   readonly owner: string;
   readonly repository: string;
   readonly projectOwner?: string;
@@ -51,9 +53,9 @@ function apiUrl(value: string | undefined): string {
   } catch {
     throw new GitHubConfigurationError("PIRX_GITHUB_API_URL must be a valid URL.");
   }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+  if (parsed.protocol !== "https:") {
     throw new GitHubConfigurationError(
-      "PIRX_GITHUB_API_URL must use http or https.",
+      "PIRX_GITHUB_API_URL must use HTTPS.",
     );
   }
   if (parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "") {
@@ -104,6 +106,7 @@ export function loadGitHubConfig(
   const hostname = githubHostname(apiEndpoint);
   return {
     token: options.tokenProvider?.(hostname) ?? ghAuthToken(hostname),
+    ...((env.PIRX_GITHUB_OWNER?.trim() && env.PIRX_GITHUB_REPOSITORY?.trim()) ? {} : { writeTargetExplicit: false }),
     owner,
     repository,
     ...(projectOwner === undefined ? {} : { projectOwner }),

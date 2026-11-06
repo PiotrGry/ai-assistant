@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { backup, DatabaseSync } from "node:sqlite";
-import { link, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { link, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -46,7 +46,7 @@ function makeTask(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
 }
 
 async function databaseFixture(): Promise<{ directory: string; filename: string }> {
-  const directory = await mkdtemp(join(tmpdir(), "pirx-runtime-storage-test-"));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "pirx-runtime-storage-test-")));
   return { directory, filename: join(directory, "runtime.sqlite") };
 }
 

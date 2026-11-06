@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
-import { createTask, createWorkerFailureDiagnostic, RUNTIME_STORAGE_SCHEMA_VERSION, RuntimeSqliteStore, transitionAttempt, transitionTask } from "@pirx/orchestrator";
+import { createTask, createWorkerFailureDiagnostic, createWorkerRequest, RUNTIME_STORAGE_SCHEMA_VERSION, RuntimeSqliteStore, transitionAttempt, transitionTask, WorkerLifecycleCoordinator } from "@pirx/orchestrator";
 import type { AttemptId, TaskId, ExecutionReportQuery, HostShutdownCommand, OrchestratorControlRequest, OrchestratorStatusSnapshot, UtcTimestamp } from "@pirx/orchestrator";
 
 import { createHostAuthorization, HOST_AUTHORIZATION_META_KEY } from "../src/authorization.js";
@@ -31,7 +31,7 @@ test("MCP reads bounded status and requires exact authorization for pause/resume
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const control = new FakeControl();
   const secret = "orchestrator-test-secret";
-  const server = createMcpServer({ environment: {}, obsidianVault: new ObsidianVault(root), orchestratorControlPort: control, executionObservabilityPort: control, githubAuthorizationSecret: secret });
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations", XDG_CONFIG_HOME: join(root, "config"), PIRX_ORCHESTRATOR_DATABASE: join(root, "runtime.sqlite") }, obsidianVault: new ObsidianVault(root), orchestratorControlPort: control, executionObservabilityPort: control, githubAuthorizationSecret: secret });
   const client = new Client({ name: "pirx-orchestrator-test", version: "0.1.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   context.after(async () => { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); });
@@ -40,6 +40,7 @@ test("MCP reads bounded status and requires exact authorization for pause/resume
   assert.notEqual(status.isError, true);
   assert.equal((status.structuredContent as { snapshot: { activeTask: { issueNumber: number } } }).snapshot.activeTask.issueNumber, 211);
   assert.equal((status.structuredContent as { snapshot: { lastPersistedObservationIncomplete: boolean } }).snapshot.lastPersistedObservationIncomplete, true);
+  assert.deepEqual((status.structuredContent as { configuration: unknown }).configuration, { source: "database_override", serviceManaged: false });
   assert.equal(JSON.stringify(status.structuredContent).includes("prompt"), false);
 
   const report = await client.callTool({ name: "pirx_execution_report", arguments: { from: "2026-10-30T12:00:00.000Z", to: now } });
@@ -67,7 +68,7 @@ test("MCP reads bounded status and requires exact authorization for pause/resume
 test("unconfigured orchestrator tools remain listed and return controlled results", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pirx-orchestrator-unconfigured-"));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createMcpServer({ environment: { XDG_CONFIG_HOME: root }, obsidianVault: new ObsidianVault(root) });
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations", XDG_CONFIG_HOME: root }, obsidianVault: new ObsidianVault(root) });
   const client = new Client({ name: "pirx-orchestrator-unconfigured", version: "0.1.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   context.after(async () => { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); });
@@ -78,9 +79,122 @@ test("unconfigured orchestrator tools remain listed and return controlled result
   const status = await client.callTool({ name: "pirx_orchestrator_status", arguments: {} });
   assert.equal(status.isError, true);
   assert.match(JSON.stringify(status.structuredContent), /unconfigured/u);
+  assert.equal((status.structuredContent as { configurationCode: string }).configurationCode, "missing_configuration");
   const report = await client.callTool({ name: "pirx_execution_report", arguments: {} });
   assert.equal(report.isError, true);
   assert.match(JSON.stringify(report.structuredContent), /unconfigured/u);
+});
+
+test("MCP durably accepts tracked work without starting it and reads the receipt after chat restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-work-intake-mcp-"));
+  const filename = join(root, "runtime.sqlite");
+  const initialized = RuntimeSqliteStore.open({ filename });
+  initialized.close();
+  const secret = "work-intake-secret";
+  const arguments_ = {
+    operationId: "submit-work-246",
+    repository: "PiotrGry/ai-assistant",
+    issueNumber: 246,
+    goal: "Submit tracked work asynchronously",
+    acceptanceCriteria: ["request survives chat restart", "normal Queue creates the Task"],
+    priority: "P1" as const,
+    risk: "Medium" as const,
+    area: "Orchestrator" as const,
+    workType: "Task" as const,
+    queueOrder: 246,
+  };
+  let intakeId = "";
+  const connect = async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations", XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_DATABASE: filename }, authorizationSecret: secret });
+    const client = new Client({ name: "pirx-work-intake-test", version: "1" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    return { client, server };
+  };
+  try {
+    const firstChat = await connect();
+    try {
+      const denied = await firstChat.client.callTool({ name: "pirx_work_submit", arguments: arguments_ });
+      assert.equal(denied.isError, true);
+      const authorization = createHostAuthorization(secret, "pirx_work_submit", arguments_, arguments_.operationId);
+      const accepted = await firstChat.client.callTool({ name: "pirx_work_submit", arguments: arguments_, _meta: { [HOST_AUTHORIZATION_META_KEY]: authorization } });
+      assert.notEqual(accepted.isError, true);
+      assert.equal((accepted.structuredContent as { outcome: string }).outcome, "accepted_pending");
+      intakeId = (accepted.structuredContent as { intake: { id: string; state: string } }).intake.id;
+      assert.equal((accepted.structuredContent as { intake: { state: string } }).intake.state, "accepted");
+      const replay = await firstChat.client.callTool({ name: "pirx_work_submit", arguments: arguments_, _meta: { [HOST_AUTHORIZATION_META_KEY]: authorization } });
+      assert.equal((replay.structuredContent as { intake: { id: string } }).intake.id, intakeId);
+      const conflicting = { ...arguments_, goal: "Different scope" };
+      const conflict = await firstChat.client.callTool({ name: "pirx_work_submit", arguments: conflicting, _meta: { [HOST_AUTHORIZATION_META_KEY]: createHostAuthorization(secret, "pirx_work_submit", conflicting, conflicting.operationId) } });
+      assert.equal(conflict.isError, true);
+      assert.equal((conflict.structuredContent as { outcome: string }).outcome, "conflict");
+    } finally { await firstChat.client.close(); await firstChat.server.close(); }
+
+    const restartedChat = await connect();
+    try {
+      const status = await restartedChat.client.callTool({ name: "pirx_work_status", arguments: { intakeId } });
+      assert.notEqual(status.isError, true);
+      assert.equal((status.structuredContent as { intake: { operationId: string; state: string } }).intake.operationId, arguments_.operationId);
+      assert.equal((status.structuredContent as { intake: { state: string } }).intake.state, "accepted");
+    } finally { await restartedChat.client.close(); await restartedChat.server.close(); }
+    const verify = RuntimeSqliteStore.open({ filename, mode: "existing" });
+    try {
+      const tasks = verify.tasks.list();
+      const attempts = verify.attempts.listByTask("missing");
+      assert.equal(tasks.outcome === "success" ? tasks.value.length : -1, 0);
+      assert.equal(attempts.outcome === "success" ? attempts.value.length : -1, 0);
+    } finally { verify.close(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("MCP lists a durable operator question and accepts one exactly authorized idempotent decision", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-operator-mcp-"));
+  const filename = join(root, "runtime.sqlite");
+  const store = RuntimeSqliteStore.open({ filename });
+  const secret = "operator-decision-secret";
+  context.after(async () => { try { store.close(); } catch { /* already closed */ } await rm(root, { recursive: true, force: true }); });
+  const taskId = "operator-mcp-task" as TaskId;
+  const attemptId = "operator-mcp-attempt" as AttemptId;
+  const branch = "pirx/operator-mcp";
+  const worktree = "/tmp/pirx-operator-mcp";
+  const task = createTask({ id: taskId, githubReference: { owner: "PiotrGry", repository: "ai-assistant", issueNumber: 245 }, goal: "Get one operator decision", scope: "MCP fixture", acceptanceCriteria: ["durable answer"], priority: 1, risk: "medium", requiredCapabilities: ["repository.read"], createdAt: now });
+  if (!task.ok) throw new Error("Task fixture failed");
+  assert.equal(store.tasks.create(task.value).outcome, "success");
+  const started = store.startAttempt(taskId, { id: attemptId, worker: "pirx-worker", provider: "claude-code", branch, worktree }, now);
+  if (started.outcome !== "success") throw new Error("Attempt fixture failed");
+  const request = createWorkerRequest({ task: started.value.task, attempt: started.value.attempt, workerId: "pirx-worker", provider: "claude-code", repository: { owner: "PiotrGry", repository: "ai-assistant" }, workspace: { branch, worktree }, capabilityGrant: { grantedCapabilities: ["repository.read"], resourceScope: { repository: "PiotrGry/ai-assistant", branch, worktree } }, correlationId: "operator-mcp-correlation", limits: { timeoutMs: 30_000, maxOutputBytes: 10_000, maxErrorBytes: 10_000 } });
+  if (!request.ok) throw new Error("Worker request fixture failed");
+  const diagnostic = createWorkerFailureDiagnostic("operator_input_required");
+  const recorded = await new WorkerLifecycleCoordinator(store, { execute: async () => ({ kind: "worker_result", schemaVersion: 1, taskId, attemptId, correlationId: request.value.correlationId, outcome: "BLOCKED", reason: "Should the legacy value be preserved?", diagnostic }) }, { now: () => now }).execute(request.value, new AbortController().signal);
+  assert.equal(recorded.outcome, "terminal_recorded");
+
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations", XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_DATABASE: filename }, authorizationSecret: secret });
+  const client = new Client({ name: "pirx-operator-decision-test", version: "1" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const listed = await client.callTool({ name: "pirx_operator_questions", arguments: {} });
+    assert.notEqual(listed.isError, true);
+    const questions = (listed.structuredContent as { questions: Array<{ id: string; version: number; prompt: string }> }).questions;
+    assert.equal(questions.length, 1);
+    assert.equal(questions[0]?.prompt, "Should the legacy value be preserved?");
+    const arguments_ = { questionId: questions[0]!.id, expectedVersion: questions[0]!.version, operationId: "operator-mcp-answer-1", answer: "Preserve it until the next schema version." };
+    const denied = await client.callTool({ name: "pirx_operator_decision", arguments: arguments_ });
+    assert.equal(denied.isError, true);
+    assert.equal(store.operatorDecisions.listOpen().outcome, "success");
+    const authorization = createHostAuthorization(secret, "pirx_operator_decision", arguments_, arguments_.operationId);
+    const accepted = await client.callTool({ name: "pirx_operator_decision", arguments: arguments_, _meta: { [HOST_AUTHORIZATION_META_KEY]: authorization } });
+    assert.notEqual(accepted.isError, true);
+    assert.equal((accepted.structuredContent as { outcome: string }).outcome, "accepted");
+    const replay = await client.callTool({ name: "pirx_operator_decision", arguments: arguments_, _meta: { [HOST_AUTHORIZATION_META_KEY]: authorization } });
+    assert.notEqual(replay.isError, true);
+    assert.equal((replay.structuredContent as { outcome: string }).outcome, "replayed");
+    const after = await client.callTool({ name: "pirx_operator_questions", arguments: {} });
+    assert.deepEqual((after.structuredContent as { questions: unknown[] }).questions, []);
+    const checkpoint = store.checkpoints.latestByTask(taskId);
+    assert.equal(checkpoint.outcome, "success");
+    if (checkpoint.outcome === "success") assert.match(checkpoint.value.resumeInstruction, /Preserve it until/u);
+  } finally { await client.close(); await server.close(); }
 });
 
 test("MCP reads a blocked Attempt diagnostic from SQLite and distinguishes a failed read", async (context) => {
@@ -105,7 +219,7 @@ test("MCP reads a blocked Attempt diagnostic from SQLite and distinguishes a fai
   assert.equal(store.selection.synchronize({ taskId: task.value.id, queueOrder: 10, dependencyState: "known", blockers: [], synchronizedAt: at }).outcome, "success");
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createMcpServer({ environment: { XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_DATABASE: filename } });
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations", XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_DATABASE: filename } });
   const client = new Client({ name: "pirx-blocked-status-test", version: "0.1.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
@@ -168,7 +282,7 @@ test("MCP Task history pages persisted Attempts and resolves the repository expl
     assert.equal(store.tasks.update(done.value, { state: "in_progress", updatedAt: second.value.task.updatedAt }).outcome, "success");
   } finally { store.close(); }
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createMcpServer({ environment: { XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_DATABASE: filename } });
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations", XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_DATABASE: filename } });
   const client = new Client({ name: "pirx-task-history-test", version: "1" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   const lookup = async (arguments_: Record<string, unknown>) => {
