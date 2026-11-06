@@ -81,6 +81,34 @@ test("chat forwards runtime configuration to the real MCP child and can pause/re
     assert.equal(JSON.parse(result.text).requestedMode, action === "pause" ? "paused" : "running");
   }
   assert.equal(client.isReadOnlyTool("pirx_orchestrator_start"), false);
+  const workArguments = {
+    operationId: "cross-process-work-231",
+    repository: "PiotrGry/ai-assistant",
+    issueNumber: 231,
+    goal: "Add Pirx CI checks and cross-process acceptance tests",
+    acceptanceCriteria: ["request survives chat restart", "normal Queue remains the only dispatcher"],
+    priority: "P2",
+    risk: "Medium",
+    area: "Orchestrator",
+    workType: "Task",
+    queueOrder: 231,
+  };
+  const submitted = await client.callTool("pirx_work_submit", workArguments, { operationId: workArguments.operationId });
+  assert.equal(submitted.isError, false, submitted.text);
+  const receipt = JSON.parse(submitted.text) as { outcome: string; intake: { id: string; state: string } };
+  assert.equal(receipt.outcome, "accepted_pending");
+  assert.equal(receipt.intake.state, "accepted");
+  const tasksBeforeRestart = store.tasks.list();
+  assert.equal(tasksBeforeRestart.outcome === "success" ? tasksBeforeRestart.value.length : -1, 0);
+  await client.close();
+
+  const restarted = new PirxMcpClient(resolve(directory, "mcp-server", "dist", "index.js"), 30_000, 12_000, undefined, profile);
+  context.after(async () => { await restarted.close(); });
+  await restarted.connect();
+  const persisted = await restarted.callTool("pirx_work_status", { intakeId: receipt.intake.id });
+  assert.equal(persisted.isError, false, persisted.text);
+  assert.equal((JSON.parse(persisted.text) as { intake: { operationId: string; state: string } }).intake.operationId, workArguments.operationId);
+  assert.equal((JSON.parse(persisted.text) as { intake: { state: string } }).intake.state, "accepted");
 });
 
 test("błędna nazwa narzędzia nie wyłącza serwera MCP", async (context) => {
