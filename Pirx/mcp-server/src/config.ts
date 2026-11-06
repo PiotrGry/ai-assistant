@@ -1,4 +1,4 @@
-import { HeadlessConfigurationError, readHeadlessOrchestratorConfig, resolveRuntimeStoragePath, RuntimeStorageError } from "@pirx/orchestrator";
+import { HeadlessConfigurationError, readHeadlessOrchestratorConfig, resolveHeadlessOrchestratorConfigSelection, resolveRuntimeStoragePath, RuntimeStorageError } from "@pirx/orchestrator";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
@@ -14,6 +14,9 @@ export interface GoogleCalendarConfig {
 export interface McpServerConfig {
   readonly obsidianVaultPath: string | undefined;
   readonly orchestratorDatabasePath: string | undefined;
+  readonly orchestratorProfilePath?: string;
+  readonly orchestratorConfigurationSource?: "explicit_profile" | "default_profile" | "database_override";
+  readonly orchestratorConfigurationCode?: string;
   readonly orchestratorConfigurationError?: string;
   readonly resourceDatabasePath: string;
   readonly googleCalendar: GoogleCalendarConfig | undefined;
@@ -78,15 +81,26 @@ export function loadMcpServerConfig(
   const githubPocIssue = optionalPositiveInteger(environment.PIRX_GITHUB_POC_ISSUE);
 
   let orchestratorDatabasePath: string | undefined;
+  let orchestratorProfilePath: string | undefined;
+  let orchestratorConfigurationSource: McpServerConfig["orchestratorConfigurationSource"];
+  let orchestratorConfigurationCode: string | undefined;
   let orchestratorConfigurationError: string | undefined;
   try {
+    const selection = resolveHeadlessOrchestratorConfigSelection(environment);
     const runtime = readHeadlessOrchestratorConfig(environment);
-    if (runtime !== undefined || (environment.PIRX_ORCHESTRATOR_SERVICE_ENABLED !== "true" && optionalPath(environment.PIRX_ORCHESTRATOR_DATABASE) !== undefined)) {
+    if (runtime !== undefined) {
       orchestratorDatabasePath = resolveRuntimeStoragePath(environment, runtime?.databasePath);
+      orchestratorProfilePath = selection.filename;
+      orchestratorConfigurationSource = selection.source;
+    } else if (environment.PIRX_ORCHESTRATOR_SERVICE_ENABLED !== "true" && optionalPath(environment.PIRX_ORCHESTRATOR_DATABASE) !== undefined) {
+      orchestratorDatabasePath = resolveRuntimeStoragePath(environment);
+      orchestratorConfigurationSource = "database_override";
     } else {
+      orchestratorConfigurationCode = "missing_configuration";
       orchestratorConfigurationError = "Configure pirx/orchestrator.json or set PIRX_ORCHESTRATOR_CONFIG to the daemon's profile.";
     }
   } catch (error: unknown) {
+    orchestratorConfigurationCode = error instanceof HeadlessConfigurationError || error instanceof RuntimeStorageError ? error.code : "configuration_error";
     orchestratorConfigurationError = error instanceof HeadlessConfigurationError || error instanceof RuntimeStorageError
       ? error.message
       : "Orchestrator runtime configuration could not be verified.";
@@ -96,6 +110,9 @@ export function loadMcpServerConfig(
     obsidianVaultPath:
       optionalPath(environment.PIRX_OBSIDIAN_VAULT),
     orchestratorDatabasePath,
+    ...(orchestratorProfilePath === undefined ? {} : { orchestratorProfilePath }),
+    ...(orchestratorConfigurationSource === undefined ? {} : { orchestratorConfigurationSource }),
+    ...(orchestratorConfigurationCode === undefined ? {} : { orchestratorConfigurationCode }),
     ...(orchestratorConfigurationError === undefined ? {} : { orchestratorConfigurationError }),
     resourceDatabasePath: optionalPath(environment.PIRX_GPU_DB) ?? resolve(dataHome, "pirx", "gpu.sqlite"),
     googleCalendar,

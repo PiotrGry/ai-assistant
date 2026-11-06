@@ -87,7 +87,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   const authorizationSecret = options.authorizationSecret ?? options.githubAuthorizationSecret ?? environment.PIRX_MCP_AUTH_SECRET;
   const singleUseAuthorization = new SingleUseHostAuthorization(authorizationSecret);
   const config = loadMcpServerConfig(environment);
-  const checkBinding = managedRuntimeBinding(config.orchestratorDatabasePath, environment);
+  const checkBinding = managedRuntimeBinding(config.orchestratorDatabasePath, environment, config.orchestratorProfilePath);
   const obsidianVault =
     options.obsidianVault ??
     (config.obsidianVaultPath === undefined
@@ -119,6 +119,8 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
       port: options.orchestratorControlPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteOrchestratorControlToolPort(config.orchestratorDatabasePath, checkBinding)),
       observabilityPort: options.executionObservabilityPort ?? (config.orchestratorDatabasePath === undefined ? undefined : new SqliteExecutionObservabilityToolPort(config.orchestratorDatabasePath, checkBinding)),
       authorizationSecret,
+      ...(config.orchestratorConfigurationSource === undefined ? {} : { configuration: { source: config.orchestratorConfigurationSource, serviceManaged: environment.PIRX_ORCHESTRATOR_SERVICE_ENABLED === "true" } }),
+      ...(config.orchestratorConfigurationCode === undefined ? {} : { configurationCode: config.orchestratorConfigurationCode }),
       ...(config.orchestratorConfigurationError === undefined ? {} : { configurationError: config.orchestratorConfigurationError }),
     });
     registerResourceTools(server, { port: options.resourceReportPort ?? new SqliteResourceReportPort(config.resourceDatabasePath) });

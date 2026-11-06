@@ -31,7 +31,7 @@ test("MCP reads bounded status and requires exact authorization for pause/resume
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const control = new FakeControl();
   const secret = "orchestrator-test-secret";
-  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations" }, obsidianVault: new ObsidianVault(root), orchestratorControlPort: control, executionObservabilityPort: control, githubAuthorizationSecret: secret });
+  const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: "operations", XDG_CONFIG_HOME: join(root, "config"), PIRX_ORCHESTRATOR_DATABASE: join(root, "runtime.sqlite") }, obsidianVault: new ObsidianVault(root), orchestratorControlPort: control, executionObservabilityPort: control, githubAuthorizationSecret: secret });
   const client = new Client({ name: "pirx-orchestrator-test", version: "0.1.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   context.after(async () => { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); });
@@ -40,6 +40,7 @@ test("MCP reads bounded status and requires exact authorization for pause/resume
   assert.notEqual(status.isError, true);
   assert.equal((status.structuredContent as { snapshot: { activeTask: { issueNumber: number } } }).snapshot.activeTask.issueNumber, 211);
   assert.equal((status.structuredContent as { snapshot: { lastPersistedObservationIncomplete: boolean } }).snapshot.lastPersistedObservationIncomplete, true);
+  assert.deepEqual((status.structuredContent as { configuration: unknown }).configuration, { source: "database_override", serviceManaged: false });
   assert.equal(JSON.stringify(status.structuredContent).includes("prompt"), false);
 
   const report = await client.callTool({ name: "pirx_execution_report", arguments: { from: "2026-10-30T12:00:00.000Z", to: now } });
@@ -78,6 +79,7 @@ test("unconfigured orchestrator tools remain listed and return controlled result
   const status = await client.callTool({ name: "pirx_orchestrator_status", arguments: {} });
   assert.equal(status.isError, true);
   assert.match(JSON.stringify(status.structuredContent), /unconfigured/u);
+  assert.equal((status.structuredContent as { configurationCode: string }).configurationCode, "missing_configuration");
   const report = await client.callTool({ name: "pirx_execution_report", arguments: {} });
   assert.equal(report.isError, true);
   assert.match(JSON.stringify(report.structuredContent), /unconfigured/u);

@@ -87,9 +87,13 @@ const snapshotSchema = z.object({
   diagnostics: z.array(z.object({ sequence: z.number().int().positive(), recordedAt: z.string(), event: z.string(), outcome: z.string(), reason: z.string().optional(), details: z.unknown().optional() })).optional(),
   schemaVersion: z.literal(1), requestedMode: z.enum(["running", "paused"]), observedState: z.enum(["starting", "running", "paused", "stopping", "stopped", "error"]), version: z.number().int().nonnegative(), heartbeatAt: z.string().optional(), heartbeatStale: z.boolean(), lastPersistedObservationIncomplete: z.boolean().optional(), lastQueueOutcome: z.string().optional(), lastDeliveryOutcome: z.string().optional(), lastCycleOutcome: z.string().optional(), activeTask: entitySchema.optional(), activeAttempt: entitySchema.optional(), activeLease: entitySchema.optional(), nextQueuedTask: entitySchema.optional(), activeRelease: entitySchema.optional(), hostShutdown: hostShutdownSchema.optional(),
 });
+const configurationSummarySchema = z.object({
+  source: z.enum(["explicit_profile", "default_profile", "database_override"]),
+  serviceManaged: z.boolean(),
+});
 const statusOutputSchema = z.union([
-  z.object({ outcome: z.literal("success"), configured: z.literal(true), snapshot: snapshotSchema }),
-  z.object({ outcome: z.enum(["unconfigured", "unavailable"]), configured: z.boolean(), message: z.string() }),
+  z.object({ outcome: z.literal("success"), configured: z.literal(true), configuration: configurationSummarySchema.optional(), snapshot: snapshotSchema }),
+  z.object({ outcome: z.enum(["unconfigured", "unavailable"]), configured: z.boolean(), configuration: configurationSummarySchema.optional(), configurationCode: z.string().optional(), message: z.string() }),
 ]);
 const controlOutputSchema = z.union([
   z.object({ outcome: z.enum(["applied", "replayed"]), operationId: z.string(), requestedMode: z.enum(["running", "paused"]), version: z.number().int().positive(), message: z.string() }),
@@ -130,7 +134,7 @@ const reportOutputSchema = z.union([
 
 function structured(value: unknown, isError = false) { return { content: [{ type: "text" as const, text: JSON.stringify(value) }], structuredContent: value, ...(isError ? { isError: true } : {}) }; }
 
-export function registerOrchestratorTools(server: McpServer, options: { readonly port: OrchestratorControlToolPort | undefined; readonly observabilityPort: ExecutionObservabilityToolPort | undefined; readonly authorizationSecret: string | undefined; readonly configurationError?: string; readonly now?: () => UtcTimestamp }): void {
+export function registerOrchestratorTools(server: McpServer, options: { readonly port: OrchestratorControlToolPort | undefined; readonly observabilityPort: ExecutionObservabilityToolPort | undefined; readonly authorizationSecret: string | undefined; readonly configuration?: { readonly source: "explicit_profile" | "default_profile" | "database_override"; readonly serviceManaged: boolean }; readonly configurationCode?: string; readonly configurationError?: string; readonly now?: () => UtcTimestamp }): void {
   const now = options.now ?? (() => new Date().toISOString() as UtcTimestamp);
   server.registerTool("pirx_orchestrator_status", {
     title: "Read Pirx orchestrator status",
@@ -139,9 +143,11 @@ export function registerOrchestratorTools(server: McpServer, options: { readonly
     outputSchema: statusOutputSchema,
     annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
   }, async (input) => {
-    if (options.port === undefined) return structured({ outcome: "unconfigured", configured: false, message: options.configurationError ?? "PIRX_ORCHESTRATOR_DATABASE is not configured." }, true);
+    if (options.port === undefined) return structured({ outcome: "unconfigured", configured: false, ...(options.configuration === undefined ? {} : { configuration: options.configuration }), ...(options.configurationCode === undefined ? {} : { configurationCode: options.configurationCode }), message: options.configurationError ?? "PIRX_ORCHESTRATOR_DATABASE is not configured." }, true);
     const value = options.port.status(now(), input.staleAfterMs ?? 120_000);
-    return value.outcome === "success" ? structured({ outcome: "success", configured: true, snapshot: value.value }) : structured({ outcome: "unavailable", configured: true, message: value.message }, true);
+    return value.outcome === "success"
+      ? structured({ outcome: "success", configured: true, ...(options.configuration === undefined ? {} : { configuration: options.configuration }), snapshot: value.value })
+      : structured({ outcome: "unavailable", configured: true, ...(options.configuration === undefined ? {} : { configuration: options.configuration }), ...(options.configurationCode === undefined ? {} : { configurationCode: options.configurationCode }), message: value.message }, true);
   });
 
   server.registerTool("pirx_orchestrator_diagnostic", {

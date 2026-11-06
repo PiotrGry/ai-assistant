@@ -32,6 +32,8 @@ test("MCP configuration uses the existing environment-based approach", () => {
   assert.equal(config.googleCalendar.authorizationTimeoutMs, 9_876);
   assert.equal(config.githubPocIssue, 179);
   assert.equal(config.orchestratorDatabasePath, resolve("/tmp/pirx-runtime.sqlite"));
+  assert.equal(config.orchestratorConfigurationSource, "database_override");
+  assert.equal(config.orchestratorProfilePath, undefined);
   assert.equal(config.resourceDatabasePath, resolve("/tmp/pirx-resources.sqlite"));
   assert.equal(config.githubPocConfigurationError, undefined);
 });
@@ -98,13 +100,17 @@ test("MCP and the daemon use the same runtime profile and reject a conflicting l
   const environment = { XDG_CONFIG_HOME: root, PIRX_ORCHESTRATOR_SERVICE_ENABLED: "true" };
   const config = loadMcpServerConfig(environment);
   assert.equal(config.orchestratorDatabasePath, join(root, "runtime.sqlite"));
+  assert.equal(config.orchestratorProfilePath, path);
+  assert.equal(config.orchestratorConfigurationSource, "default_profile");
   const conflict = loadMcpServerConfig({ ...environment, PIRX_ORCHESTRATOR_DATABASE: join(root, "wrong.sqlite") });
   assert.equal(conflict.orchestratorDatabasePath, undefined);
+  assert.equal(conflict.orchestratorConfigurationCode, "invalid_configuration");
   assert.match(conflict.orchestratorConfigurationError ?? "", /conflicts/u);
   const { loadHeadlessOrchestratorConfig } = await import("@pirx/orchestrator");
   assert.equal((await loadHeadlessOrchestratorConfig(environment)).databasePath, config.orchestratorDatabasePath);
   const missing = loadMcpServerConfig({ ...environment, PIRX_ORCHESTRATOR_CONFIG: join(root, "missing.json"), PIRX_ORCHESTRATOR_DATABASE: join(root, "runtime.sqlite") });
   assert.equal(missing.orchestratorDatabasePath, undefined);
+  assert.equal(missing.orchestratorConfigurationCode, "read_failure");
   assert.match(missing.orchestratorConfigurationError ?? "", /could not be read/u);
 });
 
