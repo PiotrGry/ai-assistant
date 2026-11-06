@@ -130,7 +130,25 @@ function positiveTimeout(value: number | undefined): number {
   return value;
 }
 
+function assertCompatibleExistingSchema(database: DatabaseSync): void {
+  const migrationTable = database
+    .prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'")
+    .get();
+  if (migrationTable === undefined) return;
+  const row = database
+    .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+    .get() as { version: number | null };
+  if (row.version !== null && (!Number.isSafeInteger(row.version) || row.version > STORAGE_SCHEMA_VERSION)) {
+    throw new Error(
+      `Unsupported storage schema version: ${String(row.version)} (maximum supported ${STORAGE_SCHEMA_VERSION}).`,
+    );
+  }
+}
+
 function initialize(database: DatabaseSync, busyTimeoutMs: number): void {
+  // Compatibility must be established before WAL, DDL, or a migration record
+  // can modify an existing database. A newer build's file is read-only here.
+  assertCompatibleExistingSchema(database);
   database.exec(`
     PRAGMA foreign_keys = ON;
     PRAGMA journal_mode = WAL;
