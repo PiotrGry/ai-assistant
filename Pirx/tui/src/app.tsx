@@ -195,12 +195,10 @@ export function App({ agent, events, recorder, initialNotice, initialHistory = [
   const mcpColor = agent.mcpAvailable ? "green" : "red";
 
   return (
-    <Box
-      flexDirection="column"
-      height={layout.rows}
-      paddingX={1}
-      overflow="hidden"
-    >
+    // The live area is sized to its content, never to the terminal height:
+    // completed items printed by <Static> stay visible directly above it, and
+    // Ink never takes its clear-terminal path (output height >= stdout.rows).
+    <Box flexDirection="column" paddingX={1}>
       {/* Completed chat items have exactly one owner: terminal scrollback.
           They are never redrawn in the live viewport below. */}
       <Static items={[...historyRenderPlan.scrollbackItems]}>
@@ -248,19 +246,9 @@ export function App({ agent, events, recorder, initialNotice, initialHistory = [
         )}
       </Box>
 
-      <Box
-        flexDirection="column"
-        width={layout.contentWidth}
-        flexGrow={1}
-        flexShrink={1}
-        minHeight={1}
-        overflow="hidden"
-        paddingY={1}
-      >
-        {!busy && activeTools.length === 0 ? (
-          <Text color="gray">{history.length === 0
-            ? "Ask Pirx something. Ctrl+O switches the model."
-            : "Conversation history is available in terminal scrollback."}</Text>
+      <Box flexDirection="column" width={layout.contentWidth} paddingY={1}>
+        {!busy && activeTools.length === 0 && history.length === 0 ? (
+          <Text color="gray">Ask Pirx something. Ctrl+O switches the model.</Text>
         ) : null}
         {activeTools.map((name, index) => <Text key={`${name}-${index}`} color="yellow">[tool] {name} …</Text>)}
         {busy ? <Text color="yellow">◌ Pirx is thinking…</Text> : null}
