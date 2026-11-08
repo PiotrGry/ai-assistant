@@ -89,6 +89,8 @@ function metadata(response: Response, now = Date.now()): GitHubResponseMetadata 
   };
 }
 
+function signalAborted(signal: AbortSignal | undefined): boolean { return signal?.aborted === true; }
+
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
 }
@@ -139,6 +141,48 @@ function responseWithBody<T>(response: Response, text: string, correlationId: st
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const PRE_EXECUTION_GRAPHQL_CODES = new Set([
+  "GRAPHQL_PARSE_FAILED",
+  "GRAPHQL_VALIDATION_FAILED",
+]);
+
+/**
+ * GraphQL only guarantees that parse/validation failures happened before
+ * execution. Resolver errors, including errors without `data`, are not proof
+ * that another mutation field or an external side effect did not run.
+ */
+function provenGraphQlPreExecutionRejection(body: Record<string, unknown>): boolean {
+  if ("data" in body || !Array.isArray(body.errors) || body.errors.length === 0) return false;
+  return body.errors.every((value) => {
+    if (!isRecord(value) || "path" in value || !isRecord(value.extensions)) return false;
+    const code = value.extensions.code;
+    return typeof code === "string" && PRE_EXECUTION_GRAPHQL_CODES.has(code.toUpperCase());
+  });
+}
+
+function graphQlFailure(
+  mutation: boolean,
+  provenNotExecuted: boolean,
+  code: "graphql_error" | "malformed_response",
+  message: string,
+  correlationId: string,
+  response: Response,
+): GitHubOperationResult<never> {
+  const uncertain = mutation && !provenNotExecuted;
+  return failure(
+    uncertain ? "unknown" : "permanent_error",
+    code,
+    message,
+    correlationId,
+    uncertain ? "unknown" : "not_accepted",
+    metadata(response),
+  );
+}
+
 function graphQlBody<T>(response: Response, text: string, correlationId: string, mutation: boolean): GitHubOperationResult<T> {
   if (!response.ok) {
     return responseResult(response, undefined as T, correlationId, mutation);
@@ -147,18 +191,40 @@ function graphQlBody<T>(response: Response, text: string, correlationId: string,
   try {
     body = JSON.parse(text);
   } catch {
-    return failure("permanent_error", "malformed_response", "GitHub returned malformed GraphQL JSON.", correlationId, mutation ? "unknown" : "not_accepted", metadata(response));
+    return graphQlFailure(mutation, false, "malformed_response", "GitHub returned malformed GraphQL JSON.", correlationId, response);
   }
-  if (typeof body !== "object" || body === null) {
-    return failure("permanent_error", "malformed_response", "GitHub returned an invalid GraphQL response.", correlationId, mutation ? "unknown" : "not_accepted", metadata(response));
+  if (!isRecord(body)) {
+    return graphQlFailure(mutation, false, "malformed_response", "GitHub returned an invalid GraphQL response.", correlationId, response);
   }
   if ("errors" in body && Array.isArray(body.errors) && body.errors.length > 0) {
-    return failure("permanent_error", "graphql_error", "GitHub GraphQL returned an operation error.", correlationId, mutation ? "unknown" : "not_accepted", metadata(response));
+    return graphQlFailure(
+      mutation,
+      provenGraphQlPreExecutionRejection(body),
+      "graphql_error",
+      "GitHub GraphQL returned an operation error.",
+      correlationId,
+      response,
+    );
   }
   if (!("data" in body)) {
-    return failure("permanent_error", "malformed_response", "GitHub returned an invalid GraphQL response.", correlationId, mutation ? "unknown" : "not_accepted", metadata(response));
+    return graphQlFailure(mutation, false, "malformed_response", "GitHub returned an invalid GraphQL response.", correlationId, response);
   }
   return responseResult(response, (body as { data: T }).data, correlationId, mutation);
+}
+
+async function responseTextWithinDeadline(response: Response, signal: AbortSignal): Promise<string> {
+  signal.throwIfAborted();
+  let abort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      response.text(),
+      new Promise<never>((_resolve, reject) => {
+        abort = () => reject(signal.reason ?? new DOMException("Request aborted", "AbortError"));
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) abort();
+      }),
+    ]);
+  } finally { if (abort !== undefined) signal.removeEventListener("abort", abort); }
 }
 
 export class GitHubTransport {
@@ -195,15 +261,25 @@ export class GitHubTransport {
     mutation: boolean,
     graphql: boolean,
   ): Promise<GitHubOperationResult<T>> {
+    if (mutation && this.#config.writeTargetExplicit === false) {
+      return failure("permanent_error", "invalid_request", "GitHub writes require explicit PIRX_GITHUB_OWNER and PIRX_GITHUB_REPOSITORY.", context.correlationId, "not_accepted");
+    }
+    let endpoint: URL;
+    try { endpoint = new URL(this.#config.apiUrl); }
+    catch { return failure("permanent_error", "invalid_request", "GitHub API endpoint is invalid.", context.correlationId, "not_accepted"); }
+    if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password) {
+      return failure("permanent_error", "invalid_request", "GitHub credentials require an HTTPS endpoint without embedded credentials.", context.correlationId, "not_accepted");
+    }
     if (context.correlationId.trim().length === 0) {
-      return failure("permanent_error", "invalid_request", "GitHub correlation ID is required.", context.correlationId, mutation ? "unknown" : "not_accepted");
+      return failure("permanent_error", "invalid_request", "GitHub correlation ID is required.", context.correlationId, "not_accepted");
     }
     if (context.timeoutMs !== undefined && (!Number.isSafeInteger(context.timeoutMs) || context.timeoutMs <= 0)) {
-      return failure("permanent_error", "invalid_request", "GitHub request timeout must be a positive integer.", context.correlationId, mutation ? "unknown" : "not_accepted");
+      return failure("permanent_error", "invalid_request", "GitHub request timeout must be a positive integer.", context.correlationId, "not_accepted");
     }
     if (graphql && (request as GitHubGraphqlReadRequest | GitHubGraphqlWriteRequest).query.trim().length === 0) {
-      return failure("permanent_error", "invalid_request", "GitHub GraphQL query is required.", context.correlationId, mutation ? "unknown" : "not_accepted");
+      return failure("permanent_error", "invalid_request", "GitHub GraphQL query is required.", context.correlationId, "not_accepted");
     }
+    if (signalAborted(context.signal)) return failure("permanent_error", "cancelled", "GitHub request was cancelled before dispatch.", context.correlationId, "not_accepted");
     const controller = new AbortController();
     let timedOut = false;
     const timeoutMs = context.timeoutMs ?? this.#config.timeoutMs;
@@ -213,7 +289,7 @@ export class GitHubTransport {
     }, timeoutMs);
     timeout.unref?.();
     const abort = () => controller.abort(context.signal?.reason);
-    if (context.signal?.aborted === true) {
+    if (signalAborted(context.signal)) {
       abort();
     } else {
       context.signal?.addEventListener("abort", abort, { once: true });
@@ -226,6 +302,9 @@ export class GitHubTransport {
       const url = graphql
         ? new URL(`${this.#config.apiUrl}/graphql`)
         : new URL(restRequest.path.replace(/^\/+/, ""), `${this.#config.apiUrl}/`);
+      if (url.origin !== endpoint.origin || url.protocol !== "https:" || url.username || url.password) {
+        return failure("permanent_error", "invalid_request", "GitHub request cannot leave the configured HTTPS origin.", context.correlationId, "not_accepted");
+      }
       const headers: Record<string, string> = {
         accept: "application/vnd.github+json",
         authorization: `Bearer ${this.#config.token}`,
@@ -252,12 +331,17 @@ export class GitHubTransport {
       }
       response = await this.#fetch(url, {
         method,
+        redirect: "error",
         headers,
         ...(body === undefined ? {} : { body }),
         signal: controller.signal,
       });
+      const text = await responseTextWithinDeadline(response, controller.signal);
+      return graphql
+        ? graphQlBody<T>(response, text, context.correlationId, mutation)
+        : responseWithBody<T>(response, text, context.correlationId, mutation);
     } catch (error: unknown) {
-      if (context.signal?.aborted === true) {
+      if (signalAborted(context.signal)) {
         return failure("permanent_error", "cancelled", "GitHub request was cancelled.", context.correlationId, mutation ? "unknown" : "not_accepted");
       }
       if (timedOut || isAbortError(error)) {
@@ -269,14 +353,5 @@ export class GitHubTransport {
       context.signal?.removeEventListener("abort", abort);
     }
 
-    let text: string;
-    try {
-      text = await response.text();
-    } catch {
-      return failure(mutation ? "unknown" : "retryable_error", "network", "GitHub response could not be read.", context.correlationId, mutation ? "unknown" : "not_accepted", metadata(response));
-    }
-    return graphql
-      ? graphQlBody<T>(response, text, context.correlationId, mutation)
-      : responseWithBody<T>(response, text, context.correlationId, mutation);
   }
 }

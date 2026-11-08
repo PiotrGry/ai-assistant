@@ -11,6 +11,14 @@ test("agent configuration accepts the shared Google Calendar timezone", () => {
   assert.equal(config.timeZone, "Europe/Warsaw");
 });
 
+test("agent configuration resolves the same bounded tool profile for CLI and TUI callers", () => {
+  assert.equal(loadConfig({}).toolProfile, "personal");
+  assert.equal(loadConfig({ PIRX_TOOL_PROFILE: "development" }).toolProfile, "development");
+  assert.equal(loadConfig({ PIRX_TOOL_PROFILE: "operations" }).toolProfile, "operations");
+  assert.throws(() => loadConfig({ PIRX_TOOL_PROFILE: "all" }), /PIRX_TOOL_PROFILE/u);
+  assert.throws(() => loadConfig({ PIRX_TOOL_PROFILE: "" }), /PIRX_TOOL_PROFILE/u);
+});
+
 test("agent configuration rejects an invalid timezone before startup", () => {
   assert.throws(
     () =>

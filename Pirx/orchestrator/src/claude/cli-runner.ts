@@ -13,6 +13,7 @@ import type { WorkerProviderRecoveryMetadata } from "../runtime/worker-availabil
 export const CLAUDE_ROUND_TRIP_OUTCOMES = [
   "success",
   "claude_not_installed",
+  "unsupported_version",
   "authentication_required",
   "quota_exhausted",
   "timeout",
@@ -35,6 +36,19 @@ export const DEFAULT_CLAUDE_STDOUT_BYTES = 16 * 1024;
 export const DEFAULT_CLAUDE_STDERR_BYTES = 16 * 1024;
 export const MAX_CLAUDE_OUTPUT_BYTES = 64 * 1024;
 export const CLAUDE_TERMINATION_GRACE_MS = 250;
+export const MINIMUM_CLAUDE_CODE_WORKER_VERSION = "2.1.314" as const;
+export const CLAUDE_CODE_WORKER_SETTINGS = Object.freeze({
+  permissions: Object.freeze({
+    blockReadsOutsideWorkingDirectories: true,
+    blockWritesOutsideWorkingDirectories: true,
+  }),
+  sandbox: Object.freeze({
+    enabled: true,
+    allowUnsandboxedCommands: false,
+    failIfUnavailable: true,
+    network: Object.freeze({ allowedDomains: Object.freeze(["github.com"]) }),
+  }),
+} as const);
 
 export interface ClaudeRoundTripRequest {
   readonly signal?: AbortSignal;
@@ -83,6 +97,11 @@ export interface ClaudeSpawnOptions {
   readonly stdio: ["ignore", "pipe", "pipe"];
 }
 export type ClaudeSpawn = (file: string, args: readonly string[], options: ClaudeSpawnOptions) => ChildProcess;
+export type ClaudeVersionProbe = (input: {
+  readonly executable: string;
+  readonly cwd: string;
+  readonly env: NodeJS.ProcessEnv;
+}) => Promise<string>;
 
 export interface ClaudeCodeCliRunnerOptions {
   readonly executable?: string;
@@ -92,6 +111,8 @@ export interface ClaudeCodeCliRunnerOptions {
   readonly additionalEnvironment?: Readonly<Record<string, string | undefined>>;
   readonly requestIdFactory?: () => string;
   readonly spawnProcess?: ClaudeSpawn;
+  /** Test seam for the fail-closed Claude Code compatibility check. */
+  readonly versionProbe?: ClaudeVersionProbe;
   readonly terminationGraceMs?: number;
 }
 
@@ -108,6 +129,7 @@ interface ClaudeJsonSchema {
 
 const FAILURE_MESSAGES: Record<Exclude<ClaudeRoundTripOutcome, "success">, string> = {
   claude_not_installed: "Claude Code executable was not found.",
+  unsupported_version: `Claude Code ${MINIMUM_CLAUDE_CODE_WORKER_VERSION} or newer is required for isolated code-worker execution.`,
   authentication_required: "Claude Code authentication is required.",
   quota_exhausted: "Claude Code quota was exhausted.",
   timeout: "Claude Code round-trip timed out.",
@@ -176,10 +198,14 @@ export function buildClaudeStructuredArguments(requestId: string, prompt: string
 export function buildClaudeWorkerArguments(requestId: string, prompt: string, responseSchema: unknown, profile: ClaudeCodeWorkerProfile): readonly string[] {
   const schema = JSON.stringify(responseSchema);
   if (schema === undefined || Buffer.byteLength(schema, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || profile.permissionMode !== "dontAsk" || !Number.isSafeInteger(profile.maxTurns) || profile.maxTurns <= 1 || profile.maxTurns > 32 || profile.allowedTools.some((value) => /[\u0000-\u001f\u007f;&|<>`$\\]/u.test(value)) || profile.disallowedTools.some((value) => /[\u0000-\u001f\u007f]/u.test(value)) || JSON.stringify(profile).includes("bypassPermissions")) throw new RangeError("Claude code-worker profile is unsafe or invalid.");
-  // Current Claude Code exposes the explicit tool set through --tools; the
-  // permission mode and deny-by-default prompt target keep every other tool
-  // unavailable without relying on an unsupported legacy --restricted flag.
-  const arguments_: string[] = ["-p", "--tools", profile.tools.join(",")];
+  // Restricted mode ignores user/project customizations and confines file
+  // tools. The inline strict settings add fail-closed file and process-level
+  // isolation for the exact invocation without mutating operator config.
+  const arguments_: string[] = [
+    "--restricted",
+    "--settings", JSON.stringify(CLAUDE_CODE_WORKER_SETTINGS),
+    "-p", "--tools", profile.tools.join(","),
+  ];
   if (profile.advisorConfig !== undefined) arguments_.push("--strict-mcp-config", "--mcp-config", profile.advisorConfig);
   if (profile.allowedTools.length > 0) arguments_.push("--allowedTools", profile.allowedTools.join(","));
   if (profile.disallowedTools.length > 0) arguments_.push("--disallowedTools", profile.disallowedTools.join(","));
@@ -217,6 +243,7 @@ function explicitFailure(parsed: unknown, stderr: string): { readonly outcome: "
 }
 function diagnosticCode(outcome: Exclude<ClaudeRoundTripOutcome, "success">): WorkerFailureCode {
   if (outcome === "claude_not_installed") return "spawn_failure";
+  if (outcome === "unsupported_version") return "permission_denied";
   if (outcome === "authentication_required") return "authentication";
   if (outcome === "quota_exhausted") return "quota_exhausted";
   if (outcome === "timeout") return "timeout";
@@ -242,7 +269,9 @@ export class ClaudeCodeCliRunner {
   private readonly requestIdFactory: () => string;
   private readonly ownsProcessGroup: boolean;
   private readonly spawnProcess: ClaudeSpawn;
+  private readonly versionProbe: ClaudeVersionProbe;
   private readonly terminationGraceMs: number;
+  private workerVersionCheck: Promise<{ readonly ok: true; readonly version: string } | { readonly ok: false; readonly outcome: "claude_not_installed" | "unsupported_version" | "process_error"; readonly evidence: string }> | undefined;
 
   public constructor(options: ClaudeCodeCliRunnerOptions = {}) {
     this.executable = options.executable?.trim() || "claude";
@@ -252,6 +281,7 @@ export class ClaudeCodeCliRunner {
     this.requestIdFactory = options.requestIdFactory ?? randomUUID;
     this.ownsProcessGroup = process.platform !== "win32" && options.spawnProcess === undefined;
     this.spawnProcess = options.spawnProcess ?? ((file, args, spawnOptions) => spawn(file, [...args], spawnOptions));
+    this.versionProbe = options.versionProbe ?? probeClaudeVersion;
     this.terminationGraceMs = boundedInteger(options.terminationGraceMs, CLAUDE_TERMINATION_GRACE_MS, 5_000) ?? CLAUDE_TERMINATION_GRACE_MS;
   }
 
@@ -314,12 +344,44 @@ export class ClaudeCodeCliRunner {
     try { cwd = await realpath(request.cwd); const info = await stat(cwd); if (!info.isDirectory()) return failure("process_error", request.requestId, startedAt, null); }
     catch { return failure("process_error", request.requestId, startedAt, null); }
     if (request.signal?.aborted === true) return failure("cancelled", request.requestId, startedAt, null);
+    if (request.workerProfile !== undefined) {
+      if (request.workerProfile.cwd !== cwd) return failure("process_error", request.requestId, startedAt, null, "permission_denied");
+      const compatibility = await this.checkWorkerVersion(cwd);
+      if (!compatibility.ok) {
+        const result = failure(compatibility.outcome, request.requestId, startedAt, null);
+        return {
+          ...result,
+          diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, {
+            durationMs: result.durationMs,
+            stage: "process",
+            providerMessage: compatibility.evidence,
+          }),
+        };
+      }
+    }
     try {
       const arguments_ = request.workerProfile === undefined
         ? buildClaudeStructuredArguments(request.requestId, request.prompt, request.responseSchema)
         : buildClaudeWorkerArguments(request.requestId, request.prompt, request.responseSchema, request.workerProfile);
       return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: arguments_, structuredOutput: true }) as ClaudeStructuredResult;
     } catch { return failure("process_error", request.requestId, startedAt, null); }
+  }
+
+  private checkWorkerVersion(cwd: string): Promise<{ readonly ok: true; readonly version: string } | { readonly ok: false; readonly outcome: "claude_not_installed" | "unsupported_version" | "process_error"; readonly evidence: string }> {
+    this.workerVersionCheck ??= (async () => {
+      let raw: string;
+      try {
+        raw = await this.versionProbe({ executable: this.executable, cwd, env: buildEnvironment(this.environment, this.additionalEnvironment) });
+      } catch (error: unknown) {
+        const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined;
+        return { ok: false, outcome: code === "ENOENT" ? "claude_not_installed" : "process_error", evidence: code === "ENOENT" ? "Claude Code executable was not found during the compatibility probe." : "Claude Code compatibility probe failed." } as const;
+      }
+      const parsed = parseClaudeVersion(raw);
+      if (parsed === undefined) return { ok: false, outcome: "unsupported_version", evidence: "Claude Code returned an unrecognized version during the compatibility probe." } as const;
+      if (compareVersions(parsed, parseClaudeVersion(MINIMUM_CLAUDE_CODE_WORKER_VERSION)!) < 0) return { ok: false, outcome: "unsupported_version", evidence: `Claude Code ${parsed.join(".")} lacks required worktree confinement; install ${MINIMUM_CLAUDE_CODE_WORKER_VERSION} or newer.` } as const;
+      return { ok: true, version: parsed.join(".") } as const;
+    })();
+    return this.workerVersionCheck;
   }
 
   private async execute(input: {
@@ -429,4 +491,58 @@ export class ClaudeCodeCliRunner {
     if (!validateStructuredOutput(parsed.structured_output, input.requestId)) return failed("invalid_output", input.requestId, input.startedAt, exitCode);
     return { outcome: "success", requestId: input.requestId, acknowledgement: parsed.structured_output.acknowledgement, durationMs: Math.max(0, Date.now() - input.startedAt), exitCode: 0 };
   }
+}
+
+function parseClaudeVersion(value: string): readonly [number, number, number] | undefined {
+  const match = value.trim().match(/^(\d+)\.(\d+)\.(\d+)(?:\s|$)/u);
+  if (match === null) return undefined;
+  const parsed = match.slice(1).map(Number);
+  if (parsed.some((part) => !Number.isSafeInteger(part) || part < 0)) return undefined;
+  return parsed as unknown as readonly [number, number, number];
+}
+
+function compareVersions(left: readonly [number, number, number], right: readonly [number, number, number]): number {
+  for (let index = 0; index < 3; index += 1) {
+    const difference = left[index]! - right[index]!;
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+function probeClaudeVersion(input: { readonly executable: string; readonly cwd: string; readonly env: NodeJS.ProcessEnv }): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let output = Buffer.alloc(0);
+    const child = spawn(input.executable, ["--version"], { cwd: input.cwd, env: input.env, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      reject(Object.assign(new Error("Claude Code version probe timed out."), { code: "ETIMEDOUT" }));
+    }, 5_000);
+    timer.unref();
+    child.stdout?.on("data", (chunk: unknown) => {
+      if (settled) return;
+      output = Buffer.concat([output, asBuffer(chunk)]);
+      if (output.byteLength > 1_024) {
+        settled = true;
+        clearTimeout(timer);
+        child.kill("SIGKILL");
+        reject(Object.assign(new Error("Claude Code version output was oversized."), { code: "EOVERFLOW" }));
+      }
+    });
+    child.once("error", (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code !== 0) reject(Object.assign(new Error("Claude Code version probe exited unsuccessfully."), { code: "EPROBE" }));
+      else resolve(output.toString("utf8"));
+    });
+  });
 }

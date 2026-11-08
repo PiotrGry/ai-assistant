@@ -1,6 +1,30 @@
 version: "3"
 tasks:
   Pirx:
+    desc: Start the operations-scoped Pirx TUI (current orchestration workflow)
+    env:
+      PIRX_TOOL_PROFILE: operations
+    cmds:
+      - pnpm build
+      - pnpm tui
+  "Pirx:personal":
+    desc: Start Pirx with private Obsidian and Calendar tools only
+    env:
+      PIRX_TOOL_PROFILE: personal
+    cmds:
+      - pnpm build
+      - pnpm tui
+  "Pirx:development":
+    desc: Start Pirx with GitHub development tools and runtime history
+    env:
+      PIRX_TOOL_PROFILE: development
+    cmds:
+      - pnpm build
+      - pnpm tui
+  "Pirx:operations":
+    desc: Start Pirx with GitHub and orchestrator operations tools
+    env:
+      PIRX_TOOL_PROFILE: operations
     cmds:
       - pnpm build
       - pnpm tui

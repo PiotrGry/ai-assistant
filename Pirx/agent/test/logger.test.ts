@@ -127,3 +127,58 @@ test("SessionLogger persists the environment, session and completed turn", async
   );
   await rm(directory, { recursive: true, force: true });
 });
+
+test("SessionLogger restores complete local turns across restarts and marks interruptions", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-history-test-"));
+  const promptFile = join(directory, "system.md");
+  const storageFile = join(directory, "data", "pirx.sqlite");
+  await writeFile(promptFile, "Jesteś testem.", "utf8");
+  const config: AgentConfig = {
+    model: "test-model",
+    numCtx: 8192,
+    keepAlive: "1m",
+    baseUrl: "http://127.0.0.1:11434",
+    temperature: 0,
+    maxOutputTokens: 1536,
+    contextSafetyMarginTokens: 512,
+    timeZone: "Europe/Warsaw",
+    promptFile,
+    logDir: join(directory, "logs"),
+    storagePath: storageFile,
+    storageMode: "full_local",
+    mcpServerEntry: join(directory, "mcp.js"),
+    maxToolIterations: 8,
+    maxRepeatedToolCalls: 3,
+    llmTimeoutMs: 1000,
+    toolTimeoutMs: 1000,
+  };
+  const prompt = { content: "Jesteś testem.", sha256: "prompt-hash" };
+
+  const first = await SessionLogger.create(config, prompt);
+  assert.equal(first.restoredTranscript, undefined);
+  const completed = first.beginTurn("Sprawdź.");
+  await first.saveTurn("Sprawdź.", "Gotowe.", metrics("2026-09-09T10:00:00.000Z"), completed, [
+    { role: "user", content: "Sprawdź." },
+    { role: "assistant", content: "", tool_calls: [{ function: { name: "read", arguments: {} } }] },
+    { role: "tool", tool_name: "read", content: "ok" },
+    { role: "assistant", content: "Gotowe." },
+  ]);
+  await first.close();
+
+  const second = await SessionLogger.create(config, prompt);
+  assert.equal(second.restoredTranscript?.turns.length, 1);
+  assert.deepEqual(second.restoredTranscript?.turns[0]?.messages.map((message) => message.role), [
+    "user", "assistant", "tool", "assistant",
+  ]);
+  const interrupted = second.beginTurn("Kontynuuj.");
+  await second.failTurn(interrupted, new Error("process_restart"));
+  await second.close();
+
+  const third = await SessionLogger.create(config, prompt);
+  assert.equal(third.restoredTranscript?.turns.length, 2);
+  assert.equal(third.restoredTranscript?.turns[0]?.status, "completed");
+  assert.equal(third.restoredTranscript?.turns[1]?.status, "failed");
+  assert.equal(third.restoredTranscript?.turns[1]?.messages.length, 0);
+  await third.close();
+  await rm(directory, { recursive: true, force: true });
+});

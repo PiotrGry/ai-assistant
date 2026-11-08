@@ -44,6 +44,11 @@ export {
 export type { RestoreOptions, RetentionReport } from "./storage/maintenance.js";
 export type { ResourceSummary } from "./storage/sqlite.js";
 export type {
+  StoredSessionTranscript,
+  StoredTranscriptMessage,
+  StoredTranscriptTurn,
+} from "./storage/sqlite.js";
+export type {
   ResourceSampleRecord,
   ResourceSamplerOptions,
   ResourceSamplerSink,

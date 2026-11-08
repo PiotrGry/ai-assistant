@@ -6,7 +6,7 @@ import type { PirxAgent, TurnMetrics } from "@pirx/agent";
 import { Composer } from "./composer.js";
 import type { TuiEvent } from "./events.js";
 import { TuiEventBus } from "./events.js";
-import { buildHistoryLines, type ChatItem } from "./history.js";
+import { buildHistoryLines, planHistoryRendering, type ChatItem } from "./history.js";
 import { isExitCommand } from "./input-state.js";
 import { calculateTuiLayout } from "./layout.js";
 import { runRecordedTurn, type RecordedTurn, type TurnRecorder } from "./recorded-turn.js";
@@ -16,6 +16,7 @@ interface AppProps {
   readonly events: TuiEventBus;
   readonly recorder?: TurnRecorder | undefined;
   readonly initialNotice?: string | undefined;
+  readonly initialHistory?: readonly ChatItem[] | undefined;
 }
 
 function errorMessage(error: unknown): string {
@@ -27,14 +28,14 @@ function compactDetail(value: string): string {
   return firstLine.length > 140 ? `${firstLine.slice(0, 137)}…` : firstLine;
 }
 
-export function App({ agent, events, recorder, initialNotice }: AppProps): React.JSX.Element {
+export function App({ agent, events, recorder, initialNotice, initialHistory = [] }: AppProps): React.JSX.Element {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [terminalSize, setTerminalSize] = useState({
     rows: stdout.rows ?? 24,
     columns: stdout.columns ?? 80,
   });
-  const [history, setHistory] = useState<ChatItem[]>([]);
+  const [history, setHistory] = useState<ChatItem[]>([...initialHistory]);
   const [clearToken, setClearToken] = useState(0);
   const [busy, setBusy] = useState(false);
   const [lastMetrics, setLastMetrics] = useState<TurnMetrics | undefined>();
@@ -47,8 +48,7 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
   const [activeTools, setActiveTools] = useState<readonly string[]>([]);
 
   const layout = calculateTuiLayout(terminalSize.rows, terminalSize.columns);
-  const historyLines = buildHistoryLines(history, layout.contentWidth);
-  const visibleHistoryLines = historyLines.slice(-layout.historyRows);
+  const historyRenderPlan = planHistoryRendering(history);
 
   useEffect(() => {
     const updateTerminalSize = (): void => {
@@ -201,11 +201,9 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
       paddingX={1}
       overflow="hidden"
     >
-      {/* Completed chat items stay in terminal scrollback instead of being
-          redrawn in a virtual full-screen viewport. This lets the terminal
-          own mouse scrolling, text selection, and clipboard shortcuts. The
-          live viewport below keeps the full-screen application experience. */}
-      <Static items={history}>
+      {/* Completed chat items have exactly one owner: terminal scrollback.
+          They are never redrawn in the live viewport below. */}
+      <Static items={[...historyRenderPlan.scrollbackItems]}>
         {(item, itemIndex) => (
           <Box key={`history-${itemIndex}`} flexDirection="column" width={layout.contentWidth}>
             {buildHistoryLines([item], layout.contentWidth).map((line) => (
@@ -259,22 +257,11 @@ export function App({ agent, events, recorder, initialNotice }: AppProps): React
         overflow="hidden"
         paddingY={1}
       >
-        {visibleHistoryLines.length === 0 ? <Text color="gray">Ask Pirx something. Ctrl+O switches the model.</Text> : null}
-        {visibleHistoryLines.map((line) => (
-          <Text
-            key={line.key}
-            {...(line.emphasis ? { bold: true } : {})}
-            {...(line.kind === "error"
-              ? { color: "red" }
-              : line.kind === "user"
-                ? { color: "cyan" }
-                : line.kind === "tool"
-                  ? { color: "yellow" }
-                  : {})}
-          >
-            {line.text}
-          </Text>
-        ))}
+        {!busy && activeTools.length === 0 ? (
+          <Text color="gray">{history.length === 0
+            ? "Ask Pirx something. Ctrl+O switches the model."
+            : "Conversation history is available in terminal scrollback."}</Text>
+        ) : null}
         {activeTools.map((name, index) => <Text key={`${name}-${index}`} color="yellow">[tool] {name} …</Text>)}
         {busy ? <Text color="yellow">◌ Pirx is thinking…</Text> : null}
       </Box>

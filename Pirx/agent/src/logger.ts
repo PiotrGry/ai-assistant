@@ -10,7 +10,11 @@ import { SqliteActionLedger } from "./action-ledger.js";
 import { SqliteOperationRecorder } from "./operation-recorder.js";
 import type { OperationRecorder } from "./operation-recorder.js";
 import { ResourceSampler } from "./resource-sampler.js";
-import { SqliteStore, type ResourceSummary } from "./storage/sqlite.js";
+import {
+  SqliteStore,
+  type ResourceSummary,
+  type StoredSessionTranscript,
+} from "./storage/sqlite.js";
 import { readGpuStats } from "./telemetry.js";
 
 export interface SessionTurn {
@@ -45,6 +49,7 @@ export class SessionLogger {
   readonly storageMode: StorageMode;
   readonly actionLedger: SqliteActionLedger | undefined;
   readonly operationRecorder: OperationRecorder | undefined;
+  readonly restoredTranscript: StoredSessionTranscript | undefined;
   readonly #store: SqliteStore | undefined;
   readonly #resourceSampler: ResourceSampler | undefined;
   readonly #sessionId: string | undefined;
@@ -61,6 +66,7 @@ export class SessionLogger {
     operationRecorder: OperationRecorder | undefined,
     resourceSampler: ResourceSampler | undefined,
     storageMode: StorageMode,
+    restoredTranscript: StoredSessionTranscript | undefined,
   ) {
     this.transcriptFile = transcriptFile;
     this.metricsFile = metricsFile;
@@ -71,6 +77,7 @@ export class SessionLogger {
     this.actionLedger = actionLedger;
     this.operationRecorder = operationRecorder;
     this.#resourceSampler = resourceSampler;
+    this.restoredTranscript = restoredTranscript;
   }
 
   static async create(config: AgentConfig, prompt: SystemPrompt): Promise<SessionLogger> {
@@ -81,6 +88,7 @@ export class SessionLogger {
     const id = sessionId(new Date(startedAt));
     let store: SqliteStore | undefined;
     let databaseSessionId: string | undefined;
+    let restoredTranscript: StoredSessionTranscript | undefined;
     const gpuAtSessionStart = await readGpuStats();
 
     if (config.storagePath !== undefined) {
@@ -90,6 +98,9 @@ export class SessionLogger {
       databaseSessionId = randomUUID();
       try {
         store.recoverInterrupted(startedAt);
+        if ((config.storageMode ?? "redacted") === "full_local") {
+          restoredTranscript = store.latestFinishedSessionTranscript(50);
+        }
         const environmentId = randomUUID();
         store.insertRunEnvironment({
           id: environmentId,
@@ -152,6 +163,7 @@ export class SessionLogger {
             sessionId: databaseSessionId,
           }),
       config.storageMode ?? "redacted",
+      restoredTranscript,
     );
     const header = [
       "# Rozmowa z Pirxem",

@@ -54,6 +54,11 @@ export class HeadlessConfigurationError extends Error {
   public constructor(code: HeadlessConfigurationError["code"], message: string) { super(message.slice(0, 256)); this.name = "HeadlessConfigurationError"; this.code = code; }
 }
 
+export interface HeadlessOrchestratorConfigSelection {
+  readonly filename: string;
+  readonly source: "explicit_profile" | "default_profile";
+}
+
 const TOP_LEVEL_KEYS = new Set(["schemaVersion", "databasePath", "workerId", "provider", "workerCapabilities", "repositories", "worktreeParent", "leaseDurationMs", "shutdownTimeoutMs", "workerTimeoutMs", "workerOutputBytes", "workerErrorBytes", "maximumConsecutiveResumeFailures", "cycleIntervalMs", "errorIntervalMs", "githubProjectOwner", "githubProjectNumber", "githubApiUrl", "githubTimeoutMs", "hostPowerOff"]);
 const REPOSITORY_KEYS = new Set(["repository", "repositoryRoot", "baseBranch", "baseRevision", "remoteName", "testCommands", "delivery"]);
 const DELIVERY_KEYS = new Set(["releaseBranch", "featureWorkflowName", "releaseRequiredChecks", "featureRequiredApprovals", "releaseRequiredApprovals", "featureMergeMethod", "releaseMergeMethod", "requireMergeable"]);
@@ -123,15 +128,20 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
   } as HeadlessOrchestratorConfig);
 }
 
-export function readHeadlessOrchestratorConfig(environment: NodeJS.ProcessEnv = process.env): HeadlessOrchestratorConfig | undefined {
+export function resolveHeadlessOrchestratorConfigSelection(environment: NodeJS.ProcessEnv = process.env): HeadlessOrchestratorConfigSelection {
   const explicit = environment.PIRX_ORCHESTRATOR_CONFIG;
   const home = environment.HOME?.trim() || homedir();
   const filename = explicit?.trim() ?? resolve(environment.XDG_CONFIG_HOME?.trim() || resolve(home, ".config"), "pirx", "orchestrator.json");
   if (!isAbsolute(filename)) throw new HeadlessConfigurationError("invalid_configuration", "PIRX_ORCHESTRATOR_CONFIG must be an absolute path.");
+  return Object.freeze({ filename: resolve(filename), source: explicit === undefined ? "default_profile" : "explicit_profile" });
+}
+
+export function readHeadlessOrchestratorConfig(environment: NodeJS.ProcessEnv = process.env): HeadlessOrchestratorConfig | undefined {
+  const selection = resolveHeadlessOrchestratorConfigSelection(environment);
   let content: string;
-  try { content = readFileSync(filename, "utf8"); }
+  try { content = readFileSync(selection.filename, "utf8"); }
   catch (error: unknown) {
-    if (explicit === undefined && (error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if (selection.source === "default_profile" && (error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw new HeadlessConfigurationError("read_failure", "Headless orchestrator configuration could not be read.");
   }
   let parsed: unknown;

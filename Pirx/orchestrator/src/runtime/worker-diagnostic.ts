@@ -22,6 +22,7 @@ export const WORKER_FAILURE_CODES = Object.freeze([
   "permission_denied",
   "git_state_mismatch",
   "adapter_failure",
+  "operator_input_required",
 ] as const);
 
 export type WorkerFailureCode = (typeof WORKER_FAILURE_CODES)[number];
@@ -98,6 +99,7 @@ const MESSAGES: Readonly<Record<WorkerFailureCode, string>> = Object.freeze({
   permission_denied: "Worker permission policy denied the requested operation.",
   git_state_mismatch: "Worker Git state did not match the assigned result.",
   adapter_failure: "Worker adapter failed at its process boundary.",
+  operator_input_required: "Worker requires an authorized operator decision before it can continue.",
 });
 
 function safeNumber(value: unknown, maximum: number): number | undefined {

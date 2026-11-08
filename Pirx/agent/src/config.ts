@@ -1,3 +1,4 @@
+import { resolveModelSettings, resolveToolProfile, type ToolProfile } from "@pirx/config";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -7,6 +8,7 @@ import { fileURLToPath } from "node:url";
 export type StorageMode = "metrics_only" | "redacted" | "full_local";
 
 export interface AgentConfig {
+  readonly toolProfile?: ToolProfile;
   readonly model: string;
   readonly numCtx: number;
   readonly keepAlive: string;
@@ -105,32 +107,12 @@ export function loadConfig(
   const pirxDirectory = resolve(compiledDirectory, "..", "..");
   const repositoryDirectory = resolve(pirxDirectory, "..");
 
-  const rawBaseUrl =
-    environment.OLLAMA_BASE_URL ?? "http://localhost:11434";
+  const modelSettings = resolveModelSettings(environment);
 
   return {
-    model:
-      environment.OLLAMA_MODEL ??
-      "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL",
-
-    numCtx: positiveInteger(
-      "OLLAMA_NUM_CTX",
-      environment.OLLAMA_NUM_CTX ?? "16384",
-    ),
-
+    ...modelSettings,
+    toolProfile: resolveToolProfile(environment),
     keepAlive: environment.OLLAMA_KEEP_ALIVE ?? "10m",
-
-    baseUrl: rawBaseUrl.replace(/\/+$/u, ""),
-
-    temperature: finiteNumber(
-      "OLLAMA_TEMPERATURE",
-      environment.OLLAMA_TEMPERATURE ?? "0.3",
-    ),
-
-    maxOutputTokens: positiveInteger(
-      "OLLAMA_MAX_OUTPUT_TOKENS",
-      environment.OLLAMA_MAX_OUTPUT_TOKENS ?? "1536",
-    ),
 
     contextSafetyMarginTokens: positiveInteger(
       "PIRX_CONTEXT_SAFETY_MARGIN_TOKENS",

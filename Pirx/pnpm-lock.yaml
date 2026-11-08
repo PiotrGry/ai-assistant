@@ -20,18 +20,26 @@ importers:
       '@modelcontextprotocol/client':
         specifier: 2.0.0
         version: 2.0.0
+      '@pirx/config':
+        specifier: workspace:*
+        version: link:../config
       ollama:
         specifier: 0.6.3
         version: 0.6.3
 
+  config: {}
+
   mcp-server:
     dependencies:
-      '@pirx/orchestrator':
-        specifier: workspace:*
-        version: link:../orchestrator
       '@modelcontextprotocol/server':
         specifier: 2.0.0
         version: 2.0.0
+      '@pirx/config':
+        specifier: workspace:*
+        version: link:../config
+      '@pirx/orchestrator':
+        specifier: workspace:*
+        version: link:../orchestrator
       zod:
         specifier: 4.5.2
         version: 4.5.2
@@ -40,7 +48,11 @@ importers:
         specifier: 2.0.0
         version: 2.0.0
 
-  orchestrator: {}
+  orchestrator:
+    dependencies:
+      '@pirx/config':
+        specifier: workspace:*
+        version: link:../config
 
   tui:
     dependencies:

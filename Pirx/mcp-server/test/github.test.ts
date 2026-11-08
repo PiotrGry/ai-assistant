@@ -5,6 +5,8 @@ import test from "node:test";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import {
   failure,
+  GitHubTransport,
+  loadGitHubConfig,
   type GitHubConfig,
   type GitHubOperationResult,
 } from "@pirx/orchestrator";
@@ -147,9 +149,12 @@ async function connected(options: {
 }) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createMcpServer({
-    environment: options.environment ?? {
-      PIRX_GITHUB_POC_ISSUE: "179",
-      PIRX_GOOGLE_CALENDAR_TIMEZONE: "UTC",
+    environment: {
+      PIRX_TOOL_PROFILE: "operations",
+      ...(options.environment ?? {
+        PIRX_GITHUB_POC_ISSUE: "179",
+        PIRX_GOOGLE_CALENDAR_TIMEZONE: "UTC",
+      }),
     },
     ...(options.transport === undefined ? {} : { githubPocTransport: options.transport }),
     ...(options.config === undefined ? {} : { githubPocConfig: options.config }),
@@ -383,6 +388,47 @@ test("repository-scoped Issue tools expose bounded reads and host-authorized mut
     arguments: { issueNumber: 179, repository: "other-owner/other-repository" },
   });
   assert.equal(redirected.isError, true);
+});
+
+test("MCP permits fallback GitHub reads but blocks even authorized writes before dispatch", async (context) => {
+  const requests: Array<{ readonly method: string; readonly authorization?: string }> = [];
+  const config = loadGitHubConfig({}, { tokenProvider: () => "fallback-read-token" });
+  const transport = new GitHubTransport(config, {
+    fetch: async (_url, init) => {
+      const headers = new Headers(init?.headers);
+      requests.push({
+        method: init?.method ?? "GET",
+        ...(headers.get("authorization") === null ? {} : { authorization: headers.get("authorization")! }),
+      });
+      return new Response(JSON.stringify(issuePayload()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  const fixture = await connected({ transport, config });
+  context.after(async () => {
+    await fixture.client.close();
+    await fixture.server.close();
+  });
+
+  const read = await fixture.client.callTool({
+    name: "github_issue_get",
+    arguments: { issueNumber: 179 },
+  });
+  assert.equal(read.isError, undefined);
+  assert.equal((read.structuredContent as { issue: { number: number } }).issue.number, 179);
+
+  const write = await callAuthorized(fixture.client, "github_issue_update", {
+    issueNumber: 179,
+    title: "Must not be dispatched without an explicit repository target",
+  });
+  assert.equal(write.isError, true);
+  assert.equal((write.structuredContent as { errorCode: string }).errorCode, "invalid_request");
+  assert.match(JSON.stringify(write.structuredContent), /PIRX_GITHUB_OWNER.*PIRX_GITHUB_REPOSITORY/u);
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every((request) => request.method === "GET"));
+  assert.ok(requests.every((request) => request.authorization === "Bearer fallback-read-token"));
 });
 
 test("Issue outputs bound large bodies without changing transport parity", async (context) => {

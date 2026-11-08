@@ -1,3 +1,4 @@
+import type { CalendarEventPage } from "./types.js";
 import type { GoogleCalendarConfig } from "../config.js";
 import type { AccessTokenProvider, FetchLike } from "./auth.js";
 import {
@@ -297,7 +298,7 @@ export class GoogleCalendarClient implements CalendarOperations {
     );
   }
 
-  async listEvents(options: ListEventsOptions): Promise<CalendarEvent[]> {
+  async listEvents(options: ListEventsOptions): Promise<CalendarEventPage> {
     if (
       options.maxResults !== undefined &&
       (!Number.isSafeInteger(options.maxResults) ||
@@ -320,6 +321,9 @@ export class GoogleCalendarClient implements CalendarOperations {
       throw new CalendarError("invalid_request", "timeMax must be after timeMin.");
     }
 
+    if (options.pageToken !== undefined && (options.pageToken.length === 0 || options.pageToken.length > 4096)) {
+      throw new CalendarError("invalid_request", "pageToken must contain 1 to 4096 characters.");
+    }
     const calendarId = options.calendarId ?? this.#config.defaultCalendarId;
     const query = new URLSearchParams({
       singleEvents: "true",
@@ -334,6 +338,7 @@ export class GoogleCalendarClient implements CalendarOperations {
       query.set("timeMax", options.timeMax);
     }
 
+    if (options.pageToken !== undefined) query.set("pageToken", options.pageToken);
     const parsed = googleEventsListSchema.safeParse(
       await this.#request("GET", eventEndpoint(calendarId), query),
     );
@@ -343,9 +348,16 @@ export class GoogleCalendarClient implements CalendarOperations {
         "Google Calendar returned a malformed event list.",
       );
     }
-    return (parsed.data.items ?? [])
-      .map((event) => calendarEvent(event))
-      .sort((left, right) => eventSortValue(left) - eventSortValue(right));
+    const nextPageToken = parsed.data.nextPageToken;
+    if (nextPageToken !== undefined && (nextPageToken.length === 0 || nextPageToken.length > 4096 || nextPageToken === options.pageToken)) {
+      throw new CalendarError("malformed_response", "Google Calendar returned an invalid or repeated event page token.");
+    }
+    return {
+      events: (parsed.data.items ?? []).map((event) => calendarEvent(event))
+        .sort((left, right) => eventSortValue(left) - eventSortValue(right)),
+      complete: nextPageToken === undefined,
+      ...(nextPageToken === undefined ? {} : { nextPageToken }),
+    };
   }
 
   async getEvent(

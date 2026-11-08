@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CLAUDE_CODE_WORKER_SETTINGS,
   buildClaudeCodeWorkerProfile,
   buildClaudeWorkerArguments,
   buildWorkerResultSchema,
@@ -69,6 +70,14 @@ test("maps the complete code-worker grant to a bounded Claude profile", () => {
   assert.ok(value.value.disallowedTools.includes("Bash(git reset *)"));
   assert.equal(value.value.allowedTools.some((item) => item === "Bash"), false);
   const args = buildClaudeWorkerArguments("worker-profile-correlation", "bounded prompt", buildWorkerResultSchema(request()), value.value);
+  assert.equal(args[0], "--restricted");
+  assert.equal(args.includes("--settings"), true);
+  assert.deepEqual(JSON.parse(args[args.indexOf("--settings") + 1] ?? "{}"), CLAUDE_CODE_WORKER_SETTINGS);
+  assert.equal(CLAUDE_CODE_WORKER_SETTINGS.permissions.blockReadsOutsideWorkingDirectories, true);
+  assert.equal(CLAUDE_CODE_WORKER_SETTINGS.permissions.blockWritesOutsideWorkingDirectories, true);
+  assert.equal(CLAUDE_CODE_WORKER_SETTINGS.sandbox.enabled, true);
+  assert.equal(CLAUDE_CODE_WORKER_SETTINGS.sandbox.allowUnsandboxedCommands, false);
+  assert.equal(CLAUDE_CODE_WORKER_SETTINGS.sandbox.failIfUnavailable, true);
   assert.equal(args.includes("--permission-mode"), true);
   assert.equal(args.includes("dontAsk"), true);
   assert.equal(args.includes("bypassPermissions"), false);

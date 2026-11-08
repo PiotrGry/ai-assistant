@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -53,7 +53,7 @@ class AdapterFactory implements WorkerAdapterContractFactory {
 registerWorkerAdapterContractSuite({ name: "Claude Code process adapter", factory: () => new AdapterFactory(), normalizesInvalidResults: true });
 
 test("runs the same process boundary in the exact assigned worktree with shell disabled", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pirx-claude-adapter-process-test-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pirx-claude-adapter-process-test-")));
   const worktree = join(root, "assigned-worktree");
   const executable = join(root, "fake-claude.cjs");
   const capture = join(root, "capture.json");

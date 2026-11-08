@@ -3,7 +3,7 @@ import { createHash, createHmac } from "node:crypto";
 export const HOST_AUTHORIZATION_META_KEY = "pirx.hostAuthorization";
 
 export interface HostToolAuthorization {
-  readonly version: 1;
+  readonly version: 2;
   readonly toolName: string;
   readonly target: string;
   readonly argumentsHash: string;
@@ -36,17 +36,18 @@ export function createHostAuthorization(
   toolName: string,
   arguments_: Record<string, unknown>,
   operationId: string,
+  idempotencyKey: string = operationId,
 ): HostToolAuthorization {
   const target = toolTarget(toolName, arguments_);
   const hash = argumentsHash(arguments_);
-  const payload = [toolName, target, hash, operationId].join("\u0000");
+  const payload = [toolName, target, hash, operationId, idempotencyKey].join("\u0000");
   return {
-    version: 1,
+    version: 2,
     toolName,
     target,
     argumentsHash: hash,
     operationId,
-    idempotencyKey: operationId,
+    idempotencyKey,
     signature: createHmac("sha256", secret).update(payload).digest("base64url"),
   };
 }

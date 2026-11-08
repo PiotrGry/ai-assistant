@@ -12,13 +12,17 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p ../config/tsconfig.json && tsc -p tsconfig.json",
     "build:test": "tsc -p tsconfig.test.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
     "github:round-trip": "npm run build && node --enable-source-maps dist/round-trip-cli.js",
     "claude:round-trip": "npm run build && node --enable-source-maps dist/claude/round-trip-cli.js",
+    "claude:isolation-smoke": "npm run build && tsc -p tsconfig.test.json && node --enable-source-maps dist-test/test/claude-worker-isolation-smoke.js",
     "start:headless": "npm run build && node --enable-source-maps dist/headless-cli.js",
     "claude:smoke": "npm run build && tsc -p tsconfig.test.json && PIRX_CLAUDE_LOCAL_SMOKE=1 node --enable-source-maps dist-test/test/claude-local-smoke.js"
+  },
+  "dependencies": {
+    "@pirx/config": "workspace:*"
   }
 }

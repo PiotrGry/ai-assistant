@@ -61,7 +61,7 @@ class FakeProjectTransport implements GitHubProjectTransport {
   readonly reads: string[] = [];
   readonly writes: string[] = [];
   failUpdateField?: string;
-  failureMode: "none" | "rate_limited" | "unknown" = "none";
+  failureMode: "none" | "rate_limited" | "unknown" | "unknown_applied" = "none";
 
   async graphqlRead<T>(request: { readonly query: string; readonly variables?: Readonly<Record<string, unknown>> }, _context: GitHubRequestContext): Promise<GitHubOperationResult<T>> {
     this.reads.push(request.query);
@@ -76,6 +76,7 @@ class FakeProjectTransport implements GitHubProjectTransport {
     if (this.failureMode === "unknown") return failure("unknown", "unknown", "unknown result", "fake", "unknown") as GitHubOperationResult<T>;
     if (request.query.includes("PirxAddProjectItem")) {
       this.item = { id: "PVTI_item-added", values: {} };
+      if (this.failureMode === "unknown_applied") return failure("unknown", "unknown", "unknown result", "fake", "unknown") as GitHubOperationResult<T>;
       return success({ addProjectV2ItemById: { item: { id: this.item.id } } }, "fake") as GitHubOperationResult<T>;
     }
     const input = request.variables?.input as { fieldId?: string; itemId?: string; value?: { singleSelectOptionId?: string; number?: number } } | undefined;
@@ -85,6 +86,7 @@ class FakeProjectTransport implements GitHubProjectTransport {
     if (name !== undefined && input?.value !== undefined && this.item !== undefined) {
       this.item.values[name] = input.value.number ?? input.value.singleSelectOptionId?.split(":").slice(1).join(":") ?? "";
     }
+    if (this.failureMode === "unknown_applied") return failure("unknown", "unknown", "unknown result", "fake", "unknown") as GitHubOperationResult<T>;
     return success({ updateProjectV2ItemFieldValue: { projectV2Item: { id: input?.itemId } } }, "fake") as GitHubOperationResult<T>;
   }
 }
@@ -127,6 +129,24 @@ test("adds a missing Issue item and updates every requested supported mapping", 
   assert.equal((transport.item as { readonly values: Readonly<Record<string, string | number>> } | undefined)?.values["Work Type"], "Task");
 });
 
+test("reconciles uncertain GraphQL writes by reading Project state without repeating the mutation", async () => {
+  const fieldTransport = new FakeProjectTransport();
+  fieldTransport.failureMode = "unknown_applied";
+  const fieldResult = await new GitHubProjectSynchronizer(fieldTransport, config, { retryPolicy: { maxAttempts: 3 } })
+    .synchronize(issue, { status: "In Progress" }, { correlationId: "unknown-field" });
+  assert.equal(fieldResult.outcome, "synchronized");
+  assert.deepEqual(fieldResult.changedFields, ["Status"]);
+  assert.equal(fieldTransport.writes.length, 1);
+
+  const addTransport = new FakeProjectTransport();
+  addTransport.item = undefined;
+  addTransport.failureMode = "unknown_applied";
+  const addResult = await new GitHubProjectSynchronizer(addTransport, config, { retryPolicy: { maxAttempts: 3 } })
+    .synchronize(issue, {}, { correlationId: "unknown-add" });
+  assert.equal(addResult.outcome, "synchronized");
+  assert.equal(addTransport.writes.length, 1);
+});
+
 test("reports schema drift, mapping errors, partial writes, rate limits, and unknown results", async () => {
   const driftTransport = new FakeProjectTransport();
   driftTransport.schema = schemaPayload({ missingOption: "Status:Done" });
@@ -150,8 +170,11 @@ test("reports schema drift, mapping errors, partial writes, rate limits, and unk
 
   const unknownTransport = new FakeProjectTransport();
   unknownTransport.failureMode = "unknown";
-  const unknown = await new GitHubProjectSynchronizer(unknownTransport, config, { retryPolicy: { maxAttempts: 1 } }).synchronize(issue, { status: "In Progress" });
+  const unknownSynchronizer = new GitHubProjectSynchronizer(unknownTransport, config, { retryPolicy: { maxAttempts: 3 } });
+  const unknown = await unknownSynchronizer.synchronize(issue, { status: "In Progress" });
   assert.equal(unknown.outcome, "unknown");
+  assert.equal((await unknownSynchronizer.synchronize(issue, { status: "In Progress" })).outcome, "unknown");
+  assert.equal(unknownTransport.writes.length, 1);
 });
 
 test("detects missing, duplicate, and wrongly typed Project fields", async () => {

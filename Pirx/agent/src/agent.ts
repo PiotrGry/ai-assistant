@@ -351,6 +351,8 @@ export class PirxAgent {
       config.mcpServerEntry,
       config.toolTimeoutMs,
       config.maxToolResultCharacters,
+      undefined,
+      config.toolProfile ?? "personal",
     );
     this.#messages = [{ role: "system", content: prompt.content }];
     this.#currentModel = config.model;
@@ -367,9 +369,10 @@ export class PirxAgent {
     await agent.checkOllama();
     try {
       await agent.#mcp.connect();
-    } catch (error) {
-      await agent.#mcp.close();
-      throw error;
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error);
+      agent.#mcpFailureReported = true;
+      hooks.onMcpUnavailable?.(`Serwer MCP jest niedostępny przy starcie: ${detail}`);
     }
 
     return agent;
@@ -517,6 +520,16 @@ export class PirxAgent {
         iteration <= this.#config.maxToolIterations;
         iteration += 1
       ) {
+        if (!this.#mcp.isAvailable && toolBudgetAvailable()) {
+          const remaining = Math.floor(deadline - performance.now());
+          const connected = remaining > 0 && await this.#mcp.ensureConnected(Math.min(this.#config.toolTimeoutMs, remaining));
+          if (connected) {
+            this.#mcpFailureReported = false;
+          } else if (!this.#mcpFailureReported) {
+            this.#mcpFailureReported = true;
+            this.#hooks.onMcpUnavailable?.(`Serwer MCP jest niedostępny: ${this.#mcp.unavailableReason ?? "nie udało się odbudować połączenia w budżecie tury"}`);
+          }
+        }
         const mayExecuteTools = iteration < this.#config.maxToolIterations && toolBudgetAvailable();
         const tools = mayExecuteTools ? this.#mcp.ollamaTools : [];
         const baseMessages = this.#messagesForModel();
@@ -829,8 +842,12 @@ export class PirxAgent {
           const execution = await this.#mcp.callTool(
             name,
             arguments_,
-            actionPlan === undefined ? undefined : { operationId: actionPlan.mutationId },
+            actionPlan === undefined ? undefined : {
+              operationId: actionPlan.operationId,
+              idempotencyKey: actionPlan.mutationId,
+            },
             Math.min(this.#config.maxToolResultCharacters ?? 12_000, maximumResultCharacters - resultCharacters),
+            Math.max(1, Math.floor(deadline - performance.now())),
           );
           const operationState = execution.outcome === "succeeded" ? "succeeded" : execution.outcome === "unknown" ? "unknown" : "failed";
           const toolMessage = actionPlan !== undefined && operationState === "unknown"
