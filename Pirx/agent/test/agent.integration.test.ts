@@ -281,7 +281,8 @@ test("textual tool markup after the tool budget is exhausted is never presented 
   const turn = await agent.chat("Sprawdź wynik.");
   assert.equal(turn.metrics.tool_calls, 8);
   assert.equal(turn.metrics.done_reason, "tool_iteration_limit");
-  assert.match(turn.content, /Ta akcja nie została wykonana/u);
+  assert.match(turn.content, /Osiągnięto limit 8 rund wywołań narzędzi/u);
+  assert.doesNotMatch(turn.content, /zapisał wywołanie narzędzia jako tekst/u);
   assert.equal(turn.content.includes("<tool_call>"), false);
   assert.equal(ollama.requests.length, 9);
   const final = ollama.requests[8]!;
