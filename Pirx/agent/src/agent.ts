@@ -531,6 +531,8 @@ export class PirxAgent {
           }
         }
         const mayExecuteTools = iteration < this.#config.maxToolIterations && toolBudgetAvailable();
+        const toolLimitMessage = `Osiągnięto limit ${this.#config.maxToolIterations} rund wywołań narzędzi. ` +
+          "Ostatnia żądana akcja nie została wykonana. Napisz „kontynuuj”, aby wznowić od zapisanych wyników.";
         const tools = mayExecuteTools ? this.#mcp.ollamaTools : [];
         const baseMessages = this.#messagesForModel();
         const messagesForModel = mayExecuteTools
@@ -725,7 +727,10 @@ export class PirxAgent {
         if (toolCalls.length === 0) {
           const textToolCall = /<\/?(?:tool_call|function(?:=|\s|>)|parameter(?:=|\s|>))/iu.test(response.message.content);
           if (textToolCall) {
-            finalContent = "Model zapisał wywołanie narzędzia jako tekst zamiast wykonać poprawne wywołanie. Ta akcja nie została wykonana. Wyniki wcześniejszych narzędzi są zachowane; nie potwierdzam rozpoczęcia ani zakończenia pracy na podstawie tego tekstu.";
+            // Without tools the model can only write markup; report the real cause.
+            finalContent = mayExecuteTools
+              ? "Model zapisał wywołanie narzędzia jako tekst zamiast wykonać poprawne wywołanie. Ta akcja nie została wykonana. Wyniki wcześniejszych narzędzi są zachowane; nie potwierdzam rozpoczęcia ani zakończenia pracy na podstawie tego tekstu."
+              : toolLimitMessage;
             totals.doneReason = mayExecuteTools ? "text_tool_call_rejected" : "tool_iteration_limit";
             this.#messages.push({ role: "assistant", content: finalContent });
           } else {
@@ -738,8 +743,7 @@ export class PirxAgent {
         if (!mayExecuteTools || tools.length === 0) {
           finalContent = mayExecuteTools
             ? "Serwer MCP jest niedostępny, więc nie wykonano kolejnego wywołania narzędzia."
-            : `Osiągnięto limit ${this.#config.maxToolIterations} rund wywołań narzędzi. ` +
-            "Ostatnia żądana akcja nie została wykonana.";
+            : toolLimitMessage;
           this.#messages.push({ role: "assistant", content: finalContent });
           totals.doneReason = mayExecuteTools
             ? "mcp_unavailable"
