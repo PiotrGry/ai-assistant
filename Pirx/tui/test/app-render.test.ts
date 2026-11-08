@@ -26,7 +26,7 @@ class FakeStdin extends EventEmitter {
   public pause(): void {}
 }
 
-test("live viewport stays below terminal height so Ink never clears scrollback", async () => {
+test("chat history stays visible and Ink never clears the terminal", async () => {
   const { render } = await import("ink");
   const { App } = await import("../src/app.js");
   const { TuiEventBus } = await import("../src/events.js");
@@ -47,6 +47,10 @@ test("live viewport stays below terminal height so Ink never clears scrollback",
   instance.unmount();
 
   const clearTerminal = "\u001B[2J";
-  assert.ok(stdout.writes.length > 0);
+  const output = stdout.writes.join("");
+  assert.match(output, /hello/u);
+  assert.match(output, /hi/u);
+  // The live area is content-sized, so history is not pushed off-screen.
+  assert.ok(stdout.writes.every((chunk) => chunk.split("\n").length < stdout.rows));
   assert.equal(stdout.writes.some((chunk) => chunk.includes(clearTerminal)), false);
 });
