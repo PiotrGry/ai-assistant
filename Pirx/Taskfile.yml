@@ -7,6 +7,14 @@ tasks:
     cmds:
       - pnpm build
       - pnpm tui
+
+  "Pirx:all":
+    desc: Start Pirx with every tool group (private data and GitHub in one session)
+    env:
+      PIRX_TOOL_PROFILE: all
+    cmds:
+      - pnpm build
+      - pnpm tui
   "Pirx:personal":
     desc: Start Pirx with private Obsidian and Calendar tools only
     env:

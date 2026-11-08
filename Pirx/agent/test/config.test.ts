@@ -15,7 +15,8 @@ test("agent configuration resolves the same bounded tool profile for CLI and TUI
   assert.equal(loadConfig({}).toolProfile, "personal");
   assert.equal(loadConfig({ PIRX_TOOL_PROFILE: "development" }).toolProfile, "development");
   assert.equal(loadConfig({ PIRX_TOOL_PROFILE: "operations" }).toolProfile, "operations");
-  assert.throws(() => loadConfig({ PIRX_TOOL_PROFILE: "all" }), /PIRX_TOOL_PROFILE/u);
+  assert.equal(loadConfig({ PIRX_TOOL_PROFILE: "all" }).toolProfile, "all");
+  assert.throws(() => loadConfig({ PIRX_TOOL_PROFILE: "unbounded" }), /PIRX_TOOL_PROFILE/u);
   assert.throws(() => loadConfig({ PIRX_TOOL_PROFILE: "" }), /PIRX_TOOL_PROFILE/u);
 });
 

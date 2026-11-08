@@ -8,7 +8,7 @@ export interface ProfileSettingDefinition {
   readonly forwardToMcp: boolean;
 }
 
-export const TOOL_PROFILES = ["personal", "development", "operations"] as const;
+export const TOOL_PROFILES = ["personal", "development", "operations", "all"] as const;
 export type ToolProfile = typeof TOOL_PROFILES[number];
 export type ToolScope = "common" | "personal" | "development" | "operations";
 
@@ -17,6 +17,9 @@ export const TOOL_PROFILE_SCOPES: Readonly<Record<ToolProfile, ReadonlySet<ToolS
   personal: new Set<ToolScope>(["common", "personal"]),
   development: new Set<ToolScope>(["common", "development"]),
   operations: new Set<ToolScope>(["common", "development", "operations"]),
+  // Explicit operator opt-in: private Calendar/Obsidian data shares a session
+  // with GitHub write tools, so untrusted Issue text can steer private data.
+  all: new Set<ToolScope>(["common", "personal", "development", "operations"]),
 });
 
 export function resolveToolProfile(environment: NodeJS.ProcessEnv): ToolProfile {

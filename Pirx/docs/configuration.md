@@ -65,6 +65,10 @@ environment. Chat model settings are not sent to the main MCP server.
 the MCP child registers only that profile's tool groups. The safe default is
 `personal`. `development` excludes private Calendar/Obsidian tools, while
 `operations` adds daemon control and observability to the development set.
+`all` is an explicit operator opt-in that combines every group. It removes the
+separation between private Calendar/Obsidian data and GitHub write tools, so
+untrusted Issue or CI text in the same session can attempt to move private data
+into GitHub; mutations still require exact host authorization.
 Unknown values fail startup and never fall back to a wider catalog.
 `PIRX_STORAGE_FILE` is the deliberate exception among chat-owned paths: MCP
 needs the resolved path only to prove that the runtime database is not the chat
@@ -98,7 +102,7 @@ means the integration is opt-in or the owning loader requires the value.
 | `PIRX_STORAGE_FILE` | chat / path | XDG data `pirx/pirx.sqlite` | yes | alias protection only |
 | `PIRX_STORAGE_MODE` | chat / enum | `full_local` | no | no |
 | `PIRX_RESOURCE_SAMPLE_INTERVAL_MS` | chat / positive integer | `1000` | no | no |
-| `PIRX_TOOL_PROFILE` | chat / `personal`, `development`, `operations` | `personal` | no | yes |
+| `PIRX_TOOL_PROFILE` | chat / `personal`, `development`, `operations`, `all` | `personal` | no | yes |
 | `PIRX_ORCHESTRATOR_CONFIG` | runtime / absolute path | XDG config `pirx/orchestrator.json` | yes | yes |
 | `PIRX_ORCHESTRATOR_DATABASE` | runtime / path identity constraint | profile `databasePath`; direct override only in unmanaged chat-only mode | yes | yes |
 | `PIRX_ORCHESTRATOR_SERVICE_ENABLED` | runtime / exact boolean text | disabled | no | yes |

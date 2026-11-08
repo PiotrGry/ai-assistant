@@ -132,7 +132,7 @@ test("development and operations profiles expose only their shared matrix and re
       await fixture.server.close();
     }
   });
-  const connect = async (profile: "development" | "operations") => {
+  const connect = async (profile: "development" | "operations" | "all") => {
     const server = createMcpServer({ environment: { PIRX_TOOL_PROFILE: profile } });
     const client = new Client({ name: `${profile}-profile-test`, version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -164,6 +164,11 @@ test("development and operations profiles expose only their shared matrix and re
     operations.client.callTool({ name: "calendar_list_events", arguments: {} }),
     /Tool calendar_list_events not found/u,
   );
+
+  const all = await connect("all");
+  for (const name of ["github_issue_get", "pirx_task_history", "pirx_orchestrator_status", "obsidian_read", "calendar_list_events"]) {
+    assert.ok(all.names.includes(name), name);
+  }
 
   assert.throws(() => createMcpServer({ environment: { PIRX_TOOL_PROFILE: "unbounded" } }), /PIRX_TOOL_PROFILE/u);
 });
