@@ -1,5 +1,7 @@
 export interface TuiLayout {
   readonly rows: number;
+  /** Live viewport height; one row below the terminal so Ink never clears scrollback. */
+  readonly viewportRows: number;
   readonly columns: number;
   readonly contentWidth: number;
   readonly compact: boolean;
@@ -22,6 +24,9 @@ export function calculateTuiLayout(
 
   return {
     rows: terminalRows,
+    // Ink 5 clears the whole terminal and reprints all <Static> history on every
+    // render once output reaches stdout.rows, which makes the chat jump.
+    viewportRows: Math.max(1, terminalRows - 1),
     columns: terminalColumns,
     contentWidth: Math.max(1, terminalColumns - 2),
     compact,

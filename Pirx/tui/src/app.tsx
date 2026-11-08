@@ -197,7 +197,7 @@ export function App({ agent, events, recorder, initialNotice, initialHistory = [
   return (
     <Box
       flexDirection="column"
-      height={layout.rows}
+      height={layout.viewportRows}
       paddingX={1}
       overflow="hidden"
     >
