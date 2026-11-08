@@ -14,7 +14,14 @@ test("chat forwards runtime configuration to the real MCP child and can pause/re
   const filename = join(root, "runtime.sqlite");
   const directory = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
   // Exercise the built runtime boundary without adding an agent production dependency.
-  const { RuntimeSqliteStore, OrchestratorControlRepository } = await import(pathToFileURL(resolve(directory, "orchestrator", "dist", "index.js")).href);
+  const {
+    RuntimeSqliteStore,
+    OrchestratorControlRepository,
+    WorkerLifecycleCoordinator,
+    createTask,
+    createWorkerFailureDiagnostic,
+    createWorkerRequest,
+  } = await import(pathToFileURL(resolve(directory, "orchestrator", "dist", "index.js")).href);
   const store = RuntimeSqliteStore.open({ filename });
   const at = new Date().toISOString();
   new OrchestratorControlRepository(store).heartbeat("paused", at);
@@ -102,6 +109,64 @@ test("chat forwards runtime configuration to the real MCP child and can pause/re
   assert.equal(tasksBeforeRestart.outcome === "success" ? tasksBeforeRestart.value.length : -1, 0);
   await client.close();
 
+  const questionTask = createTask({
+    id: "cross-process-question-task",
+    githubReference: { owner: "PiotrGry", repository: "ai-assistant", issueNumber: 231 },
+    goal: "Prove a durable operator question crosses the chat process boundary",
+    scope: "isolated CI acceptance fixture",
+    acceptanceCriteria: ["one authorized answer", "no duplicate decision"],
+    priority: 1,
+    risk: "medium",
+    requiredCapabilities: ["repository.read"],
+    createdAt: at,
+  });
+  assert.equal(questionTask.ok, true);
+  if (!questionTask.ok) return;
+  assert.equal(store.tasks.create(questionTask.value).outcome, "success");
+  const questionAttempt = store.startAttempt(questionTask.value.id, {
+    id: "cross-process-question-attempt",
+    worker: "pirx-worker",
+    provider: "fixture",
+    branch: "pirx/cross-process-question",
+    worktree: "/tmp/pirx-cross-process-question",
+  }, at);
+  assert.equal(questionAttempt.outcome, "success");
+  if (questionAttempt.outcome !== "success") return;
+  const request = createWorkerRequest({
+    task: questionAttempt.value.task,
+    attempt: questionAttempt.value.attempt,
+    workerId: "pirx-worker",
+    provider: "fixture",
+    repository: { owner: "PiotrGry", repository: "ai-assistant" },
+    workspace: { branch: "pirx/cross-process-question", worktree: "/tmp/pirx-cross-process-question" },
+    capabilityGrant: {
+      grantedCapabilities: ["repository.read"],
+      resourceScope: {
+        repository: "PiotrGry/ai-assistant",
+        branch: "pirx/cross-process-question",
+        worktree: "/tmp/pirx-cross-process-question",
+      },
+    },
+    correlationId: "cross-process-question-231",
+    limits: { timeoutMs: 1_000, maxOutputBytes: 4_096, maxErrorBytes: 4_096 },
+  });
+  assert.equal(request.ok, true);
+  if (!request.ok) return;
+  const workerDiagnostic = createWorkerFailureDiagnostic("operator_input_required");
+  const blocked = await new WorkerLifecycleCoordinator(store, {
+    execute: async () => ({
+      kind: "worker_result" as const,
+      schemaVersion: 1 as const,
+      taskId: request.value.taskId,
+      attemptId: request.value.attemptId,
+      correlationId: request.value.correlationId,
+      outcome: "BLOCKED" as const,
+      reason: "Choose the safe fixture option.",
+      diagnostic: workerDiagnostic,
+    }),
+  }, { now: () => at }).execute(request.value, new AbortController().signal);
+  assert.equal(blocked.outcome, "terminal_recorded");
+
   const restarted = new PirxMcpClient(resolve(directory, "mcp-server", "dist", "index.js"), 30_000, 12_000, undefined, profile);
   context.after(async () => { await restarted.close(); });
   await restarted.connect();
@@ -109,6 +174,28 @@ test("chat forwards runtime configuration to the real MCP child and can pause/re
   assert.equal(persisted.isError, false, persisted.text);
   assert.equal((JSON.parse(persisted.text) as { intake: { operationId: string; state: string } }).intake.operationId, workArguments.operationId);
   assert.equal((JSON.parse(persisted.text) as { intake: { state: string } }).intake.state, "accepted");
+  const listed = await restarted.callTool("pirx_operator_questions", {});
+  assert.equal(listed.isError, false, listed.text);
+  const questions = (JSON.parse(listed.text) as { questions: Array<{ id: string; version: number; prompt: string }> }).questions;
+  assert.equal(questions.length, 1);
+  assert.equal(questions[0]?.prompt, "Choose the safe fixture option.");
+  const decisionArguments = {
+    questionId: questions[0]!.id,
+    expectedVersion: questions[0]!.version,
+    operationId: "cross-process-answer-231",
+    answer: "Use the safe fixture option.",
+  };
+  const decision = await restarted.callTool("pirx_operator_decision", decisionArguments, { operationId: decisionArguments.operationId });
+  assert.equal(decision.isError, false, decision.text);
+  assert.equal((JSON.parse(decision.text) as { outcome: string }).outcome, "accepted");
+  const replay = await restarted.callTool("pirx_operator_decision", decisionArguments, { operationId: decisionArguments.operationId });
+  assert.equal(replay.isError, false, replay.text);
+  assert.equal((JSON.parse(replay.text) as { outcome: string }).outcome, "replayed");
+  const afterDecision = store.operatorDecisions.listOpen();
+  assert.equal(afterDecision.outcome, "success");
+  assert.deepEqual(afterDecision.outcome === "success" ? afterDecision.value : [], []);
+  const questionAttempts = store.attempts.listByTask(questionTask.value.id);
+  assert.equal(questionAttempts.outcome === "success" ? questionAttempts.value.length : -1, 1);
 });
 
 test("błędna nazwa narzędzia nie wyłącza serwera MCP", async (context) => {
