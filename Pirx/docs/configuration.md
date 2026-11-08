@@ -160,3 +160,8 @@ are not general chat-profile settings:
 Production code must not add another hand-maintained child-process allowlist.
 Add shared settings to the registry with explicit ownership and forwarding
 metadata, then add a regression covering the relevant process boundary.
+
+The production Claude code-worker additionally requires Claude Code 2.1.314+
+and, on Linux/WSL2, `bubblewrap` plus `socat` on the daemon's `PATH`. The worker
+fails closed before execution when the version is unsupported or the required
+sandbox cannot start. See [Claude Code worker isolation](claude-worker-isolation.md).
