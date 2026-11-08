@@ -91,7 +91,10 @@ Każda sesja ma jeden jawny profil narzędzi MCP:
 - `operations` — zakres development oraz status, diagnostyka, logi, zasoby i
   sterowanie daemonem/shipmentem.
 
-Profile prywatny i operatorski nigdy nie są łączone. Nieznane
+Profile prywatny i operatorski są łączone wyłącznie w jawnie wybranym profilu
+`all` (`task Pirx:all`). Wtedy niezaufana treść Issue lub CI w tej samej sesji
+może próbować przenieść prywatne dane do GitHub; mutacje nadal wymagają
+dokładnej autoryzacji hosta. Nieznane
 `PIRX_TOOL_PROFILE` zatrzymuje start zamiast rozszerzać dostęp. Zwykłe
 `task Pirx` jawnie uruchamia dotychczasowy workflow orkiestracji jako
 `operations`; dostępne są też `task Pirx:personal`, `task Pirx:development` i
