@@ -52,7 +52,10 @@ test("maps the complete code-worker grant to a bounded Claude profile", () => {
   const value = buildClaudeCodeWorkerProfile(request(), policy);
   assert.equal(value.ok, true);
   if (!value.ok) return;
-  assert.deepEqual(value.value.tools, ["Read", "Glob", "Grep", "Edit", "Write", "Bash"]);
+  assert.deepEqual(value.value.tools, ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "Edit", "Write", "Bash"]);
+  assert.ok(value.value.allowedTools.includes("WebFetch"));
+  assert.ok(value.value.allowedTools.includes("WebSearch"));
+  assert.equal(value.value.disallowedTools.includes("WebFetch"), false);
   assert.equal(value.value.permissionMode, "dontAsk");
   assert.equal(value.value.maxTurns, 16);
   assert.ok(value.value.allowedTools.includes("Bash(pnpm check)"));
@@ -108,7 +111,10 @@ test("removing one capability removes only its corresponding authority", () => {
     const value = buildClaudeCodeWorkerProfile(request(all.filter((item) => item !== missing)), policy);
     assert.equal(value.ok, true, missing);
     if (!value.ok) continue;
-    if (missing === "repository.read") assert.deepEqual(value.value.tools.filter((item) => ["Read", "Glob", "Grep"].includes(item)), []);
+    if (missing === "repository.read") {
+      assert.deepEqual(value.value.tools.filter((item) => ["Read", "Glob", "Grep", "WebFetch", "WebSearch"].includes(item)), []);
+      assert.ok(value.value.disallowedTools.includes("WebFetch") && value.value.disallowedTools.includes("WebSearch"));
+    }
     if (missing === "repository.write") assert.deepEqual(value.value.tools.filter((item) => ["Edit", "Write"].includes(item)), []);
     if (missing === "tests.run") assert.equal(value.value.allowedTools.some((item) => item.startsWith("Bash(pnpm") || item.startsWith("Bash(npm")), false);
     if (missing === "git.commit") assert.equal(value.value.allowedTools.some((item) => item.startsWith("Bash(git commit")), false);
