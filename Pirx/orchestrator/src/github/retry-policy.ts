@@ -87,7 +87,8 @@ function defaultSleep(delayMs: number, signal: AbortSignal | undefined): Promise
       signal?.removeEventListener("abort", abort);
       resolve();
     }, delayMs);
-    timer.unref?.();
+    // Keep this timer referenced: the daemon awaits it, and an unref'd timer
+    // lets Node exit with code 0 mid-retry (systemd then does not restart it).
     const abort = () => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", abort);
