@@ -157,6 +157,8 @@ test("development and operations profiles expose only their shared matrix and re
   assert.ok(operations.names.includes("github_issue_get"));
   assert.ok(operations.names.includes("pirx_orchestrator_status"));
   assert.ok(operations.names.includes("pirx_orchestrator_logs"));
+  assert.ok(operations.names.includes("pirx_task_unblock"));
+  assert.ok(!development.names.includes("pirx_task_unblock"));
   assert.ok(operations.names.includes("pirx_resource_report"));
   assert.ok(!operations.names.includes("obsidian_read"));
   assert.ok(!operations.names.includes("calendar_list_events"));

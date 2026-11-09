@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { createCheckpoint, type CheckpointId } from "./checkpoint.js";
 import { transitionTask, type AttemptId, type AttemptSnapshot, type TaskId, type UtcTimestamp } from "./task-domain.js";
-import type { RuntimeSqliteStore } from "./sqlite.js";
+import type { RuntimeSqliteStore, StorageResult } from "./sqlite.js";
 
 export const RESUME_ESCALATION_SCHEMA_VERSION = 1 as const;
 export const RESUME_ESCALATION_LIMITS = Object.freeze({ defaultMaximumFailures: 3, maximumFailures: 20 } as const);
@@ -136,4 +136,74 @@ export class ResumeEscalationCoordinator {
     if (committed.outcome !== "success") return { outcome: "storage_error", taskId, message: committed.message };
     return { outcome: committed.value, taskId, reason: current.reason, message: current.message, checkpointId: id, evidence: currentEvidence };
   }
+}
+
+export interface OperatorUnblockInput {
+  readonly taskId: string;
+  readonly operationId: string;
+  readonly reason: string;
+  readonly unblockedAt: UtcTimestamp;
+}
+
+export interface OperatorUnblockAcceptance {
+  readonly taskId: TaskId;
+  readonly checkpointId: CheckpointId;
+  readonly replayed: boolean;
+}
+
+export function operatorUnblockCheckpointId(taskId: string, attemptId: string): CheckpointId {
+  return `operator-unblock-${createHash("sha256").update(`${taskId}:${attemptId}`, "utf8").digest("hex")}` as CheckpointId;
+}
+
+/** True when the latest Checkpoint is the operator approval for one more resume of `latestAttemptId`. */
+export function isOperatorUnblockCheckpoint(checkpoint: { readonly id: string; readonly taskId: string; readonly previousAttemptId: string }, latestAttemptId: string): boolean {
+  return checkpoint.previousAttemptId === latestAttemptId && checkpoint.id === operatorUnblockCheckpointId(checkpoint.taskId, latestAttemptId);
+}
+
+/**
+ * Durably approve one more resume of a Task stopped by the resume failure
+ * limit. Ambiguous results stay blocked: they need reconciliation, not retry.
+ * The daemon still validates the workspace, acquires a Lease and creates the
+ * successor Attempt; a further failure escalates again.
+ */
+export function unblockEscalatedTask(store: RuntimeSqliteStore, input: OperatorUnblockInput): StorageResult<OperatorUnblockAcceptance> {
+  const reason = input.reason.trim();
+  if (reason.length === 0 || reason.length > 256 || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(input.operationId)) return { outcome: "invalid_record", message: "Unblock requires a bounded reason and a safe operationId." };
+  return store.transaction<OperatorUnblockAcceptance>(({ tasks, attempts, checkpoints }) => {
+    const task = tasks.get(input.taskId);
+    if (task.outcome !== "success") return task;
+    const history = attempts.listByTask(input.taskId);
+    if (history.outcome !== "success") return history;
+    const latest = history.value[history.value.length - 1];
+    if (latest?.state !== "terminal") return { outcome: "conflict" as const, message: "Task has no terminal latest Attempt to resume from." };
+    const id = operatorUnblockCheckpointId(task.value.id, latest.id);
+    const existing = checkpoints.get(id);
+    if (existing.outcome === "success") {
+      return existing.value.evidence.some((item) => item.reference === `operation:${input.operationId}`)
+        ? { outcome: "success" as const, value: { taskId: task.value.id, checkpointId: id, replayed: true } }
+        : { outcome: "conflict" as const, message: "This Attempt was already unblocked by another operation." };
+    }
+    if (existing.outcome !== "not_found") return existing;
+    if (task.value.state !== "blocked") return { outcome: "conflict" as const, message: `Task state ${task.value.state} is not blocked.` };
+    if (latest.result !== "FAILED" && latest.result !== "QUOTA_EXHAUSTED") return { outcome: "invalid_record" as const, message: `Latest Attempt result ${latest.result} cannot be resumed by unblock; ambiguous or blocked results need reconciliation.` };
+    const escalation = checkpoints.latestByTask(task.value.id);
+    if (escalation.outcome !== "success") return escalation;
+    if (escalation.value.id !== checkpointId(task.value.id, latest.id, "RESUME_FAILURE_LIMIT_REACHED") || task.value.blockingReason !== escalation.value.blockingReason) return { outcome: "conflict" as const, message: "Task is not blocked by the resume failure limit." };
+    const { kind: _kind, schemaVersion: _schemaVersion, ...base } = escalation.value;
+    const created = createCheckpoint({
+      ...base,
+      id,
+      trigger: latest.result === "QUOTA_EXHAUSTED" ? "PROVIDER_QUOTA" : "RECOVERABLE_FAILURE",
+      createdAt: input.unblockedAt,
+      currentState: "blocked",
+      findings: [...base.findings, `Operator unblock reason: ${reason}`],
+      evidence: [...base.evidence, { reference: `operation:${input.operationId}`, summary: "Operator explicitly approved one more resume Attempt." }],
+      lastAction: "operator unblocked the Task after resume escalation",
+      resumeInstruction: "Resume once from the latest Attempt evidence; another failure escalates again.",
+    });
+    if (!created.ok) return { outcome: "invalid_record" as const, message: created.violations[0]?.message ?? "Operator unblock Checkpoint is invalid." };
+    const saved = checkpoints.save(created.value);
+    if (saved.outcome !== "success") return saved;
+    return { outcome: "success" as const, value: { taskId: task.value.id, checkpointId: id, replayed: false } };
+  });
 }

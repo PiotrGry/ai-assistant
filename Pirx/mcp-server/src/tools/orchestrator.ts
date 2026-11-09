@@ -9,6 +9,7 @@ import {
   HostShutdownRepository,
   RuntimeSqliteStore,
   RuntimeStorageError,
+  unblockEscalatedTask,
   type ExecutionReportQuery,
   type ExecutionReportResult,
   type OrchestratorDiagnosticChunk,
@@ -20,6 +21,8 @@ import {
   type OperatorDecisionAcceptance,
   type OperatorDecisionInput,
   type OperatorQuestionRecord,
+  type OperatorUnblockAcceptance,
+  type OperatorUnblockInput,
   type WorkIntakeInput,
   type WorkIntakeRecord,
   type StorageResult,
@@ -35,6 +38,7 @@ export interface OrchestratorControlToolPort {
   diagnostic?(sequence: number, offset: number, length: number): StorageResult<OrchestratorDiagnosticChunk>;
   operatorQuestions?(): StorageResult<readonly OperatorQuestionRecord[]>;
   answerOperatorQuestion?(input: OperatorDecisionInput): StorageResult<OperatorDecisionAcceptance>;
+  unblockTask?(input: OperatorUnblockInput): StorageResult<OperatorUnblockAcceptance>;
   submitWork?(input: WorkIntakeInput): StorageResult<WorkIntakeRecord>;
   workStatus?(intakeId: string): StorageResult<WorkIntakeRecord>;
 }
@@ -74,6 +78,7 @@ export class SqliteOrchestratorControlToolPort implements OrchestratorControlToo
   public diagnostic(sequence: number, offset: number, length: number): StorageResult<OrchestratorDiagnosticChunk> { return this.#withStore((_store, repository) => repository.diagnostic(sequence, offset, length), "read_only"); }
   public operatorQuestions(): StorageResult<readonly OperatorQuestionRecord[]> { return this.#withStore((store) => store.operatorDecisions.listOpen(), "read_only"); }
   public answerOperatorQuestion(input: OperatorDecisionInput): StorageResult<OperatorDecisionAcceptance> { return this.#withStore((store) => store.operatorDecisions.answer(input)); }
+  public unblockTask(input: OperatorUnblockInput): StorageResult<OperatorUnblockAcceptance> { return this.#withStore((store) => unblockEscalatedTask(store, input)); }
   public submitWork(input: WorkIntakeInput): StorageResult<WorkIntakeRecord> { return this.#withStore((store) => store.workIntakes.create(input)); }
   public workStatus(intakeId: string): StorageResult<WorkIntakeRecord> { return this.#withStore((store) => store.workIntakes.get(intakeId), "read_only"); }
   public request(input: OrchestratorControlRequest): OrchestratorControlRequestResult {
@@ -205,6 +210,24 @@ export function registerOrchestratorTools(server: McpServer, options: { readonly
     const value = options.port.answerOperatorQuestion({ ...arguments_, decidedBy: "mcp-chat", decidedAt: now() });
     if (value.outcome === "success") return structured({ outcome: value.value.replayed ? "replayed" : "accepted", questionId: value.value.question.id, taskId: value.value.question.taskId, state: "answered", version: value.value.question.version, resumeCheckpointId: value.value.checkpoint.id, message: value.value.replayed ? "The same durable operator decision was already accepted." : "The operator decision was accepted; the normal scheduler may resume the Task after acquiring a Lease." });
     return structured({ outcome: value.outcome === "not_found" ? "not_found" : value.outcome === "conflict" ? "conflict" : value.outcome === "invalid_record" ? "invalid_request" : "unavailable", questionId: input.questionId, message: value.message }, true);
+  });
+
+  server.registerTool("pirx_task_unblock", {
+    title: "Unblock a Task stopped by the resume failure limit",
+    description: "Durably approve one more resume Attempt for a Task blocked after repeated FAILED or QUOTA_EXHAUSTED resumes. Read pirx_task_history and the latest Attempt diagnostic first and state the reason. Ambiguous or operator-question blocks are refused. The daemon still validates the workspace and acquires a Lease; another failure escalates again.",
+    inputSchema: z.object({ taskId: operationIdSchema, operationId: operationIdSchema, reason: z.string().trim().min(1).max(256) }).strict(),
+    outputSchema: z.union([
+      z.object({ outcome: z.enum(["unblocked", "replayed"]), taskId: z.string(), checkpointId: z.string(), message: z.string() }),
+      z.object({ outcome: z.enum(["authorization_required", "unconfigured", "not_found", "conflict", "invalid_request", "unavailable"]), taskId: z.string(), message: z.string() }),
+    ]),
+    annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: false },
+  }, async (input, context) => {
+    const arguments_ = { taskId: input.taskId, operationId: input.operationId, reason: input.reason };
+    if (verifyHostAuthorization(options.authorizationSecret, context.mcpReq._meta, "pirx_task_unblock", arguments_) === undefined) return structured({ outcome: "authorization_required", taskId: input.taskId, message: "Exact host authorization is required to unblock a Task." }, true);
+    if (options.port?.unblockTask === undefined) return structured({ outcome: "unconfigured", taskId: input.taskId, message: options.configurationError ?? "Task unblock is not configured." }, true);
+    const value = options.port.unblockTask({ ...arguments_, unblockedAt: now() });
+    if (value.outcome === "success") return structured({ outcome: value.value.replayed ? "replayed" : "unblocked", taskId: value.value.taskId, checkpointId: value.value.checkpointId, message: value.value.replayed ? "The same unblock was already recorded." : "The Task is approved for one more resume; the daemon starts it on its next cycle after workspace validation and a Lease." });
+    return structured({ outcome: value.outcome === "not_found" ? "not_found" : value.outcome === "conflict" ? "conflict" : value.outcome === "invalid_record" ? "invalid_request" : "unavailable", taskId: input.taskId, message: value.message }, true);
   });
 
   server.registerTool("pirx_work_submit", {

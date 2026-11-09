@@ -44,7 +44,7 @@ function summarizeAttempt(attempt: AttemptSnapshot) {
 
 export function registerTaskHistory(server: McpServer, filename: string | undefined, configurationError?: string, checkBinding: RuntimeBindingCheck = () => {}): void {
   server.registerTool("pirx_task_history", {
-    description: "Read the durable state and paged Attempts of a specific Task, including Tasks outside Queue. Use taskId or repository plus issueNumber. Pass nextAfterOrdinal for the next page. Use attemptId alone for its sanitized diagnostic, when available. No work is started.",
+    description: "Read the durable state and paged Attempts of a specific Task, including Tasks outside Queue. Use taskId or repository plus issueNumber. Pass nextAfterOrdinal for the next page. Use attemptId alone for its sanitized diagnostic, when available; diagnostic.providerMessage holds the bounded Claude CLI error output when it was recorded (Attempts run before 2026-11-04 have none). No work is started.",
     inputSchema,
     annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
   }, async (input) => {

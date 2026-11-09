@@ -1,4 +1,5 @@
 import { backup, DatabaseSync } from "node:sqlite";
+import { isOperatorUnblockCheckpoint } from "./resume-escalation.js";
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -1856,6 +1857,15 @@ export class TaskSelectionRepository {
     if (history.outcome !== "success") return { runnable: false, reconciliationReason: `attempt_history_unavailable:${task.id}` };
     if (task.state === "blocked") {
       const latest = history.value[history.value.length - 1];
+      if (latest?.state === "terminal" && (latest.result === "FAILED" || latest.result === "QUOTA_EXHAUSTED")) {
+        const checkpoint = this.#store.checkpoints.latestByTask(task.id);
+        if (checkpoint.outcome !== "success" || !isOperatorUnblockCheckpoint(checkpoint.value, latest.id)) return { runnable: false };
+        if (checkpoint.value.currentState !== "blocked" || checkpoint.value.trigger !== (latest.result === "QUOTA_EXHAUSTED" ? "PROVIDER_QUOTA" : "RECOVERABLE_FAILURE")) return { runnable: false, reconciliationReason: `operator_unblock_checkpoint_mismatch:${task.id}` };
+        const activeLease = this.#store.leases.getActiveByTask(task.id);
+        if (activeLease.outcome === "success") return { runnable: false, reconciliationReason: `active_lease_requires_reconciliation:${task.id}` };
+        if (activeLease.outcome !== "not_found") return { runnable: false, reconciliationReason: `lease_lookup_unavailable:${task.id}` };
+        return { runnable: true };
+      }
       if (latest?.state !== "terminal" || latest.result !== "BLOCKED" || latest.diagnostic?.code !== "operator_input_required") return { runnable: false };
       const question = this.#store.operatorDecisions.latestByAttempt(latest.id);
       if (question.outcome === "not_found" || (question.outcome === "success" && question.value.state === "open")) return { runnable: false };
