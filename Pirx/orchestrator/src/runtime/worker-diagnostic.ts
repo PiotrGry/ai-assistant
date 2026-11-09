@@ -86,7 +86,7 @@ export interface WorkerFailureDiagnostic {
 const MESSAGES: Readonly<Record<WorkerFailureCode, string>> = Object.freeze({
   spawn_failure: "Worker process could not be started.",
   process_failure: "Worker process ended unsuccessfully.",
-  timeout: "Worker process exceeded its bounded time limit.",
+  timeout: "Worker produced no activity within its bounded idle window.",
   cancellation: "Worker process was cancelled.",
   authentication: "Worker authentication was not accepted.",
   quota_exhausted: "Worker provider quota was exhausted.",

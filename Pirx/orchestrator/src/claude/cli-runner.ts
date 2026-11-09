@@ -31,7 +31,8 @@ export const CLAUDE_CLI_ENV_ALLOWLIST = [
   "XDG_DATA_HOME", "XDG_CACHE_HOME",
 ] as const;
 export const DEFAULT_CLAUDE_TIMEOUT_MS = 30_000;
-export const MAX_CLAUDE_TIMEOUT_MS = 120_000;
+/** Idle window: the timer restarts whenever Claude writes output. */
+export const MAX_CLAUDE_TIMEOUT_MS = 3_600_000;
 export const DEFAULT_CLAUDE_STDOUT_BYTES = 16 * 1024;
 export const DEFAULT_CLAUDE_STDERR_BYTES = 16 * 1024;
 export const MAX_CLAUDE_OUTPUT_BYTES = 64 * 1024;
@@ -132,7 +133,7 @@ const FAILURE_MESSAGES: Record<Exclude<ClaudeRoundTripOutcome, "success">, strin
   unsupported_version: `Claude Code ${MINIMUM_CLAUDE_CODE_WORKER_VERSION} or newer is required for isolated code-worker execution.`,
   authentication_required: "Claude Code authentication is required.",
   quota_exhausted: "Claude Code quota was exhausted.",
-  timeout: "Claude Code round-trip timed out.",
+  timeout: "Claude Code produced no activity within its bounded idle window.",
   cancelled: "Claude Code round-trip was cancelled.",
   invalid_output: "Claude Code returned an invalid or oversized structured response.",
   process_error: "Claude Code process failed.",
@@ -209,7 +210,9 @@ export function buildClaudeWorkerArguments(requestId: string, prompt: string, re
   if (profile.advisorConfig !== undefined) arguments_.push("--strict-mcp-config", "--mcp-config", profile.advisorConfig);
   if (profile.allowedTools.length > 0) arguments_.push("--allowedTools", profile.allowedTools.join(","));
   if (profile.disallowedTools.length > 0) arguments_.push("--disallowedTools", profile.disallowedTools.join(","));
-  arguments_.push("--permission-mode", profile.permissionMode, "--disable-slash-commands", "--no-session-persistence", "--max-turns", String(profile.maxTurns), "--output-format", "json", "--json-schema", schema, prompt);
+  // stream-json emits one event per agent step, so the idle watchdog sees
+  // progress; the final "result" event has the same envelope as json mode.
+  arguments_.push("--permission-mode", profile.permissionMode, "--disable-slash-commands", "--no-session-persistence", "--max-turns", String(profile.maxTurns), "--output-format", "stream-json", "--verbose", "--json-schema", schema, prompt);
   return Object.freeze(arguments_);
 }
 function buildEnvironment(source: NodeJS.ProcessEnv, additional: Readonly<Record<string, string | undefined>> | undefined): NodeJS.ProcessEnv {
@@ -363,7 +366,7 @@ export class ClaudeCodeCliRunner {
       const arguments_ = request.workerProfile === undefined
         ? buildClaudeStructuredArguments(request.requestId, request.prompt, request.responseSchema)
         : buildClaudeWorkerArguments(request.requestId, request.prompt, request.responseSchema, request.workerProfile);
-      return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: arguments_, structuredOutput: true }) as ClaudeStructuredResult;
+      return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: arguments_, structuredOutput: true, stream: request.workerProfile !== undefined }) as ClaudeStructuredResult;
     } catch { return failure("process_error", request.requestId, startedAt, null); }
   }
 
@@ -390,8 +393,18 @@ export class ClaudeCodeCliRunner {
     readonly maxStdoutBytes: number; readonly maxStderrBytes: number;
     readonly arguments: readonly string[];
     readonly structuredOutput?: boolean;
+    /** stdout is stream-json: keep only the final result line, bound each line. */
+    readonly stream?: boolean;
   }): Promise<ClaudeRoundTripResult> {
     const stdoutChunks: Buffer[] = [];
+    let idleTimer: NodeJS.Timeout | undefined;
+    // Silence, not elapsed time, ends a worker: any output restarts the window.
+    const armIdle = (): void => {
+      if (terminationStarted) return;
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => { if (trigger === undefined) trigger = "timeout"; terminate(); }, input.timeoutMs);
+      idleTimer.unref();
+    };
     const stderrChunks: Buffer[] = [];
     let stdoutBytes = 0;
     let stderrBytes = 0;
@@ -425,8 +438,28 @@ export class ClaudeCodeCliRunner {
       const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined;
       return failure(code === "ENOENT" ? "claude_not_installed" : "process_error", input.requestId, input.startedAt, null);
     }
+    let streamLine = Buffer.alloc(0);
+    let streamLineOverflow = false;
+    let streamResult: string | undefined;
+    const appendStream = (chunk: Buffer): void => {
+      let rest = chunk;
+      for (let newline = rest.indexOf(10); newline !== -1; newline = rest.indexOf(10)) {
+        const line = streamLineOverflow ? undefined : Buffer.concat([streamLine, rest.subarray(0, newline)]).toString("utf8");
+        if (line !== undefined && line.includes('"result"')) {
+          try { if ((JSON.parse(line) as { type?: unknown }).type === "result") streamResult = line; } catch { /* not a complete event */ }
+        }
+        streamLine = Buffer.alloc(0);
+        streamLineOverflow = false;
+        rest = rest.subarray(newline + 1);
+      }
+      if (streamLineOverflow) return;
+      if (streamLine.byteLength + rest.byteLength > input.maxStdoutBytes) { streamLine = Buffer.alloc(0); streamLineOverflow = true; return; }
+      streamLine = Buffer.concat([streamLine, rest]);
+    };
     const append = (target: "stdout" | "stderr", value: unknown): void => {
       const chunk = asBuffer(value);
+      armIdle();
+      if (target === "stdout" && input.stream === true) { appendStream(chunk); return; }
       if (target === "stdout") {
         const remaining = input.maxStdoutBytes - stdoutBytes;
         if (chunk.byteLength > remaining) { if (remaining > 0) stdoutChunks.push(chunk.subarray(0, remaining)); stdoutBytes = input.maxStdoutBytes; outputLimitExceeded = true; }
@@ -443,15 +476,14 @@ export class ClaudeCodeCliRunner {
     let spawnError: NodeJS.ErrnoException | undefined;
     let exitCode: number | null = null;
     await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => { if (trigger === undefined) trigger = "timeout"; terminate(); }, input.timeoutMs);
-      timeout.unref();
+      armIdle();
       const onAbort = (): void => { if (trigger === undefined) trigger = "cancelled"; terminate(); };
       input.signal?.addEventListener("abort", onAbort, { once: true });
       let settled = false;
       const settle = (): void => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
+        clearTimeout(idleTimer);
         if (terminationTimer !== undefined) clearTimeout(terminationTimer);
         input.signal?.removeEventListener("abort", onAbort);
         resolve();
@@ -465,7 +497,8 @@ export class ClaudeCodeCliRunner {
       });
       if (input.signal?.aborted) onAbort();
     });
-    const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+    if (input.stream === true && !streamLineOverflow && streamLine.byteLength > 0) appendStream(Buffer.from("\n"));
+    const stdout = input.stream === true ? streamResult ?? "" : Buffer.concat(stdoutChunks).toString("utf8");
     const stderr = Buffer.concat(stderrChunks).toString("utf8");
     let parsed: unknown;
     const failed = (...args: Parameters<typeof failure>): ClaudeRoundTripFailure => {

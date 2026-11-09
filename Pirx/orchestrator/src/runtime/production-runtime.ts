@@ -25,7 +25,8 @@ export const PRODUCTION_RUNTIME_LIMITS = Object.freeze({
   worktreeParent: 2_048,
   leaseDurationMs: 86_400_000,
   shutdownTimeoutMs: 120_000,
-  workerTimeoutMs: 120_000,
+  // Idle window, not a wall-clock cap: the timer restarts on every worker event.
+  workerTimeoutMs: 3_600_000,
   workerOutputBytes: 64 * 1024,
 } as const);
 
@@ -166,7 +167,7 @@ export class ProductionRuntime {
       workerPort: { check: (candidate) => this.#workerAvailability(candidate) },
       capabilityPort: { authorize: async (request) => this.#authorize(request.taskId, request.requiredCapabilities) },
       attemptPort: { start: async (taskId, workerId, now) => this.#startAttempt(taskId, workerId, now) },
-      leasePort: { acquire: async (input) => storage(this.#store.leases.acquire(input)), attachAttempt: async (lease, id, now) => storage(this.#store.leases.attachAttempt(lease.id, lease.ownershipToken, lease.version, id, now)), release: async (lease, now) => storage(this.#store.leases.release(lease.id, lease.ownershipToken, lease.version, now)), markUncertain: async (lease, now) => storage(this.#store.leases.markUncertain(lease.id, lease.ownershipToken, lease.version, now)) },
+      leasePort: { acquire: async (input) => storage(this.#store.leases.acquire(input)), attachAttempt: async (lease, id, now) => storage(this.#store.leases.attachAttempt(lease.id, lease.ownershipToken, lease.version, id, now)), release: async (lease, now) => storage(this.#store.leases.release(lease.id, lease.ownershipToken, lease.version, now)), renew: async (lease, now, durationMs) => storage(this.#store.leases.renew(lease.id, lease.ownershipToken, lease.version, now, durationMs)), markUncertain: async (lease, now) => storage(this.#store.leases.markUncertain(lease.id, lease.ownershipToken, lease.version, now)) },
       executionPort: { invoke: async (input) => this.#invoke(input.candidate, input.attemptId, input.signal) },
       persistencePort: { persist: async (input) => this.#persist(input.taskId, input.attemptId, input.execution) },
       recoveryPort: { reconcile: async (now) => this.#reconcile(now) },

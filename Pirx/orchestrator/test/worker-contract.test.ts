@@ -110,7 +110,7 @@ test("rejects unknown versions, unknown fields, malformed values, and unbounded 
   const value = request();
   assert.equal(validateWorkerRequest({ ...value, schemaVersion: 2 }).ok, false);
   assert.equal(validateWorkerRequest({ ...value, unexpected: true }).ok, false);
-  assert.equal(validateWorkerRequest({ ...value, limits: { ...value.limits, timeoutMs: 300_001 } }).ok, false);
+  assert.equal(validateWorkerRequest({ ...value, limits: { ...value.limits, timeoutMs: 3_600_001 } }).ok, false);
   assert.equal(validateWorkerRequest({ ...value, capabilityGrant: { ...value.capabilityGrant, grantedCapabilities: [] } }).ok, false);
   assert.equal(createWorkerRequest({ ...requestInput(), limits: { timeoutMs: 1, maxOutputBytes: 1, maxErrorBytes: 1 } }).ok, true);
 });

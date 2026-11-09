@@ -55,6 +55,15 @@ if (mode === "process-tree") {
   \`], { stdio: "ignore" });
   setInterval(() => {}, 1000);
 }
+if (mode === "stream-active") {
+  let step = 0;
+  const timer = setInterval(() => {
+    step += 1;
+    process.stdout.write(JSON.stringify({ type: "assistant", step, padding: step === 2 ? "x".repeat(4096) : "" }) + "\\n");
+    if (step === 6) { clearInterval(timer); process.stdout.write(JSON.stringify(envelope({ ok: true })) + "\\n"); process.exit(0); }
+  }, 40);
+}
+if (mode === "stream-silent") { process.stdout.write(JSON.stringify({ type: "system", subtype: "init" }) + "\\n"); setInterval(() => {}, 1000); }
 if (mode === "delay") setTimeout(() => emit(envelope({ requestId, acknowledgement: "hello world acknowledged" })), 1000);
 `;
 
@@ -330,5 +339,25 @@ test("rejects a worker profile bound to a different cwd before probing or spawni
     assert.equal(result.outcome, "process_error");
     assert.equal(result.diagnostic.code, "permission_denied");
     assert.equal(probes, 0);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("code workers run while they stream events and stop only after an idle window", async () => {
+  const value = await fixture();
+  try {
+    const instance = (mode: string) => new ClaudeCodeCliRunner({
+      executable: value.executable,
+      environment: { PATH: process.env.PATH, HOME: process.env.HOME },
+      additionalEnvironment: { PIRX_FAKE_MODE: mode },
+      versionProbe: async () => `${MINIMUM_CLAUDE_CODE_WORKER_VERSION} (Claude Code)`,
+    });
+    // 6 events 40 ms apart outlive the 100 ms window; one oversized event is skipped, not fatal.
+    const active = await instance("stream-active").runStructured({ requestId: "stream-active", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root), timeoutMs: 100, maxStdoutBytes: 1_024 });
+    assert.equal(active.outcome, "success", JSON.stringify(active));
+    if (active.outcome === "success") assert.deepEqual(active.structuredOutput, { ok: true });
+    assert.ok(active.durationMs >= 200, String(active.durationMs));
+    const silent = await instance("stream-silent").runStructured({ requestId: "stream-silent", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root), timeoutMs: 100 });
+    assert.equal(silent.outcome, "timeout");
+    assert.equal(silent.diagnostic.code, "timeout");
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
