@@ -72,8 +72,12 @@ export function restoreHistory(
   const items = transcript.turns.flatMap((turn) => turn.status === "failed"
     ? failedTurnItems(turn)
     : completedTurnItems(turn));
-  const notice = transcript.omittedTurnCount > 0
-    ? `Przywrócono ostatnie ${transcript.turns.length} tur; ${transcript.omittedTurnCount} starszych pominięto.`
-    : undefined;
+  // The model starts with a fresh context; the restored turns are display only.
+  const fresh = "Poprzednia rozmowa tylko do podglądu — Pirx jej nie pamięta.";
+  const notice = items.length === 0
+    ? undefined
+    : transcript.omittedTurnCount > 0
+      ? `${fresh} Pokazano ostatnie ${transcript.turns.length} tur; ${transcript.omittedTurnCount} starszych pominięto.`
+      : fresh;
   return { items, ...(notice === undefined ? {} : { notice }) };
 }

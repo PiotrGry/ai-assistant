@@ -69,4 +69,5 @@ test("interrupted turns are visible without replaying an incomplete tool call", 
     { kind: "error", content: "process_restart" },
   ]);
   assert.match(restored.notice ?? "", /2 starszych pominięto/u);
+  assert.match(restored.notice ?? "", /Pirx jej nie pamięta/u);
 });
