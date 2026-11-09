@@ -92,7 +92,7 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
   const tools: string[] = [];
   const allowed: string[] = [];
   const denied = [
-    "Agent", "AskUserQuestion", "WebFetch", "WebSearch", "NotebookEdit", "Task", "mcp__*",
+    "Agent", "AskUserQuestion", "NotebookEdit", "Task", "mcp__*",
     "Bash(rm *)", "Bash(sh *)", "Bash(bash *)", "Bash(zsh *)", "Bash(curl *)", "Bash(wget *)",
     "Bash(git reset *)", "Bash(git clean *)", "Bash(git checkout *)", "Bash(git switch *)",
     "Bash(git branch -D *)", "Bash(git branch --delete *)", "Bash(git remote *)", "Bash(git config *)",
@@ -103,7 +103,9 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
     allowed.push("mcp__pirx_advisor__ask_pirx");
   }
   if (parsedCapabilities.includes("repository.read")) {
-    for (const tool of ["Read", "Glob", "Grep"]) { tools.push(tool); allow(tool, allowed); }
+    // Web research is reading: Claude's own web tools work inside the OS
+    // sandbox, while Bash network access stays limited to github.com.
+    for (const tool of ["Read", "Glob", "Grep", "WebFetch", "WebSearch"]) { tools.push(tool); allow(tool, allowed); }
   }
   if (parsedCapabilities.includes("repository.write")) {
     for (const tool of ["Edit", "Write"]) { tools.push(tool); allow(tool, allowed); }
@@ -121,7 +123,7 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
       allow(`Bash(git -C ${assignedWorktree} push ${policy.remoteName} HEAD:refs/heads/${request.workspace.branch})`, allowed);
     }
   }
-  for (const tool of ["Read", "Write", "Edit", "Glob", "Grep"]) if (!tools.includes(tool)) denied.push(tool);
+  for (const tool of ["Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch"]) if (!tools.includes(tool)) denied.push(tool);
   if (!bashNeeded) denied.push("Bash");
   return { ok: true, value: Object.freeze({
     schemaVersion: CLAUDE_CODE_WORKER_PROFILE_SCHEMA_VERSION,

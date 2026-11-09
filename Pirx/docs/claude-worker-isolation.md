@@ -24,7 +24,10 @@ Every production code-worker invocation uses:
    assigned worktree;
 3. a required OS sandbox for Bash and child processes, with unsandboxed retry
    disabled and only `github.com` available to the network proxy;
-4. an explicit tool set and deny-by-default `dontAsk` permissions;
+4. an explicit tool set and deny-by-default `dontAsk` permissions. With
+   `repository.read`, the set includes Claude's `WebFetch` and `WebSearch`
+   for documentation research; these run in the Claude process, while Bash
+   network access stays limited to `github.com`;
 5. exact allow rules for configured tests, commits, and a push to the assigned
    branch only;
 6. a process environment built from the shared allowlist rather than the
