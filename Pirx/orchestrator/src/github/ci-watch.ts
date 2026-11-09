@@ -390,7 +390,7 @@ const defaultClock: GitHubActionsWatchClock = {
       signal?.removeEventListener("abort", abort);
       resolve();
     }, delayMs);
-    timer.unref?.();
+    // Referenced on purpose: an awaited unref'd timer lets the process exit.
     const abort = () => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", abort);

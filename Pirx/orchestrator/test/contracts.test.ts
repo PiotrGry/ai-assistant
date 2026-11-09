@@ -580,3 +580,19 @@ test("pre-dispatch cancellation does not execute a mutation", async () => {
   assert.equal(result.remoteOutcome, "not_accepted");
   assert.equal(calls, 0);
 });
+
+test("a GitHub retry backoff keeps the process alive until the retry completes", async () => {
+  // Regression: an unref'd backoff timer let the daemon exit with code 0 after a GitHub timeout.
+  const { execFile } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const moduleUrl = new URL("../src/github/retry-policy.js", import.meta.url).href;
+  const script = `const { executeWithGitHubRetry } = await import(${JSON.stringify(moduleUrl)}); let n = 0;
+const r = await executeWithGitHubRetry({ operation: "read", execute: async () => (++n === 1
+  ? { outcome: "retryable_error", correlationId: "c", remoteOutcome: "not_accepted", error: { code: "timeout", message: "timed out" } }
+  : { outcome: "success", correlationId: "c", value: 1 }) }, { baseDelayMs: 50, jitterRatio: 0 });
+console.log("done:" + r.reason + ":" + n);`;
+  const stdout = await new Promise<string>((resolve, reject) => {
+    execFile(process.execPath, ["--input-type=module", "-e", script], { cwd: fileURLToPath(new URL(".", import.meta.url)), timeout: 10_000 }, (error, out) => error && !out ? reject(error) : resolve(out));
+  });
+  assert.match(stdout, /done:success:2/u);
+});
