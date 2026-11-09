@@ -81,11 +81,11 @@ class Fakes {
   readonly execution: SchedulerExecutionPort = { invoke: async ({ signal }) => { this.events.push("invoke"); this.invocations += 1; return this.invocation === undefined ? this.executionResult : this.invocation(signal); } };
 }
 
-function scheduler(fakes: Fakes): SingleWorkerScheduler {
+function scheduler(fakes: Fakes, leaseDurationMs = 60_000): SingleWorkerScheduler {
   return new SingleWorkerScheduler({
     workerId: "pirx",
     workerCapabilities: ["tests.run"],
-    leaseDurationMs: 60_000,
+    leaseDurationMs,
     leaseIdFactory: () => leaseId("scheduler-lease-1"),
     attemptPort: fakes.attempts,
     capabilityPort: fakes.capability,
@@ -203,4 +203,20 @@ test("requires successful startup reconciliation before selecting work", async (
   const resultValue = await scheduler(fakes).cycle();
   assert.deepEqual(resultValue, { outcome: "reconciliation_required", reason: "recovery:uncertain lease" });
   assert.equal(fakes.events.includes("select"), false);
+});
+
+test("renews the Lease while a long worker runs and releases the renewed version", async () => {
+  const fakes = new Fakes();
+  const renewed: number[] = [];
+  const leases = fakes.leases;
+  (fakes as unknown as { leases: SchedulerLeasePort }).leases = {
+    ...leases,
+    renew: async (value) => { renewed.push(value.version); return result(lease(value.version + 1)); },
+    release: async (value) => { fakes.events.push(`release:${value.version}`); return fakes.releaseResult; },
+  };
+  fakes.invocation = () => new Promise((resolve) => setTimeout(() => resolve({ outcome: "success", summary: "done" }), 2_300));
+  const cycle = await scheduler(fakes, 3_000).cycle();
+  assert.equal(cycle.outcome, "started");
+  assert.deepEqual(renewed, [2, 3]);
+  assert.ok(fakes.events.includes("release:4"), fakes.events.join(","));
 });

@@ -29,3 +29,12 @@ test("redacts secret values in JSON evidence before persistence", () => {
     assert.match(diagnostic.providerMessage ?? "", /useful error code/);
   }
 });
+
+test("diagnostics already persisted in runtime storage stay readable", () => {
+  // Exact record of Attempt 5 of zdrovena#462; rewording a message breaks history reads.
+  const stored = { schemaVersion: 1, code: "timeout", message: "Worker process exceeded its bounded time limit.", correlationId: "gh-462:attempt:5", durationMs: 120272, stage: "process" };
+  assert.notEqual(validateWorkerFailureDiagnostic(stored), undefined);
+  for (const code of ["process_failure", "binding_mismatch", "quota_exhausted"] as const) {
+    assert.notEqual(validateWorkerFailureDiagnostic(JSON.parse(JSON.stringify(createWorkerFailureDiagnostic(code)))), undefined, code);
+  }
+});

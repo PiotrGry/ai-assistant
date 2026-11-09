@@ -86,6 +86,7 @@ export interface WorkerFailureDiagnostic {
 const MESSAGES: Readonly<Record<WorkerFailureCode, string>> = Object.freeze({
   spawn_failure: "Worker process could not be started.",
   process_failure: "Worker process ended unsuccessfully.",
+  // Persisted diagnostics are validated against this exact text; never reword it.
   timeout: "Worker process exceeded its bounded time limit.",
   cancellation: "Worker process was cancelled.",
   authentication: "Worker authentication was not accepted.",

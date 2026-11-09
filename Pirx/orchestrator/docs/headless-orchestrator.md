@@ -47,7 +47,7 @@ CLI credential stores.
   "worktreeParent": "/var/lib/pirx/worktrees",
   "leaseDurationMs": 3600000,
   "shutdownTimeoutMs": 30000,
-  "workerTimeoutMs": 120000,
+  "workerTimeoutMs": 960000,
   "workerOutputBytes": 16384,
   "workerErrorBytes": 16384,
   "maximumConsecutiveResumeFailures": 3,
@@ -64,6 +64,12 @@ CLI credential stores.
   }
 }
 ```
+
+`workerTimeoutMs` is an idle window, not a limit on total work: a code worker
+streams Claude events and the timer restarts on each one, so an active worker
+runs until it returns its result. A worker silent for the whole window (here
+16 minutes, maximum 1 hour) is stopped with a `timeout` diagnostic. The daemon
+renews the Lease every third of `leaseDurationMs` while the worker runs.
 
 Every field except `hostPowerOff` is required. Repositories form an explicit allowlist; test commands
 must match the bounded code-worker command policy. Update `baseRevision` to the

@@ -27,7 +27,7 @@ export const WORKER_CONTRACT_LIMITS = Object.freeze({
   resumeContextReference: 1_000,
   reason: 1_000,
   commit: 256,
-  timeoutMs: 300_000,
+  timeoutMs: 3_600_000,
   outputBytes: 1_048_576,
   errorBytes: 262_144,
 } as const);

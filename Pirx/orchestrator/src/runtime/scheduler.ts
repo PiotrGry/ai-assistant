@@ -36,6 +36,8 @@ export interface SchedulerLeasePort {
   attachAttempt(lease: LeaseRecord, attemptId: AttemptId, now: UtcTimestamp): SchedulerPortResult<LeaseRecord> | Promise<SchedulerPortResult<LeaseRecord>>;
   release(lease: LeaseRecord, now: UtcTimestamp): SchedulerPortResult<LeaseRecord> | Promise<SchedulerPortResult<LeaseRecord>>;
   markUncertain(lease: LeaseRecord, now: UtcTimestamp): SchedulerPortResult<LeaseRecord> | Promise<SchedulerPortResult<LeaseRecord>>;
+  /** Extends an active Lease while its worker is still running. */
+  renew?(lease: LeaseRecord, now: UtcTimestamp, durationMs: number): SchedulerPortResult<LeaseRecord> | Promise<SchedulerPortResult<LeaseRecord>>;
 }
 
 export interface SchedulerAttemptPort {
@@ -195,15 +197,29 @@ export class SingleWorkerScheduler {
     const attempt = started.value;
     const attached = await this.#options.leasePort.attachAttempt(lease, attempt.attemptId, this.#options.clock.now());
     if (attached.outcome !== "success") return this.#afterLeaseFailure(candidate.task.id, lease, `attempt_attach:${attached.reason}`, attempt.attemptId);
-    const currentLease = attached.value;
+    let currentLease = attached.value;
     let execution: WorkerExecutionResult;
     if (controller.signal.aborted || this.#stopping) {
       execution = { outcome: "cancelled", reason: "shutdown_interrupted" };
     } else {
+      // A worker has no wall-clock limit (its idle watchdog bounds silence), so
+      // keep its Lease alive while it runs instead of letting it expire.
+      let renewal: Promise<void> = Promise.resolve();
+      const renewLease = this.#options.leasePort.renew?.bind(this.#options.leasePort);
+      const renewTimer = renewLease === undefined ? undefined : setInterval(() => {
+        renewal = renewal.then(async () => {
+          const renewed = await renewLease(currentLease, this.#options.clock.now(), this.#options.leaseDurationMs);
+          if (renewed.outcome === "success") currentLease = renewed.value;
+        }).catch(() => undefined);
+      }, Math.max(1_000, Math.floor(this.#options.leaseDurationMs / 3)));
+      renewTimer?.unref();
       try {
         execution = await this.#options.executionPort.invoke({ candidate, taskId: candidate.task.id, attemptId: attempt.attemptId, leaseId: currentLease.id, signal: controller.signal });
       } catch (error: unknown) {
         execution = { outcome: controller.signal.aborted ? "cancelled" : "unknown", reason: controller.signal.aborted ? "shutdown_interrupted" : "worker_invocation_threw" };
+      } finally {
+        if (renewTimer !== undefined) clearInterval(renewTimer);
+        await renewal;
       }
     }
     const persisted = await this.#options.persistencePort.persist({ taskId: candidate.task.id, attemptId: attempt.attemptId, leaseId: currentLease.id, execution, interrupted: controller.signal.aborted || this.#stopping, now: this.#options.clock.now() });
