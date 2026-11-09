@@ -8,7 +8,7 @@ import { CapabilityAwareWorkerExecutionPort, type WorkerAdapterRegistry } from "
 import { createWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
 import { quotaCooldownFromDiagnostic } from "./worker-recovery.js";
 import { startResumedAttempt } from "./resume.js";
-import { RESUME_ESCALATION_LIMITS, ResumeEscalationCoordinator } from "./resume-escalation.js";
+import { RESUME_ESCALATION_LIMITS, ResumeEscalationCoordinator, isOperatorUnblockCheckpoint } from "./resume-escalation.js";
 import { WorkerLifecycleCoordinator } from "./worker-lifecycle.js";
 import { WorkspaceProvisioner, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
 import { WorkspaceResumeValidator, type WorkspaceResumeValidationRequest, type WorkspaceResumeValidationResult } from "./workspace-resume-validator.js";
@@ -223,11 +223,13 @@ export class ProductionRuntime {
     const previous = history.value[history.value.length - 1];
     const failedResume = task.value.state === "failed" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED");
     const operatorResume = task.value.state === "blocked" && previous?.state === "terminal" && previous.result === "BLOCKED" && previous.diagnostic?.code === "operator_input_required";
-    if (failedResume || operatorResume) {
+    const operatorUnblock = task.value.state === "blocked" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED");
+    if (failedResume || operatorResume || operatorUnblock) {
       if (previous === undefined) return portFailure("Resume Attempt history is unavailable.", "conflict");
       const checkpoint = this.#store.checkpoints.latestByTask(taskId);
       const expectedTrigger = previous.result === "QUOTA_EXHAUSTED" ? "PROVIDER_QUOTA" : "RECOVERABLE_FAILURE";
       if (checkpoint.outcome !== "success" || checkpoint.value.previousAttemptId !== previous.id || checkpoint.value.trigger !== expectedTrigger) return portFailure("Resume Checkpoint does not match the latest Attempt.", "conflict");
+      if (operatorUnblock && !isOperatorUnblockCheckpoint(checkpoint.value, previous.id)) return portFailure("Resume of a blocked Task requires an explicit operator unblock.", "conflict");
       if (operatorResume) {
         const question = this.#store.operatorDecisions.latestByAttempt(previous.id);
         const decision = question.outcome === "success" ? this.#store.operatorDecisions.decisionForQuestion(question.value.id) : undefined;

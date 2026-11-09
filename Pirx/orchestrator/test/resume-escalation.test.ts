@@ -7,6 +7,9 @@ import test from "node:test";
 import {
   ResumeEscalationCoordinator,
   RuntimeSqliteStore,
+  isOperatorUnblockCheckpoint,
+  startResumedAttempt,
+  unblockEscalatedTask,
   createTask,
   transitionAttempt,
   transitionTask,
@@ -25,6 +28,7 @@ const times = [
   "2026-10-30T10:04:00.000Z" as UtcTimestamp,
   "2026-10-30T10:05:00.000Z" as UtcTimestamp,
 ] as const;
+const later = ["2026-10-30T10:06:00.000Z" as UtcTimestamp, "2026-10-30T10:07:00.000Z" as UtcTimestamp] as const;
 
 async function fixture(): Promise<{ readonly directory: string; readonly filename: string; readonly store: RuntimeSqliteStore; readonly task: TaskSnapshot }> {
   const directory = await mkdtemp(join(tmpdir(), "pirx-resume-escalation-"));
@@ -121,6 +125,52 @@ test("rejects unsafe retry limits", async () => {
   try {
     assert.throws(() => new ResumeEscalationCoordinator(value.store, { maximumConsecutiveFailures: 0 }), /failure limit/u);
     assert.throws(() => new ResumeEscalationCoordinator(value.store, { maximumConsecutiveFailures: 21 }), /failure limit/u);
+  } finally {
+    value.store.close();
+    await rm(value.directory, { recursive: true, force: true });
+  }
+});
+
+test("operator unblock approves exactly one more resume of a limit-escalated Task", async () => {
+  const value = await fixture();
+  try {
+    recordFailure(value.store, value.task.id, 1, "FAILED");
+    recordFailure(value.store, value.task.id, 2, "FAILED");
+    recordFailure(value.store, value.task.id, 3, "FAILED");
+    const coordinator = new ResumeEscalationCoordinator(value.store, { maximumConsecutiveFailures: 2 });
+    assert.equal(coordinator.evaluate(value.task.id, times[5]).outcome, "escalated");
+
+    const input = { taskId: value.task.id, operationId: "op-unblock-1", reason: "Sandbox dependency installed", unblockedAt: later[0] };
+    const unblocked = unblockEscalatedTask(value.store, input);
+    assert.equal(unblocked.outcome, "success", JSON.stringify(unblocked));
+    if (unblocked.outcome !== "success") return;
+    assert.equal(unblocked.value.replayed, false);
+    const replay = unblockEscalatedTask(value.store, input);
+    assert.equal(replay.outcome === "success" && replay.value.replayed, true);
+    assert.equal(unblockEscalatedTask(value.store, { ...input, operationId: "op-unblock-2" }).outcome, "conflict");
+
+    const latest = value.store.checkpoints.latestByTask(value.task.id);
+    assert.equal(latest.outcome === "success" && isOperatorUnblockCheckpoint(latest.value, "resume-escalation-attempt-3"), true);
+    const task = value.store.tasks.get(value.task.id);
+    assert.equal(task.outcome === "success" && task.value.state, "blocked");
+
+    const resumed = startResumedAttempt(value.store, value.task.id, { check: () => ({ repository: "present", branch: "present", worktree: "present", currentCommit: "present" }) }, { id: "resume-escalation-attempt-4" as AttemptId, worker: "pirx", provider: "test", branch: "pirx/resume-escalation", worktree: "/tmp/pirx-resume-escalation", currentCommit: "a".repeat(40) }, later[1]);
+    assert.equal(resumed.outcome, "ready", JSON.stringify(resumed));
+  } finally {
+    value.store.close();
+    await rm(value.directory, { recursive: true, force: true });
+  }
+});
+
+test("operator unblock refuses ambiguous results and Tasks not blocked by the limit", async () => {
+  const value = await fixture();
+  try {
+    recordFailure(value.store, value.task.id, 1, "FAILED");
+    assert.equal(unblockEscalatedTask(value.store, { taskId: value.task.id, operationId: "op-not-blocked", reason: "retry", unblockedAt: times[3] }).outcome, "conflict");
+    recordFailure(value.store, value.task.id, 2, "UNKNOWN");
+    assert.equal(new ResumeEscalationCoordinator(value.store, { maximumConsecutiveFailures: 3 }).evaluate(value.task.id, times[5]).outcome, "escalated");
+    assert.equal(unblockEscalatedTask(value.store, { taskId: value.task.id, operationId: "op-ambiguous", reason: "retry", unblockedAt: later[0] }).outcome, "invalid_record");
+    assert.equal(unblockEscalatedTask(value.store, { taskId: value.task.id, operationId: "bad id with spaces", reason: "retry", unblockedAt: later[0] }).outcome, "invalid_record");
   } finally {
     value.store.close();
     await rm(value.directory, { recursive: true, force: true });
