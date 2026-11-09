@@ -136,7 +136,7 @@ test("returns explicit idle, deferred, blocked, and reconciliation outcomes befo
 test("never invokes without durable Lease and Attempt, and marks ownership uncertain on pre-invocation failure", async () => {
   const leaseRace = new Fakes();
   leaseRace.acquireResult = { outcome: "conflict", reason: "global slot" };
-  assert.deepEqual(await scheduler(leaseRace).cycle(), { outcome: "deferred", reason: "lease_occupied" });
+  assert.deepEqual(await scheduler(leaseRace).cycle(), { outcome: "deferred", reason: "lease_occupied", detail: "global slot" });
   assert.equal(leaseRace.invocations, 0);
 
   const attemptFailure = new Fakes();
