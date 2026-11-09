@@ -1695,12 +1695,16 @@ export class LeaseRepository {
           const history = this.#store.attempts.listByTask(input.taskId);
           if (history.outcome !== "success") return history;
           const latest = history.value.at(-1);
-          if (latest?.state !== "terminal" || latest.result !== "BLOCKED" || latest.diagnostic?.code !== "operator_input_required") return conflict("Blocked Task is not waiting on an operator decision.");
-          const question = this.#store.operatorDecisions.latestByAttempt(latest.id);
-          if (question.outcome !== "success" || question.value.state !== "answered") return conflict("Blocked Task has no answered operator decision.");
-          const decision = this.#store.operatorDecisions.decisionForQuestion(question.value.id);
           const checkpoint = this.#store.checkpoints.latestByTask(input.taskId);
-          if (decision.outcome !== "success" || checkpoint.outcome !== "success" || decision.value.resumeCheckpointId !== checkpoint.value.id || checkpoint.value.previousAttemptId !== latest.id || checkpoint.value.currentState !== "blocked") return conflict("Blocked Task operator decision does not match its latest Checkpoint.");
+          if (latest?.state === "terminal" && (latest.result === "FAILED" || latest.result === "QUOTA_EXHAUSTED")) {
+            if (checkpoint.outcome !== "success" || !isOperatorUnblockCheckpoint(checkpoint.value, latest.id)) return conflict("Blocked Task has no operator unblock for its latest Attempt.");
+          } else {
+            if (latest?.state !== "terminal" || latest.result !== "BLOCKED" || latest.diagnostic?.code !== "operator_input_required") return conflict("Blocked Task is not waiting on an operator decision.");
+            const question = this.#store.operatorDecisions.latestByAttempt(latest.id);
+            if (question.outcome !== "success" || question.value.state !== "answered") return conflict("Blocked Task has no answered operator decision.");
+            const decision = this.#store.operatorDecisions.decisionForQuestion(question.value.id);
+            if (decision.outcome !== "success" || checkpoint.outcome !== "success" || decision.value.resumeCheckpointId !== checkpoint.value.id || checkpoint.value.previousAttemptId !== latest.id || checkpoint.value.currentState !== "blocked") return conflict("Blocked Task operator decision does not match its latest Checkpoint.");
+          }
         }
         const taskLease = this.#store.database.prepare("SELECT id FROM runtime_leases WHERE task_id = ? AND state = 'active'").get(input.taskId);
         if (taskLease !== undefined) return conflict("Task already has an active Lease.");

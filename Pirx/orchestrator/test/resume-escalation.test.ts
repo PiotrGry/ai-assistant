@@ -154,6 +154,8 @@ test("operator unblock approves exactly one more resume of a limit-escalated Tas
     const task = value.store.tasks.get(value.task.id);
     assert.equal(task.outcome === "success" && task.value.state, "blocked");
 
+    const lease = value.store.leases.acquire({ id: "lease:unblock" as never, taskId: value.task.id, workerId: "pirx", now: later[1], durationMs: 60_000 });
+    assert.equal(lease.outcome, "success", JSON.stringify(lease));
     const resumed = startResumedAttempt(value.store, value.task.id, { check: () => ({ repository: "present", branch: "present", worktree: "present", currentCommit: "present" }) }, { id: "resume-escalation-attempt-4" as AttemptId, worker: "pirx", provider: "test", branch: "pirx/resume-escalation", worktree: "/tmp/pirx-resume-escalation", currentCommit: "a".repeat(40) }, later[1]);
     assert.equal(resumed.outcome, "ready", JSON.stringify(resumed));
   } finally {

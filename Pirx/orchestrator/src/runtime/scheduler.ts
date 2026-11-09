@@ -70,7 +70,7 @@ export interface SchedulerRecoveryPort {
 export type SchedulerCycleResult =
   | { readonly outcome: "started"; readonly taskId: TaskId; readonly leaseId: LeaseId; readonly attemptId: AttemptId; readonly execution: WorkerExecutionResult }
   | { readonly outcome: "idle"; readonly reason: "no_runnable_task" }
-  | { readonly outcome: "deferred"; readonly reason: "worker_unavailable" | "lease_occupied" | "cycle_already_running" | "shutdown_requested" }
+  | { readonly outcome: "deferred"; readonly reason: "worker_unavailable" | "lease_occupied" | "cycle_already_running" | "shutdown_requested"; readonly detail?: string }
   | { readonly outcome: "blocked"; readonly taskId?: TaskId; readonly reason: string }
   | { readonly outcome: "reconciliation_required"; readonly reason: string }
   | { readonly outcome: "failed"; readonly taskId?: TaskId; readonly leaseId?: LeaseId; readonly attemptId?: AttemptId; readonly reason: string; readonly durable: boolean };
@@ -186,7 +186,8 @@ export class SingleWorkerScheduler {
     const acquired = await this.#options.leasePort.acquire(leaseInput);
     if (acquired.outcome !== "success") {
       this.#abortController = undefined;
-      return acquired.outcome === "conflict" || acquired.outcome === "unavailable" ? { outcome: "deferred", reason: "lease_occupied" } : failed(`lease_acquire:${acquired.reason}`, { taskId: candidate.task.id });
+      // Keep the refusal text: a conflict is not always another holder of the slot.
+      return acquired.outcome === "conflict" || acquired.outcome === "unavailable" ? { outcome: "deferred", reason: "lease_occupied", detail: acquired.reason.slice(0, 256) } : failed(`lease_acquire:${acquired.reason}`, { taskId: candidate.task.id });
     }
     const lease = acquired.value;
     const started = await this.#options.attemptPort.start(candidate.task.id, this.#options.workerId, now);
