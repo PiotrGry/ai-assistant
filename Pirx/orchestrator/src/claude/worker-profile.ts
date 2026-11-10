@@ -6,7 +6,8 @@ import { buildWorkerResultSchema as buildCanonicalWorkerResultSchema } from "../
 
 export const CLAUDE_CODE_WORKER_PROFILE_SCHEMA_VERSION = 1 as const;
 export const CLAUDE_CODE_WORKER_PROFILE_LIMITS = Object.freeze({
-  maxTurns: 32,
+  // Optional backstop only; by default the worker runs until it finishes.
+  maxTurns: 1_000,
   maxTestCommands: 16,
   maxCommandCharacters: 256,
   maxPathCharacters: 2_048,
@@ -41,7 +42,7 @@ export interface ClaudeCodeWorkerProfile {
   readonly allowedTools: readonly string[];
   readonly disallowedTools: readonly string[];
   readonly permissionMode: "dontAsk";
-  readonly maxTurns: number;
+  readonly maxTurns?: number;
   readonly remoteName: string;
   readonly assignedBranch: string;
   readonly testCommands: readonly string[];
@@ -133,7 +134,7 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
     allowedTools: Object.freeze(allowed),
     disallowedTools: Object.freeze([...new Set(denied)]),
     permissionMode: "dontAsk",
-    maxTurns: policy.maxTurns ?? 16,
+    ...(policy.maxTurns === undefined ? {} : { maxTurns: policy.maxTurns }),
     remoteName: policy.remoteName,
     assignedBranch: request.workspace.branch,
     testCommands: Object.freeze([...policy.testCommands]),
