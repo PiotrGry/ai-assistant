@@ -244,6 +244,10 @@ test("strict config accepts bounded operational fields and rejects unknown or se
   assert.equal(parsed.schemaVersion, 1);
   assert.equal(parsed.repositories[0]?.testCommands[0], "npm run check");
   assert.equal(parsed.repositories[0]?.delivery.releaseBranch, "main");
+  assert.equal(parsed.repositories[0]?.maxTurns, undefined);
+  const withTurns = (maxTurns: unknown) => { const config = structuredClone(validConfig()) as { repositories: Array<Record<string, unknown>> }; config.repositories[0]!.maxTurns = maxTurns; return config; };
+  assert.equal(parseHeadlessOrchestratorConfig(withTurns(32)).repositories[0]?.maxTurns, 32);
+  for (const maxTurns of [1, 33, 2.5, "32"]) assert.throws(() => parseHeadlessOrchestratorConfig(withTurns(maxTurns)), HeadlessConfigurationError);
   const powered = parseHeadlessOrchestratorConfig({ ...validConfig(), hostPowerOff: { enabled: true, method: "linux-systemctl", acceptanceTimeoutMs: 5_000 } });
   assert.equal(powered.hostPowerOff?.method, "linux-systemctl");
   assert.throws(() => parseHeadlessOrchestratorConfig({ ...validConfig(), hostPowerOff: { enabled: true, method: "shell", acceptanceTimeoutMs: 5_000, command: "shutdown now" } }), HeadlessConfigurationError);
