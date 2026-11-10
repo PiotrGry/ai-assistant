@@ -75,8 +75,12 @@ export class GitHubFeaturePullRequestService {
     const candidate = candidates[0];
     if (candidate !== undefined) return this.#reuseCandidate(request, task.value, attempt.value, candidate);
     const issue = task.value.githubReference!;
-    const body = marker(request.taskId, request.attemptId) + "\n\nPirx Task " + request.taskId + " / Attempt " + request.attemptId + ".\nLinked GitHub Issue: " + issue.url + ".\nWorker: " + attempt.value.worker + ".\nFeature branch: " + branch + " → " + request.baseBranch + ".";
-    const created = await this.#gateway.createPullRequest({ headBranch: branch, baseBranch: request.baseBranch, title: "Pirx feature work for Task " + request.taskId, body, idempotencyKey: "feature-pr:" + request.taskId + ":" + request.attemptId, correlationId: request.correlationId, ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }) });
+    const provenance = "Pirx Task " + request.taskId + " / Attempt " + request.attemptId + ".\nLinked GitHub Issue: " + issue.url + ".\nWorker: " + attempt.value.worker + ".\nFeature branch: " + branch + " → " + request.baseBranch + ".";
+    // The worker wrote the change, so its title and description lead; Pirx appends provenance.
+    const workerBody = attempt.value.state === "terminal" ? attempt.value.pullRequestBody : undefined;
+    const workerTitle = attempt.value.state === "terminal" ? attempt.value.pullRequestTitle : undefined;
+    const body = marker(request.taskId, request.attemptId) + "\n\n" + (workerBody === undefined ? provenance : workerBody + "\n\n---\n" + provenance);
+    const created = await this.#gateway.createPullRequest({ headBranch: branch, baseBranch: request.baseBranch, title: workerTitle ?? "Pirx feature work for Task " + request.taskId, body, idempotencyKey: "feature-pr:" + request.taskId + ":" + request.attemptId, correlationId: request.correlationId, ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }) });
     if (created.outcome !== "success") {
       if (created.outcome === "unknown" || created.error.code === "unknown") return this.#reconcileUnknownCreate(request, task.value, attempt.value);
       return mapRemote(request, created);

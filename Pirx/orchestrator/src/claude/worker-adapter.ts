@@ -24,7 +24,7 @@ import {
 import { GitWorkerStateVerifier, type WorkerGitStateVerifier } from "./git-state.js";
 import { createWorkerFailureDiagnostic, WorkerFailureError } from "../runtime/worker-diagnostic.js";
 import { createHash } from "node:crypto";
-import { workerResultContractInstruction } from "../runtime/worker-result-contract.js";
+import { WORKER_COMMITTED_OUTCOME, workerResultContractInstruction } from "../runtime/worker-result-contract.js";
 
 export interface ClaudeStructuredRunner {
   runStructured(request: { readonly requestId: string; readonly cwd: string; readonly prompt: string; readonly responseSchema: unknown; readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly maxStdoutBytes?: number; readonly maxStderrBytes?: number; readonly workerProfile?: import("./worker-profile.js").ClaudeCodeWorkerProfile; readonly transcriptPath?: string }): Promise<ClaudeStructuredResult>;
@@ -136,12 +136,21 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
   public async execute(request: WorkerRequest, signal: AbortSignal): Promise<WorkerResult> {
     const processResult = await this.run(request, signal);
     if (processResult.outcome !== "success") throw new WorkerFailureError(processResult.diagnostic);
-    const result = validateWorkerResult(processResult.structuredOutput, request);
+    // A code worker commits and reports CODE_COMMITTED; it becomes CODE_PUSHED only after Pirx pushes it below.
+    const output = processResult.structuredOutput;
+    const committed = typeof output === "object" && output !== null && (output as { outcome?: unknown }).outcome === WORKER_COMMITTED_OUTCOME;
+    if (committed && (this.#repositoryPolicy === undefined || this.#gitStateVerifier?.publish === undefined || !request.capabilityGrant.grantedCapabilities.includes("git.push_assigned_branch"))) throw new WorkerFailureError(contractDiagnostic(output, "outcome", "worker_contract_mismatch"));
+    if (committed && ((output as Record<string, unknown>).pullRequestTitle === undefined || (output as Record<string, unknown>).pullRequestBody === undefined)) throw new WorkerFailureError(contractDiagnostic(output, "pullRequestBody", "worker_contract_mismatch"));
+    const result = validateWorkerResult(committed ? { ...(output as Record<string, unknown>), outcome: "CODE_PUSHED" } : output, request);
     if (!result.ok) throw new WorkerFailureError(contractDiagnostic(processResult.structuredOutput, result.violations[0]?.field, result.violations.some((item) => item.code === "binding_mismatch") ? "binding_mismatch" : "worker_contract_mismatch"));
     if (SECRET_PATTERN.test(JSON.stringify(result.value))) throw new WorkerFailureError(createWorkerFailureDiagnostic("worker_contract_mismatch"));
     if (result.ok && result.value.outcome === "CODE_PUSHED" && this.#repositoryPolicy !== undefined && this.#gitStateVerifier !== undefined) {
+      if (committed) {
+        const published = await this.#gitStateVerifier.publish!(request, result.value, this.#repositoryPolicy);
+        if (!published.ok) throw new WorkerFailureError(createWorkerFailureDiagnostic("git_state_mismatch", { stage: "git_state", providerMessage: published.message }));
+      }
       const verified = await this.#gitStateVerifier.verify(request, result.value, this.#repositoryPolicy);
-      if (!verified.ok) throw new WorkerFailureError(createWorkerFailureDiagnostic("git_state_mismatch"));
+      if (!verified.ok) throw new WorkerFailureError(createWorkerFailureDiagnostic("git_state_mismatch", { stage: "git_state", providerMessage: verified.message }));
     }
     return result.value;
   }

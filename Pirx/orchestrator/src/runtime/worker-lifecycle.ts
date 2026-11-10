@@ -152,7 +152,7 @@ export class WorkerLifecycleCoordinator {
           return { outcome: ownership.outcome === "conflict" ? "conflict" as const : "storage_error" as const, message: "Verified CODE_PUSHED result has no matching active workspace ownership." };
         }
       }
-      const nextAttempt = transitionAttempt(attempt.value, "running", result.outcome === "CODE_PUSHED" ? { type: "finish", result: "CODE_PUSHED", branch: result.branch, finalCommit: result.finalCommit, currentCommit: result.finalCommit, progress: "worker invocation completed" } : { type: "finish", result: result.outcome, blockingReason: result.reason, ...(result.diagnostic === undefined ? {} : { diagnostic: result.diagnostic }), progress: "worker invocation completed" }, at);
+      const nextAttempt = transitionAttempt(attempt.value, "running", result.outcome === "CODE_PUSHED" ? { type: "finish", result: "CODE_PUSHED", branch: result.branch, finalCommit: result.finalCommit, currentCommit: result.finalCommit, ...(result.pullRequestTitle === undefined ? {} : { pullRequestTitle: result.pullRequestTitle }), ...(result.pullRequestBody === undefined ? {} : { pullRequestBody: result.pullRequestBody }), progress: "worker invocation completed" } : { type: "finish", result: result.outcome, blockingReason: result.reason, ...(result.diagnostic === undefined ? {} : { diagnostic: result.diagnostic }), progress: "worker invocation completed" }, at);
       if (!nextAttempt.ok) return { outcome: "conflict" as const, message: nextAttempt.error.message };
       const storedAttempt = attempts.update(nextAttempt.value, "running");
       if (storedAttempt.outcome !== "success") return storedAttempt;

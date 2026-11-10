@@ -59,7 +59,9 @@ test("maps the complete code-worker grant to a bounded Claude profile", () => {
   assert.equal(value.value.permissionMode, "dontAsk");
   assert.equal(value.value.maxTurns, undefined);
   assert.ok(value.value.allowedTools.includes("Bash(pnpm check)"));
-  assert.ok(value.value.allowedTools.includes("Bash(git push origin HEAD:refs/heads/pirx/worker-profile)"));
+  // Pirx pushes; the worker may not.
+  assert.equal(value.value.allowedTools.some((item) => item.includes("git push") || item.includes(" push ")), false);
+  assert.ok(value.value.disallowedTools.includes("Bash(git push *)"));
   assert.ok(value.value.allowedTools.includes("Bash(git status:*)"));
   assert.ok(value.value.allowedTools.includes("Bash(git diff:*)"));
   assert.ok(value.value.allowedTools.includes("Bash(git add:*)"));
@@ -68,7 +70,6 @@ test("maps the complete code-worker grant to a bounded Claude profile", () => {
   assert.ok(value.value.allowedTools.includes(`Bash(git -C ${worktree} status:*)`));
   assert.ok(value.value.allowedTools.includes(`Bash(git -C ${worktree} commit -m:*)`));
   assert.ok(value.value.allowedTools.includes(`Bash(git -C ${worktree} rev-parse HEAD)`));
-  assert.ok(value.value.allowedTools.includes(`Bash(git -C ${worktree} push origin HEAD:refs/heads/pirx/worker-profile)`));
   assert.ok(value.value.disallowedTools.includes("mcp__*"));
   assert.ok(value.value.disallowedTools.includes("Bash(git reset *)"));
   assert.equal(value.value.allowedTools.some((item) => item === "Bash"), false);

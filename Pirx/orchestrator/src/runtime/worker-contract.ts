@@ -1,6 +1,7 @@
 import {
   deserializeAttempt,
   deserializeTask,
+  PULL_REQUEST_TEXT_LIMITS,
   type AttemptSnapshot,
   type TaskSnapshot,
   type TaskId,
@@ -103,8 +104,8 @@ function failure<T = never>(...violations: WorkerViolation[]): WorkerValidationR
 function violation(code: WorkerViolationCode, field: string, message: string): WorkerViolation { return { code, field, message }; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function isViolation(value: unknown): value is WorkerViolation { return isRecord(value) && typeof value.code === "string" && typeof value.field === "string" && typeof value.message === "string"; }
-function boundedText(value: unknown, field: string, maximum: number): string | WorkerViolation {
-  if (typeof value !== "string" || value.trim().length === 0 || value.length > maximum || /[\u0000-\u001f\u007f]/u.test(value)) return violation(value !== undefined && typeof value === "string" && value.length > maximum ? "limit_exceeded" : "invalid_input", field, `${field} must be a bounded text value.`);
+function boundedText(value: unknown, field: string, maximum: number, multiline = false): string | WorkerViolation {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > maximum || (multiline ? /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u : /[\u0000-\u001f\u007f]/u).test(value)) return violation(value !== undefined && typeof value === "string" && value.length > maximum ? "limit_exceeded" : "invalid_input", field, `${field} must be a bounded text value.`);
   return value.trim();
 }
 function validId(value: unknown, field: string): string | WorkerViolation {
@@ -234,7 +235,10 @@ export function validateWorkerResult(value: unknown, request?: Pick<WorkerReques
     const branch = boundedText(value.branch, "branch", WORKER_CONTRACT_LIMITS.branch); const finalCommit = boundedText(value.finalCommit, "finalCommit", WORKER_CONTRACT_LIMITS.commit);
     if (typeof branch !== "string") return failure(branch); if (typeof finalCommit !== "string") return failure(finalCommit);
     if (request !== undefined && branch !== request.workspace.branch) return failure(violation("binding_mismatch", "branch", "CODE_PUSHED branch does not match the assigned workspace."));
-    return success(Object.freeze({ ...base, outcome: "CODE_PUSHED", branch, finalCommit }));
+    const title = value.pullRequestTitle === undefined ? undefined : boundedText(value.pullRequestTitle, "pullRequestTitle", PULL_REQUEST_TEXT_LIMITS.title);
+    const body = value.pullRequestBody === undefined ? undefined : boundedText(value.pullRequestBody, "pullRequestBody", PULL_REQUEST_TEXT_LIMITS.body, true);
+    if (title !== undefined && typeof title !== "string") return failure(title); if (body !== undefined && typeof body !== "string") return failure(body);
+    return success(Object.freeze({ ...base, outcome: "CODE_PUSHED", branch, finalCommit, ...(title === undefined ? {} : { pullRequestTitle: title }), ...(body === undefined ? {} : { pullRequestBody: body }) }));
   }
   if (variant.forbidden.some((field) => value[field] !== undefined)) return failure(violation("invalid_result", "result", "Non-success results cannot contain CODE_PUSHED evidence."));
   const reason = boundedText(value.reason, "reason", WORKER_CONTRACT_LIMITS.reason);

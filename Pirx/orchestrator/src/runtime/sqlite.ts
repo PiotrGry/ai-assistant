@@ -119,7 +119,7 @@ import {
   type WorkIntakeTransition,
 } from "./work-intake.js";
 
-export const RUNTIME_STORAGE_SCHEMA_VERSION = 36 as const;
+export const RUNTIME_STORAGE_SCHEMA_VERSION = 37 as const;
 export const DEFAULT_RUNTIME_BUSY_TIMEOUT_MS = 5_000;
 
 export type StorageOutcome = "success" | "not_found" | "conflict" | "invalid_record" | "storage_error";
@@ -1056,6 +1056,8 @@ const MIGRATIONS: readonly string[] = [
     content_hash TEXT NOT NULL CHECK (length(content_hash) = 64)
   );
   CREATE INDEX runtime_work_intakes_state ON runtime_work_intakes(state, accepted_at, id);`,
+  `ALTER TABLE runtime_attempts ADD COLUMN pull_request_title TEXT CHECK (pull_request_title IS NULL OR length(trim(pull_request_title)) BETWEEN 1 AND 256);
+   ALTER TABLE runtime_attempts ADD COLUMN pull_request_body TEXT CHECK (pull_request_body IS NULL OR length(trim(pull_request_body)) BETWEEN 1 AND 20000);`,
 ];
 
 const TASK_SELECT = "SELECT t.*, l.owner AS link_owner, l.repository AS link_repository, l.issue_number AS link_issue_number, l.node_id AS link_node_id, l.url AS link_url FROM runtime_tasks t LEFT JOIN runtime_task_issue_links l ON l.task_id = t.id";
@@ -1134,6 +1136,7 @@ function attemptFromRow(row: AttemptRow): StorageResult<AttemptSnapshot> {
       ...(row.branch === null ? {} : { branch: row.branch }), ...(row.worktree === null ? {} : { worktree: row.worktree }),
       ...(row.current_commit === null ? {} : { currentCommit: row.current_commit }), ...(row.final_commit === null ? {} : { finalCommit: row.final_commit }),
       ...(row.checkpoint_reference === null ? {} : { checkpointReference: row.checkpoint_reference }), ...(row.progress === null ? {} : { progress: row.progress }), ...(row.test_summary === null ? {} : { testSummary: row.test_summary }), ...(row.blocking_reason === null ? {} : { blockingReason: row.blocking_reason }), ...(row.diagnostic_json === null || row.diagnostic_json === undefined ? {} : { diagnostic: jsonParse(row.diagnostic_json) }),
+      ...(row.pull_request_title === null || row.pull_request_title === undefined ? {} : { pullRequestTitle: row.pull_request_title }), ...(row.pull_request_body === null || row.pull_request_body === undefined ? {} : { pullRequestBody: row.pull_request_body }),
     }));
     return parsed.ok ? success(parsed.value) : invalidRecord();
   } catch {
@@ -1254,10 +1257,10 @@ export class AttemptRepository {
       const validated = deserializeAttempt(serializeAttempt(attempt));
       if (!validated.ok) return invalidRecord();
       try {
-        this.#store.database.prepare(`INSERT INTO runtime_attempts (id, schema_version, task_id, predecessor_attempt_id, ordinal, worker, provider, state, result, started_at, ended_at, branch, worktree, current_commit, final_commit, checkpoint_reference, progress, test_summary, blocking_reason, diagnostic_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ).run(
+        this.#store.database.prepare(`INSERT INTO runtime_attempts (id, schema_version, task_id, predecessor_attempt_id, ordinal, worker, provider, state, result, started_at, ended_at, branch, worktree, current_commit, final_commit, checkpoint_reference, progress, test_summary, blocking_reason, diagnostic_json, pull_request_title, pull_request_body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ).run(
           attempt.id, 1, attempt.taskId, attempt.predecessorAttemptId ?? null, attempt.ordinal, attempt.worker, attempt.provider, attempt.state, attempt.state === "terminal" ? attempt.result : null,
           attempt.startedAt, attempt.state === "terminal" ? attempt.endedAt : null, attempt.branch ?? null, attempt.worktree ?? null, attempt.currentCommit ?? null,
-          attempt.state === "terminal" ? attempt.finalCommit ?? null : null, attempt.checkpointReference ?? null, attempt.progress ?? null, attempt.testSummary ?? null, attempt.state === "terminal" ? attempt.blockingReason ?? null : null, attempt.state === "terminal" && attempt.diagnostic !== undefined ? jsonValue(attempt.diagnostic) : null,
+          attempt.state === "terminal" ? attempt.finalCommit ?? null : null, attempt.checkpointReference ?? null, attempt.progress ?? null, attempt.testSummary ?? null, attempt.state === "terminal" ? attempt.blockingReason ?? null : null, attempt.state === "terminal" && attempt.diagnostic !== undefined ? jsonValue(attempt.diagnostic) : null, attempt.state === "terminal" ? attempt.pullRequestTitle ?? null : null, attempt.state === "terminal" ? attempt.pullRequestBody ?? null : null,
         );
         return success(validated.value);
       } catch (error: unknown) { return classifyStorageError(error); }
@@ -1313,9 +1316,9 @@ export class AttemptRepository {
       if (current.value.taskId !== attempt.taskId || current.value.predecessorAttemptId !== attempt.predecessorAttemptId || current.value.ordinal !== attempt.ordinal || current.value.worker !== attempt.worker || current.value.provider !== attempt.provider || current.value.startedAt !== attempt.startedAt) return conflict("Attempt identity, predecessor, and ordinal are immutable.");
       if (current.value.state === "terminal" && attempt.state === "terminal") return serializeAttempt(current.value) === serializeAttempt(validated.value) ? success(current.value) : conflict("Terminal Attempt completion conflicts with the stored result or evidence.");
       try {
-        const result = this.#store.database.prepare(`UPDATE runtime_attempts SET state = ?, result = ?, ended_at = ?, branch = ?, worktree = ?, current_commit = ?, final_commit = ?, checkpoint_reference = ?, progress = ?, test_summary = ?, blocking_reason = ?, diagnostic_json = ? WHERE id = ? AND state = ? AND task_id = ? AND ordinal = ? AND started_at = ? AND ((predecessor_attempt_id = ?) OR (predecessor_attempt_id IS NULL AND ? IS NULL))`).run(
+        const result = this.#store.database.prepare(`UPDATE runtime_attempts SET state = ?, result = ?, ended_at = ?, branch = ?, worktree = ?, current_commit = ?, final_commit = ?, checkpoint_reference = ?, progress = ?, test_summary = ?, blocking_reason = ?, diagnostic_json = ?, pull_request_title = ?, pull_request_body = ? WHERE id = ? AND state = ? AND task_id = ? AND ordinal = ? AND started_at = ? AND ((predecessor_attempt_id = ?) OR (predecessor_attempt_id IS NULL AND ? IS NULL))`).run(
           attempt.state, attempt.state === "terminal" ? attempt.result : null, attempt.state === "terminal" ? attempt.endedAt : null, attempt.branch ?? null, attempt.worktree ?? null, attempt.currentCommit ?? null,
-          attempt.state === "terminal" ? attempt.finalCommit ?? null : null, attempt.checkpointReference ?? null, attempt.progress ?? null, attempt.testSummary ?? null, attempt.state === "terminal" ? attempt.blockingReason ?? null : null, attempt.state === "terminal" && attempt.diagnostic !== undefined ? jsonValue(attempt.diagnostic) : null,
+          attempt.state === "terminal" ? attempt.finalCommit ?? null : null, attempt.checkpointReference ?? null, attempt.progress ?? null, attempt.testSummary ?? null, attempt.state === "terminal" ? attempt.blockingReason ?? null : null, attempt.state === "terminal" && attempt.diagnostic !== undefined ? jsonValue(attempt.diagnostic) : null, attempt.state === "terminal" ? attempt.pullRequestTitle ?? null : null, attempt.state === "terminal" ? attempt.pullRequestBody ?? null : null,
           attempt.id, expectedState, attempt.taskId, attempt.ordinal, attempt.startedAt, attempt.predecessorAttemptId ?? null, attempt.predecessorAttemptId ?? null,
         );
         if (result.changes !== 1) return this.#store.exists("runtime_attempts", attempt.id) ? conflict("Attempt compare-and-set failed.") : notFound("Attempt was not found.");
