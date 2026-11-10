@@ -26,10 +26,10 @@ test("a code worker commits and Pirx pushes the reported commit with the worker'
     assert.equal(started.outcome, "success"); if (started.outcome !== "success") return;
     const request = createWorkerRequest({ task: started.value.task, attempt: started.value.attempt, workerId: "worker", provider: "claude-code", repository: { owner: "PiotrGry", repository: "ai-assistant" }, workspace: { branch, worktree }, capabilityGrant: { grantedCapabilities: capabilities, resourceScope: { repository: "PiotrGry/ai-assistant", branch, worktree } }, correlationId: "publish-correlation", limits: { timeoutMs: 60_000, maxOutputBytes: 16_384, maxErrorBytes: 16_384 } });
     assert.equal(request.ok, true); if (!request.ok) return;
-    const worker = (commitChange: boolean) => new ProductionClaudeWorker({ store, repositories: [{ repository: "PiotrGry/ai-assistant", repositoryRoot: root, remoteName: "origin", testCommands: [] }], runner: { async runStructured(input) {
+    const worker = (commitChange: boolean, body = "## What\nFixed a: `<order token>-<n>`.\n\nMerge needs its own authorization.") => new ProductionClaudeWorker({ store, repositories: [{ repository: "PiotrGry/ai-assistant", repositoryRoot: root, remoteName: "origin", testCommands: [] }], runner: { async runStructured(input) {
       assert.ok(input.workerProfile!.disallowedTools.includes("Bash(git push *)"));
       if (commitChange) { await writeFile(join(worktree, "a.txt"), "fixed\n"); git(worktree, "commit", "-q", "-am", "fix"); }
-      return { outcome: "success", requestId: input.requestId, durationMs: 1, exitCode: 0, structuredOutput: { kind: "worker_result", schemaVersion: 1, taskId: request.value.taskId, attemptId: request.value.attemptId, correlationId: request.value.correlationId, outcome: "CODE_COMMITTED", branch, finalCommit: git(worktree, "rev-parse", "HEAD"), pullRequestTitle: "fix: a", pullRequestBody: "## What\nFixed a.\n\n## Tests\nnone" } };
+      return { outcome: "success", requestId: input.requestId, durationMs: 1, exitCode: 0, structuredOutput: { kind: "worker_result", schemaVersion: 1, taskId: request.value.taskId, attemptId: request.value.attemptId, correlationId: request.value.correlationId, outcome: "CODE_COMMITTED", branch, finalCommit: git(worktree, "rev-parse", "HEAD"), pullRequestTitle: "fix: a", pullRequestBody: body } };
     } } });
 
     const result = await worker(true).execute(request.value, new AbortController().signal);
@@ -37,7 +37,9 @@ test("a code worker commits and Pirx pushes the reported commit with the worker'
     if (result.outcome !== "CODE_PUSHED") return;
     assert.equal(git(remote, "rev-parse", `refs/heads/${branch}`), result.finalCommit);
     assert.equal(result.pullRequestTitle, "fix: a");
-    assert.equal(result.pullRequestBody, "## What\nFixed a.\n\n## Tests\nnone");
+    // Prose that names "token" or "authorization" is not a secret (gh-462 attempt 9).
+    assert.equal(result.pullRequestBody, "## What\nFixed a: `<order token>-<n>`.\n\nMerge needs its own authorization.");
+    await assert.rejects(worker(false, "leaked token=abc123").execute(request.value, new AbortController().signal), (error: unknown) => isWorkerFailureError(error) && error.diagnostic.field === "secret_shaped_value");
 
     // A diverged remote is never overwritten; the push error reaches the diagnostic.
     git(worktree, "reset", "-q", "--hard", "HEAD~1"); await writeFile(join(worktree, "a.txt"), "other\n"); git(worktree, "commit", "-q", "-am", "other");

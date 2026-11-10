@@ -54,10 +54,8 @@ export type ClaudeCodeProcessResult =
   | { readonly outcome: "invalid_request" | "invalid_input"; readonly requestId: string; readonly message: string; readonly exitCode: null; readonly durationMs: 0; readonly diagnostic: ReturnType<typeof createWorkerFailureDiagnostic> };
 
 const DEFAULT_RESPONSE_SCHEMA = Object.freeze({ type: "object", additionalProperties: true });
-const SECRET_PATTERN = /(token|secret|password|passwd|api[_-]?key|authorization|cookie|private[_ -]?key|credential|connection[_ -]?string)/iu;
-// Prompt policy text may legitimately mention sensitive-data categories.  At
-// this boundary reject secret-shaped values, while keeping the broad contract
-// guard for untrusted WorkerResult fields below.
+// Prompts and WorkerResults (e.g. a pull request description) may mention
+// sensitive-data categories in prose. Reject only secret-shaped values.
 const PROMPT_SECRET_PATTERNS: readonly RegExp[] = [
   /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/iu,
   /\b(?:proxy-)?authorization\s*:\s*[^\r\n]+/iu,
@@ -143,7 +141,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     if (committed && ((output as Record<string, unknown>).pullRequestTitle === undefined || (output as Record<string, unknown>).pullRequestBody === undefined)) throw new WorkerFailureError(contractDiagnostic(output, "pullRequestBody", "worker_contract_mismatch"));
     const result = validateWorkerResult(committed ? { ...(output as Record<string, unknown>), outcome: "CODE_PUSHED" } : output, request);
     if (!result.ok) throw new WorkerFailureError(contractDiagnostic(processResult.structuredOutput, result.violations[0]?.field, result.violations.some((item) => item.code === "binding_mismatch") ? "binding_mismatch" : "worker_contract_mismatch"));
-    if (SECRET_PATTERN.test(JSON.stringify(result.value))) throw new WorkerFailureError(createWorkerFailureDiagnostic("worker_contract_mismatch"));
+    if (containsPromptSecret(JSON.stringify(result.value))) throw new WorkerFailureError(contractDiagnostic(output, "secret_shaped_value", "worker_contract_mismatch"));
     if (result.ok && result.value.outcome === "CODE_PUSHED" && this.#repositoryPolicy !== undefined && this.#gitStateVerifier !== undefined) {
       if (committed) {
         const published = await this.#gitStateVerifier.publish!(request, result.value, this.#repositoryPolicy);
