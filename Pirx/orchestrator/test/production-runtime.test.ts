@@ -21,6 +21,7 @@ import {
   type TaskId,
   type UtcTimestamp,
   type WorkerPort,
+  worktreeDirectoryName,
 } from "../src/index.js";
 
 const now = "2026-09-15T21:00:00.000Z" as UtcTimestamp;
@@ -38,7 +39,7 @@ async function setup(adapter: WorkerPort | null = { execute: async (request) => 
   const adapterCalls = { value: 0 };
   const gitTimeouts: Array<number | undefined> = [];
   const counted = adapter === null ? undefined : { execute: async (request: Parameters<WorkerPort["execute"]>[0], signal: AbortSignal) => { adapterCalls.value += 1; return adapter.execute(request, signal); } };
-  const runtime = new ProductionRuntime(store, { workerId: "pirx-worker", provider: "fake-claude", workerCapabilities: ["repository.write", "git.push_assigned_branch"], repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }], worktreeParent: "/tmp/pirx-worktrees", leaseDurationMs: 60_000, workerTimeoutMs: 960_000, workerAdapters: { get: () => counted }, workspace: { provision: async (request) => (gitTimeouts.push(request.timeoutMs), { outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, `pirx-${request.taskId}-${request.attemptId}`) } }) }, clock: { now: () => now } });
+  const runtime = new ProductionRuntime(store, { workerId: "pirx-worker", provider: "fake-claude", workerCapabilities: ["repository.write", "git.push_assigned_branch"], repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }], worktreeParent: "/tmp/pirx-worktrees", leaseDurationMs: 60_000, workerTimeoutMs: 960_000, workerAdapters: { get: () => counted }, workspace: { provision: async (request) => (gitTimeouts.push(request.timeoutMs), { outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)) } }) }, clock: { now: () => now } });
   return { directory, store, runtime, adapterCalls, gitTimeouts };
 }
 
@@ -133,7 +134,7 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
           ? { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "QUOTA_EXHAUSTED" as const, reason: diagnostic.message, diagnostic }
           : { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED" as const, branch: request.workspace.branch, finalCommit: "c".repeat(40) };
       } }) },
-      workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, `pirx-${request.taskId}-${request.attemptId}`) } }) },
+      workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)) } }) },
       resumeWorkspaceValidator: { validate: async (request) => (validationTimeouts.push(request.timeoutMs), { outcome: "valid", message: "exact durable workspace verified" }) },
       clock: { now: () => clock },
     });
@@ -199,7 +200,7 @@ test("an operator can retry a Task that Pirx blocked in its own input check befo
         if (calls === 1) throw new WorkerFailureError(createWorkerFailureDiagnostic("binding_mismatch", { stage: "worker_contract", field: "task.goal", violationCode: "forbidden_field" }));
         return { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED" as const, branch: request.workspace.branch, finalCommit: "c".repeat(40) };
       } }) },
-      workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, `pirx-${request.taskId}-${request.attemptId}`) } }) },
+      workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)) } }) },
       resumeWorkspaceValidator: { validate: async () => ({ outcome: "valid", message: "exact durable workspace verified" }) },
       clock: { now: () => clock },
     });
@@ -318,4 +319,8 @@ test("blocks startup when a durable active Lease needs reconciliation and preven
     const stopped = await slow.runtime.shutdown(); assert.equal(stopped.outcome, "stopped"); assert.equal(slow.adapterCalls.value, 1);
     await first;
   } finally { slow.store.close(); await rm(slow.directory, { recursive: true, force: true }); }
+});
+
+test("worktree directory names avoid ':' so tools such as uv accept the path (gh-462)", () => {
+  assert.equal(worktreeDirectoryName("gh-462-5c40", "attempt:gh-462-5c40:12:1794315588056"), "pirx-gh-462-5c40-attempt-gh-462-5c40-12-1794315588056");
 });

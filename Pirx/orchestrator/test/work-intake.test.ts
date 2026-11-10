@@ -18,6 +18,7 @@ import {
   type TaskId,
   type UtcTimestamp,
   type WorkIntakeInput,
+  worktreeDirectoryName,
 } from "../src/index.js";
 
 const acceptedAt = "2026-11-06T12:00:00.000Z" as UtcTimestamp;
@@ -89,7 +90,7 @@ test("work intake is durable, idempotent and linked only through the normal Task
         assert.equal(lease.outcome === "success" ? lease.value.attemptId : undefined, request.attemptId);
         return { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED" as const, branch: request.workspace.branch, finalCommit: "b".repeat(40) };
       } }) },
-      workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, `pirx-${request.taskId}-${request.attemptId}`) } }) },
+      workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)) } }) },
     });
     const dispatched = await runtime.cycle();
     assert.equal(dispatched.outcome, "started");

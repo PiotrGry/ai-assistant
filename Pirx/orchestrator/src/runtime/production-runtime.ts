@@ -10,7 +10,7 @@ import { quotaCooldownFromDiagnostic } from "./worker-recovery.js";
 import { startResumedAttempt } from "./resume.js";
 import { RESUME_ESCALATION_LIMITS, ResumeEscalationCoordinator, isOperatorUnblockCheckpoint, isPreWorkerBlock } from "./resume-escalation.js";
 import { WorkerLifecycleCoordinator } from "./worker-lifecycle.js";
-import { WORKSPACE_PROVISION_LIMITS, WorkspaceProvisioner, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
+import { WORKSPACE_PROVISION_LIMITS, WorkspaceProvisioner, worktreeDirectoryName, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
 import { WORKSPACE_RESUME_VALIDATION_LIMITS, WorkspaceResumeValidator, type WorkspaceResumeValidationRequest, type WorkspaceResumeValidationResult } from "./workspace-resume-validator.js";
 import type { RunnableTaskCandidate } from "./task-selection.js";
 import type { AttemptId, AttemptSnapshot, TaskId, TaskSnapshot, UtcTimestamp } from "./task-domain.js";
@@ -256,7 +256,7 @@ export class ProductionRuntime {
     }
     const id = this.#options.attemptIdFactory?.(taskId, ordinal, now) ?? attemptId(taskId, ordinal, now);
     const assignedBranch = this.#options.branchFactory?.(task.value) ?? branch(task.value);
-    const worktree = resolve(this.#options.worktreeParent, `pirx-${taskId}-${id}`);
+    const worktree = resolve(this.#options.worktreeParent, worktreeDirectoryName(taskId, id));
     const started = this.#store.startAttempt(taskId, { id, worker: workerId, provider: this.#options.provider, ...(previous?.id === undefined ? {} : { predecessorAttemptId: previous.id }), branch: assignedBranch, worktree, ...(previous?.state === "terminal" && previous.finalCommit !== undefined ? { currentCommit: previous.finalCommit } : {}) }, now);
     if (started.outcome !== "success") return portFailure(started.message, started.outcome === "conflict" ? "conflict" : "failed");
     return { outcome: "success", value: { attemptId: started.value.attempt.id } };

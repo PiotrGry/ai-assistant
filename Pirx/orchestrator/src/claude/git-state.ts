@@ -30,7 +30,8 @@ export class GitWorkerStateVerifier implements WorkerGitStateVerifier {
     if (head.outcome !== "success" || !head.stdout.trim().toLowerCase().startsWith(result.finalCommit.toLowerCase())) return fail(`Local Git HEAD ${head.stdout.trim() || "unknown"} does not match the worker result ${result.finalCommit}.`);
     // No force: a diverged remote branch is a conflict for a human, not something to overwrite.
     const pushed = await this.#git.run(["push", policy.remoteName, `${head.stdout.trim()}:refs/heads/${request.workspace.branch}`], request.workspace.worktree, 120_000);
-    if (pushed.outcome !== "success") return { ok: false, message: `git push failed (${pushed.outcome}): ${pushed.stderr.trim() || "no output"}`.slice(0, 2048) };
+    // Repository hooks (pre-push) report on stdout; keep the tail of both streams.
+    if (pushed.outcome !== "success") return { ok: false, message: `git push failed (${pushed.outcome}): ${`${pushed.stdout}\n${pushed.stderr}`.replace(/\u001b\[[0-9;]*m/gu, "").trim().slice(-1900) || "no output"}` };
     return { ok: true, message: "Pushed the reported commit to the assigned branch.", commit: head.stdout.trim().toLowerCase() };
   }
 

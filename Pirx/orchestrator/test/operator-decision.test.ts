@@ -12,6 +12,7 @@ import {
   type AttemptId,
   type TaskId,
   type UtcTimestamp,
+  worktreeDirectoryName,
 } from "../src/index.js";
 
 const t0 = "2026-11-06T10:00:00.000Z" as UtcTimestamp;
@@ -61,7 +62,7 @@ test("persists an operator question, accepts one idempotent answer, and resumes 
         if (checkpoint?.outcome === "success") assert.match(checkpoint.value.resumeInstruction, /Preserve it for compatibility/u);
         return { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED" as const, branch: request.workspace.branch, finalCommit: "b".repeat(40) };
       } }) },
-      workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, `pirx-${request.taskId}-${request.attemptId}`) } }) },
+      workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)) } }) },
       resumeWorkspaceValidator: { validate: async () => ({ outcome: "valid", message: "durable workspace verified" }) },
       clock: { now: () => now },
     });
