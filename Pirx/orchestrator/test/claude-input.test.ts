@@ -130,4 +130,10 @@ test("keeps secret-shaped fields and raw provider/history data out of the envelo
   const malformed = validateClaudeCodeInput({ kind: "claude_code_input", schemaVersion: 1, promptHistory: "raw chat", secret: "hidden" });
   assert.equal(malformed.ok, false);
   assert.equal(JSON.stringify(malformed).includes("hidden"), false);
+  // Prose that names a secret category is not a secret (gh-462 attempt 10 operator reason).
+  const prose = createClaudeCodeInput({ ...fresh, task: { ...fresh.task, goal: "A keyword secret guard rejected the token in the PR text; retry." } });
+  assert.equal(prose.ok, true, JSON.stringify(prose));
+  const leaked = createClaudeCodeInput({ ...fresh, task: { ...fresh.task, goal: "deploy with token=do-not-forward" } });
+  assert.equal(leaked.ok, false);
+  if (!leaked.ok) assert.equal(leaked.violations[0]?.code, "forbidden_field");
 });

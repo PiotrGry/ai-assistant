@@ -4,6 +4,7 @@ import {
   type ClaudeStructuredResult,
 } from "./cli-runner.js";
 import {
+  containsSecretShapedValue,
   validateClaudeCodeInput,
   type ClaudeCodeInput,
   type ClaudeInputResult,
@@ -54,19 +55,6 @@ export type ClaudeCodeProcessResult =
   | { readonly outcome: "invalid_request" | "invalid_input"; readonly requestId: string; readonly message: string; readonly exitCode: null; readonly durationMs: 0; readonly diagnostic: ReturnType<typeof createWorkerFailureDiagnostic> };
 
 const DEFAULT_RESPONSE_SCHEMA = Object.freeze({ type: "object", additionalProperties: true });
-// Prompts and WorkerResults (e.g. a pull request description) may mention
-// sensitive-data categories in prose. Reject only secret-shaped values.
-const PROMPT_SECRET_PATTERNS: readonly RegExp[] = [
-  /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/iu,
-  /\b(?:proxy-)?authorization\s*:\s*[^\r\n]+/iu,
-  /\bbearer\s+[A-Za-z0-9._~+/=-]+/iu,
-  /\b(?:cookie|set-cookie)\s*:\s*[^\r\n]+/iu,
-  /\b(?:password|passwd|pwd|secret|token|api[_-]?key|connection(?:[_ -]?string)?)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s;,]+)/iu,
-  /\b(?:ghp_|github_pat_|xox[baprs]-|sk-[A-Za-z0-9_-])[A-Za-z0-9._-]+/u,
-];
-function containsPromptSecret(value: string): boolean {
-  return PROMPT_SECRET_PATTERNS.some((pattern) => pattern.test(value));
-}
 
 function contractDiagnostic(value: unknown, field: string | undefined, code: "worker_contract_mismatch" | "binding_mismatch"): ReturnType<typeof createWorkerFailureDiagnostic> {
   let serialized = "";
@@ -125,7 +113,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     let prompt: string;
     try { prompt = this.#promptRenderer.render(input.value); } catch { return failure("invalid_input", value.correlationId, "Claude prompt rendering failed before process invocation."); }
     const contractPrompt = `${prompt}\n\n${workerResultContractInstruction()}`;
-    if (contractPrompt.length === 0 || Buffer.byteLength(contractPrompt, "utf8") > 64 * 1024 || containsPromptSecret(contractPrompt)) return failure("invalid_input", value.correlationId, "Claude prompt is invalid or contains forbidden sensitive material.", "permission_denied");
+    if (contractPrompt.length === 0 || Buffer.byteLength(contractPrompt, "utf8") > 64 * 1024 || containsSecretShapedValue(contractPrompt)) return failure("invalid_input", value.correlationId, "Claude prompt is invalid or contains forbidden sensitive material.", "permission_denied");
     const result = await this.#runner.runStructured({ requestId: value.correlationId, cwd: value.workspace.worktree, prompt: contractPrompt, responseSchema: this.#repositoryPolicy === undefined ? this.#responseSchema : buildWorkerResultSchema(value), ...(workerProfile === undefined ? {} : { workerProfile }), ...(this.#transcriptPath === undefined ? {} : { transcriptPath: this.#transcriptPath }), signal, timeoutMs: value.limits.timeoutMs, maxStdoutBytes: value.limits.maxOutputBytes, maxStderrBytes: value.limits.maxErrorBytes });
     if (result.outcome !== "success") return result;
     return { outcome: "success", requestId: result.requestId, structuredOutput: result.structuredOutput, durationMs: Math.max(0, Date.now() - startedAt), exitCode: 0 };
@@ -141,7 +129,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     if (committed && ((output as Record<string, unknown>).pullRequestTitle === undefined || (output as Record<string, unknown>).pullRequestBody === undefined)) throw new WorkerFailureError(contractDiagnostic(output, "pullRequestBody", "worker_contract_mismatch"));
     const result = validateWorkerResult(committed ? { ...(output as Record<string, unknown>), outcome: "CODE_PUSHED" } : output, request);
     if (!result.ok) throw new WorkerFailureError(contractDiagnostic(processResult.structuredOutput, result.violations[0]?.field, result.violations.some((item) => item.code === "binding_mismatch") ? "binding_mismatch" : "worker_contract_mismatch"));
-    if (containsPromptSecret(JSON.stringify(result.value))) throw new WorkerFailureError(contractDiagnostic(output, "secret_shaped_value", "worker_contract_mismatch"));
+    if (containsSecretShapedValue(JSON.stringify(result.value))) throw new WorkerFailureError(contractDiagnostic(output, "secret_shaped_value", "worker_contract_mismatch"));
     if (result.ok && result.value.outcome === "CODE_PUSHED" && this.#repositoryPolicy !== undefined && this.#gitStateVerifier !== undefined) {
       if (committed) {
         const published = await this.#gitStateVerifier.publish!(request, result.value, this.#repositoryPolicy);
