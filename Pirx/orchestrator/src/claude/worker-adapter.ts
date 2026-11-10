@@ -27,7 +27,7 @@ import { createHash } from "node:crypto";
 import { workerResultContractInstruction } from "../runtime/worker-result-contract.js";
 
 export interface ClaudeStructuredRunner {
-  runStructured(request: { readonly requestId: string; readonly cwd: string; readonly prompt: string; readonly responseSchema: unknown; readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly maxStdoutBytes?: number; readonly maxStderrBytes?: number; readonly workerProfile?: import("./worker-profile.js").ClaudeCodeWorkerProfile }): Promise<ClaudeStructuredResult>;
+  runStructured(request: { readonly requestId: string; readonly cwd: string; readonly prompt: string; readonly responseSchema: unknown; readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly maxStdoutBytes?: number; readonly maxStderrBytes?: number; readonly workerProfile?: import("./worker-profile.js").ClaudeCodeWorkerProfile; readonly transcriptPath?: string }): Promise<ClaudeStructuredResult>;
 }
 
 export interface ClaudeCodeInputSource {
@@ -45,6 +45,7 @@ export interface ClaudeCodeAdapterOptions {
   readonly responseSchema?: unknown;
   readonly repositoryPolicy?: ClaudeCodeRepositoryPolicy;
   readonly gitStateVerifier?: WorkerGitStateVerifier;
+  readonly transcriptPath?: string;
 }
 
 export type ClaudeCodeProcessResult =
@@ -93,6 +94,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
   readonly #promptRenderer: ClaudeCodePromptRenderer;
   readonly #responseSchema: unknown;
   readonly #repositoryPolicy: ClaudeCodeRepositoryPolicy | undefined;
+  readonly #transcriptPath: string | undefined;
   readonly #gitStateVerifier: WorkerGitStateVerifier | undefined;
 
   public constructor(options: ClaudeCodeAdapterOptions) {
@@ -101,6 +103,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     this.#promptRenderer = options.promptRenderer;
     this.#responseSchema = options.responseSchema ?? DEFAULT_RESPONSE_SCHEMA;
     this.#repositoryPolicy = options.repositoryPolicy;
+    this.#transcriptPath = options.transcriptPath;
     this.#gitStateVerifier = options.repositoryPolicy === undefined ? undefined : options.gitStateVerifier ?? new GitWorkerStateVerifier();
   }
 
@@ -125,7 +128,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     try { prompt = this.#promptRenderer.render(input.value); } catch { return failure("invalid_input", value.correlationId, "Claude prompt rendering failed before process invocation."); }
     const contractPrompt = `${prompt}\n\n${workerResultContractInstruction()}`;
     if (contractPrompt.length === 0 || Buffer.byteLength(contractPrompt, "utf8") > 64 * 1024 || containsPromptSecret(contractPrompt)) return failure("invalid_input", value.correlationId, "Claude prompt is invalid or contains forbidden sensitive material.", "permission_denied");
-    const result = await this.#runner.runStructured({ requestId: value.correlationId, cwd: value.workspace.worktree, prompt: contractPrompt, responseSchema: this.#repositoryPolicy === undefined ? this.#responseSchema : buildWorkerResultSchema(value), ...(workerProfile === undefined ? {} : { workerProfile }), signal, timeoutMs: value.limits.timeoutMs, maxStdoutBytes: value.limits.maxOutputBytes, maxStderrBytes: value.limits.maxErrorBytes });
+    const result = await this.#runner.runStructured({ requestId: value.correlationId, cwd: value.workspace.worktree, prompt: contractPrompt, responseSchema: this.#repositoryPolicy === undefined ? this.#responseSchema : buildWorkerResultSchema(value), ...(workerProfile === undefined ? {} : { workerProfile }), ...(this.#transcriptPath === undefined ? {} : { transcriptPath: this.#transcriptPath }), signal, timeoutMs: value.limits.timeoutMs, maxStdoutBytes: value.limits.maxOutputBytes, maxStderrBytes: value.limits.maxErrorBytes });
     if (result.outcome !== "success") return result;
     return { outcome: "success", requestId: result.requestId, structuredOutput: result.structuredOutput, durationMs: Math.max(0, Date.now() - startedAt), exitCode: 0 };
   }

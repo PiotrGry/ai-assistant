@@ -128,6 +128,17 @@ test("validates every terminal result variant and only allows result evidence fo
   assert.equal(validateWorkerResult({ ...result(value), extra: true }, value).ok, false);
 });
 
+test("keeps a worker-authored diagnostic message instead of rejecting the whole result", () => {
+  const value = request();
+  const checked = validateWorkerResult({ ...result(value, "FAILED"), diagnostic: { schemaVersion: 1, code: "process_failure", message: "git push failed: ssh: connect to host github.com port 22" } }, value);
+  assert.equal(checked.ok, true);
+  if (!checked.ok || checked.value.outcome === "CODE_PUSHED") return;
+  assert.equal(checked.value.diagnostic?.code, "process_failure");
+  assert.equal(checked.value.diagnostic?.message, "Worker process ended unsuccessfully.");
+  assert.equal(checked.value.diagnostic?.providerMessage, "git push failed: ssh: connect to host github.com port 22");
+  assert.equal(validateWorkerResult({ ...result(value, "FAILED"), diagnostic: { schemaVersion: 1, code: "not_a_code", message: "x" } }, value).ok, false);
+});
+
 test("invokes a fake provider-independent adapter once only after validation", async () => {
   const value = request();
   let calls = 0;

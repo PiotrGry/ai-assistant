@@ -1,6 +1,7 @@
 import type { RuntimeSqliteStore } from "../runtime/sqlite.js";
 import { modelSettingsEnvironment } from "@pirx/config";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { createClaudeCodeInput, type ClaudeInputResult, type ClaudeCodeInput } from "../runtime/claude-input.js";
 import { buildAssignedResumeContext } from "../runtime/resume.js";
 import type { WorkerPort, WorkerRequest, WorkerResult } from "../runtime/worker-contract.js";
@@ -20,6 +21,8 @@ export interface ProductionClaudeWorkerOptions {
   readonly repositories: readonly ProductionClaudeRepositoryPolicy[];
   readonly runner?: ClaudeStructuredRunner;
   readonly environment?: NodeJS.ProcessEnv;
+  /** Directory for raw per-Attempt worker transcripts; `<dir>/<taskId>/<attemptId>.*`. */
+  readonly transcriptDirectory?: string;
 }
 
 function invalidInput(): ClaudeInputResult<never> {
@@ -31,12 +34,14 @@ export class ProductionClaudeWorker implements WorkerPort {
   readonly #repositories: ReadonlyMap<string, ProductionClaudeRepositoryPolicy>;
   readonly #runner: ClaudeStructuredRunner | undefined;
   readonly #environment: NodeJS.ProcessEnv;
+  readonly #transcriptDirectory: string | undefined;
 
   public constructor(options: ProductionClaudeWorkerOptions) {
     this.#store = options.store;
     this.#repositories = new Map(options.repositories.map((item) => [item.repository, Object.freeze({ ...item, testCommands: Object.freeze([...item.testCommands]) })]));
     this.#runner = options.runner;
     this.#environment = options.environment ?? process.env;
+    this.#transcriptDirectory = options.transcriptDirectory;
   }
 
   public async execute(request: WorkerRequest, signal: AbortSignal): Promise<WorkerResult> {
@@ -45,6 +50,7 @@ export class ProductionClaudeWorker implements WorkerPort {
     if (repository === undefined) throw new WorkerFailureError(createWorkerFailureDiagnostic("permission_denied"));
     const adapter = new ClaudeCodeProcessAdapter({
       ...(this.#runner === undefined ? {} : { runner: this.#runner }),
+      ...(this.#transcriptDirectory === undefined ? {} : { transcriptPath: join(this.#transcriptDirectory, encodeURIComponent(request.taskId), encodeURIComponent(request.attemptId)) }),
       inputSource: { create: (value) => this.#input(value) },
       promptRenderer: { render: (value) => [
         "Execute only the assigned Pirx Task in the assigned worktree and branch.",

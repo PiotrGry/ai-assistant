@@ -7,7 +7,7 @@ import {
   type AttemptId,
 } from "./task-domain.js";
 import type { CapabilityResourceScope } from "./capabilities.js";
-import { createWorkerFailureDiagnostic, isWorkerFailureError, validateWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
+import { adoptWorkerAuthoredDiagnostic, createWorkerFailureDiagnostic, isWorkerFailureError, validateWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
 import { WORKER_RESULT_ALLOWED_FIELDS, WORKER_RESULT_CONTRACT_SCHEMA_VERSION, workerResultVariant } from "./worker-result-contract.js";
 import type { WorkerNonSuccessOutcome, WorkerResult } from "./worker-result-contract.js";
 
@@ -240,7 +240,7 @@ export function validateWorkerResult(value: unknown, request?: Pick<WorkerReques
   const reason = boundedText(value.reason, "reason", WORKER_CONTRACT_LIMITS.reason);
   if (typeof reason !== "string") return failure(reason);
   if (value.diagnostic !== undefined) {
-    const diagnostic = validateWorkerFailureDiagnostic(value.diagnostic);
+    const diagnostic = validateWorkerFailureDiagnostic(adoptWorkerAuthoredDiagnostic(value.diagnostic));
     if (diagnostic === undefined) return failure(violation("invalid_result", "diagnostic", "Worker diagnostic is malformed or unsafe."));
     return success(Object.freeze({ ...base, outcome: value.outcome as WorkerNonSuccessOutcome, reason, diagnostic }));
   }

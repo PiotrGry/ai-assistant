@@ -361,3 +361,23 @@ test("code workers run while they stream events and stop only after an idle wind
     assert.equal(silent.diagnostic.code, "timeout");
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
+
+test("code workers persist every raw stream byte, including the final result, to the transcript", async () => {
+  const value = await fixture();
+  try {
+    const transcriptPath = join(value.root, "logs", "task-1", "attempt-1");
+    const result = await new ClaudeCodeCliRunner({
+      executable: value.executable,
+      environment: { PATH: process.env.PATH, HOME: process.env.HOME },
+      additionalEnvironment: { PIRX_FAKE_MODE: "stream-active" },
+      versionProbe: async () => `${MINIMUM_CLAUDE_CODE_WORKER_VERSION} (Claude Code)`,
+    }).runStructured({ requestId: "stream-transcript", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root), timeoutMs: 1_000, maxStdoutBytes: 1_024, transcriptPath });
+    assert.equal(result.outcome, "success", JSON.stringify(result));
+    const lines = (await readFile(`${transcriptPath}.stdout.jsonl`, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { type: string; padding?: string });
+    // All 6 events (the oversized one too) plus the result envelope the contract checks later.
+    assert.equal(lines.length, 7);
+    assert.equal(lines[1]?.padding?.length, 4096);
+    assert.equal(lines[6]?.type, "result");
+    assert.equal(await readFile(`${transcriptPath}.stderr.log`, "utf8"), "");
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});

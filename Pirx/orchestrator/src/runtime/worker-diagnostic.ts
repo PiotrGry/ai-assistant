@@ -159,6 +159,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * A worker may describe its failure in its own words. Keep the code, use the
+ * canonical message, and move the worker's text into providerMessage so it is
+ * not lost. Persisted diagnostics still go through the strict validator.
+ */
+export function adoptWorkerAuthoredDiagnostic(value: unknown): unknown {
+  if (!isRecord(value) || typeof value.code !== "string" || !WORKER_FAILURE_CODES.includes(value.code as WorkerFailureCode)) return value;
+  const canonical = MESSAGES[value.code as WorkerFailureCode];
+  if (value.message === canonical) return value;
+  const authored = [value.message, value.providerMessage].filter((item): item is string => typeof item === "string" && item.trim().length > 0).join("\n");
+  const { providerMessage: _ignored, ...rest } = value;
+  return { ...rest, message: canonical, ...(authored.length === 0 ? {} : authored.length > 2048 ? { providerMessage: authored.slice(0, 2048), providerMessageTruncated: true } : { providerMessage: authored }) };
+}
+
 export function validateWorkerFailureDiagnostic(value: unknown): WorkerFailureDiagnostic | undefined {
   if (!isRecord(value) || value.schemaVersion !== WORKER_DIAGNOSTIC_SCHEMA_VERSION || typeof value.code !== "string" || !WORKER_FAILURE_CODES.includes(value.code as WorkerFailureCode) || value.message !== MESSAGES[value.code as WorkerFailureCode]) return undefined;
   const exitCode = value.exitCode === undefined ? undefined : safeNumber(value.exitCode, 255);

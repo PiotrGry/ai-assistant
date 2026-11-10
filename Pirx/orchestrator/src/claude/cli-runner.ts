@@ -1,9 +1,10 @@
 import { diagnosticContext } from "../runtime/diagnostic-context.js";
 import { spawn, type ChildProcess } from "node:child_process";
+import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 import { CLAUDE_CODE_WORKER_PROFILE_LIMITS, type ClaudeCodeWorkerProfile } from "./worker-profile.js";
 import { createWorkerFailureDiagnostic, type WorkerFailureCode } from "../runtime/worker-diagnostic.js";
@@ -68,6 +69,8 @@ export interface ClaudeStructuredRequest extends ClaudeRoundTripRequest {
   readonly prompt: string;
   readonly responseSchema: unknown;
   readonly workerProfile?: ClaudeCodeWorkerProfile;
+  /** Absolute path prefix; every raw stdout/stderr byte is appended to `<prefix>.stdout.jsonl` / `<prefix>.stderr.log`. */
+  readonly transcriptPath?: string;
 }
 
 export interface ClaudeRoundTripSuccess {
@@ -264,6 +267,17 @@ function validateStructuredOutput(value: unknown, requestId: string): value is {
   return value.requestId === requestId && typeof value.acknowledgement === "string" && value.acknowledgement.length > 0 && value.acknowledgement.length <= 256;
 }
 
+interface ExecuteInput {
+  readonly requestId: string; readonly startedAt: number; readonly workingDirectory: string;
+  readonly signal: AbortSignal | undefined; readonly timeoutMs: number;
+  readonly maxStdoutBytes: number; readonly maxStderrBytes: number;
+  readonly arguments: readonly string[];
+  readonly structuredOutput?: boolean;
+  /** stdout is stream-json: keep only the final result line, bound each line. */
+  readonly stream?: boolean;
+  readonly transcriptPath?: string;
+}
+
 export class ClaudeCodeCliRunner {
   private readonly executable: string;
   private readonly tempParentDirectory: string;
@@ -366,7 +380,7 @@ export class ClaudeCodeCliRunner {
       const arguments_ = request.workerProfile === undefined
         ? buildClaudeStructuredArguments(request.requestId, request.prompt, request.responseSchema)
         : buildClaudeWorkerArguments(request.requestId, request.prompt, request.responseSchema, request.workerProfile);
-      return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: arguments_, structuredOutput: true, stream: request.workerProfile !== undefined }) as ClaudeStructuredResult;
+      return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: arguments_, structuredOutput: true, stream: request.workerProfile !== undefined, ...(request.transcriptPath === undefined ? {} : { transcriptPath: request.transcriptPath }) }) as ClaudeStructuredResult;
     } catch { return failure("process_error", request.requestId, startedAt, null); }
   }
 
@@ -387,15 +401,23 @@ export class ClaudeCodeCliRunner {
     return this.workerVersionCheck;
   }
 
-  private async execute(input: {
-    readonly requestId: string; readonly startedAt: number; readonly workingDirectory: string;
-    readonly signal: AbortSignal | undefined; readonly timeoutMs: number;
-    readonly maxStdoutBytes: number; readonly maxStderrBytes: number;
-    readonly arguments: readonly string[];
-    readonly structuredOutput?: boolean;
-    /** stdout is stream-json: keep only the final result line, bound each line. */
-    readonly stream?: boolean;
-  }): Promise<ClaudeRoundTripResult> {
+  private async execute(input: ExecuteInput): Promise<ClaudeRoundTripResult> {
+    // Nothing the worker says may be lost: no transcript file, no worker.
+    let transcript: { stdout: number; stderr: number } | undefined;
+    if (input.transcriptPath !== undefined) {
+      if (!isAbsolute(input.transcriptPath)) return failure("process_error", input.requestId, input.startedAt, null);
+      try {
+        mkdirSync(dirname(input.transcriptPath), { recursive: true, mode: 0o700 });
+        const stdoutFd = openSync(`${input.transcriptPath}.stdout.jsonl`, "a", 0o600);
+        try { transcript = { stdout: stdoutFd, stderr: openSync(`${input.transcriptPath}.stderr.log`, "a", 0o600) }; }
+        catch (error: unknown) { closeSync(stdoutFd); throw error; }
+      } catch { return failure("process_error", input.requestId, input.startedAt, null); }
+    }
+    try { return await this.executeProcess(input, transcript); }
+    finally { if (transcript !== undefined) { closeSync(transcript.stdout); closeSync(transcript.stderr); } }
+  }
+
+  private async executeProcess(input: ExecuteInput, transcript: { stdout: number; stderr: number } | undefined): Promise<ClaudeRoundTripResult> {
     const stdoutChunks: Buffer[] = [];
     let idleTimer: NodeJS.Timeout | undefined;
     // Silence, not elapsed time, ends a worker: any output restarts the window.
@@ -459,6 +481,10 @@ export class ClaudeCodeCliRunner {
     const append = (target: "stdout" | "stderr", value: unknown): void => {
       const chunk = asBuffer(value);
       armIdle();
+      if (transcript !== undefined) {
+        try { writeSync(target === "stdout" ? transcript.stdout : transcript.stderr, chunk); }
+        catch { if (trigger === undefined) trigger = "invalid_output"; terminate(); return; }
+      }
       if (target === "stdout" && input.stream === true) { appendStream(chunk); return; }
       if (target === "stdout") {
         const remaining = input.maxStdoutBytes - stdoutBytes;
