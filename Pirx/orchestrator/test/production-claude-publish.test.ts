@@ -29,12 +29,14 @@ test("a code worker commits and Pirx pushes the reported commit with the worker'
     const worker = (commitChange: boolean, body = "## What\nFixed a: `<order token>-<n>`.\n\nMerge needs its own authorization.") => new ProductionClaudeWorker({ store, repositories: [{ repository: "PiotrGry/ai-assistant", repositoryRoot: root, remoteName: "origin", testCommands: [] }], runner: { async runStructured(input) {
       assert.ok(input.workerProfile!.disallowedTools.includes("Bash(git push *)"));
       if (commitChange) { await writeFile(join(worktree, "a.txt"), "fixed\n"); git(worktree, "commit", "-q", "-am", "fix"); }
-      return { outcome: "success", requestId: input.requestId, durationMs: 1, exitCode: 0, structuredOutput: { kind: "worker_result", schemaVersion: 1, taskId: request.value.taskId, attemptId: request.value.attemptId, correlationId: request.value.correlationId, outcome: "CODE_COMMITTED", branch, finalCommit: git(worktree, "rev-parse", "HEAD"), pullRequestTitle: "fix: a", pullRequestBody: body } };
+      return { outcome: "success", requestId: input.requestId, durationMs: 1, exitCode: 0, structuredOutput: { kind: "worker_result", schemaVersion: 1, taskId: request.value.taskId, attemptId: request.value.attemptId, correlationId: request.value.correlationId, outcome: "CODE_COMMITTED", branch, finalCommit: git(worktree, "rev-parse", "--short", "HEAD"), pullRequestTitle: "fix: a", pullRequestBody: body } };
     } } });
 
     const result = await worker(true).execute(request.value, new AbortController().signal);
     assert.equal(result.outcome, "CODE_PUSHED");
     if (result.outcome !== "CODE_PUSHED") return;
+    // gh-462 attempt 11 reported an abbreviated SHA; Pirx records the full one it pushed.
+    assert.match(result.finalCommit, /^[0-9a-f]{40}$/u);
     assert.equal(git(remote, "rev-parse", `refs/heads/${branch}`), result.finalCommit);
     assert.equal(result.pullRequestTitle, "fix: a");
     // Prose that names "token" or "authorization" is not a secret (gh-462 attempt 9).

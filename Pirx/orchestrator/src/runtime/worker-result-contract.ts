@@ -154,7 +154,7 @@ export function buildWorkerResultSchema(request: WorkerResultSchemaRequest): unk
       ...baseProperties,
       outcome: { enum: [WORKER_COMMITTED_OUTCOME, ...WORKER_RESULT_OUTCOMES.filter((outcome) => outcome !== "CODE_PUSHED")] },
       branch: { type: "string", const: request.workspace.branch },
-      finalCommit: { type: "string", pattern: "^[0-9a-fA-F]{4,64}$" },
+      finalCommit: { type: "string", pattern: "^[0-9a-fA-F]{40}$", description: "Full 40-character SHA of HEAD (git rev-parse HEAD)." },
       reason: { type: "string", minLength: 1, maxLength: 1_000 },
       pullRequestTitle: { type: "string", minLength: 1, maxLength: PULL_REQUEST_TEXT_LIMITS.title },
       pullRequestBody: { type: "string", minLength: 1, maxLength: PULL_REQUEST_TEXT_LIMITS.body },

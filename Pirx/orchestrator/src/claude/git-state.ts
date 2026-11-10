@@ -5,6 +5,8 @@ import type { ClaudeCodeRepositoryPolicy } from "./worker-profile.js";
 export interface WorkerGitStateVerification {
   readonly ok: boolean;
   readonly message: string;
+  /** publish only: the full SHA that was pushed. */
+  readonly commit?: string;
 }
 
 export interface WorkerGitStateVerifier {
@@ -22,13 +24,14 @@ export class GitWorkerStateVerifier implements WorkerGitStateVerifier {
 
   public async publish(request: WorkerRequest, result: Extract<WorkerResult, { readonly outcome: "CODE_PUSHED" }>, policy: ClaudeCodeRepositoryPolicy): Promise<WorkerGitStateVerification> {
     if (request.workspace.worktree !== policy.assignedWorktree || result.branch !== request.workspace.branch) return fail("Worker result workspace or branch does not match the assigned policy.");
-    if (!/^[0-9a-f]{4,64}$/iu.test(result.finalCommit)) return fail("Worker result final commit is not a valid Git revision.");
+    if (!/^[0-9a-f]{7,64}$/iu.test(result.finalCommit)) return fail("Worker result final commit is not a valid Git revision.");
     const head = await this.#git.run(["rev-parse", "HEAD"], request.workspace.worktree, 30_000);
-    if (head.outcome !== "success" || head.stdout.trim().toLowerCase() !== result.finalCommit.toLowerCase()) return fail("Local Git HEAD does not match the worker result.");
+    // Workers often report an abbreviated SHA; it must still name HEAD exactly.
+    if (head.outcome !== "success" || !head.stdout.trim().toLowerCase().startsWith(result.finalCommit.toLowerCase())) return fail(`Local Git HEAD ${head.stdout.trim() || "unknown"} does not match the worker result ${result.finalCommit}.`);
     // No force: a diverged remote branch is a conflict for a human, not something to overwrite.
     const pushed = await this.#git.run(["push", policy.remoteName, `${head.stdout.trim()}:refs/heads/${request.workspace.branch}`], request.workspace.worktree, 120_000);
     if (pushed.outcome !== "success") return { ok: false, message: `git push failed (${pushed.outcome}): ${pushed.stderr.trim() || "no output"}`.slice(0, 2048) };
-    return { ok: true, message: "Pushed the reported commit to the assigned branch." };
+    return { ok: true, message: "Pushed the reported commit to the assigned branch.", commit: head.stdout.trim().toLowerCase() };
   }
 
   public async verify(request: WorkerRequest, result: Extract<WorkerResult, { readonly outcome: "CODE_PUSHED" }>, policy: ClaudeCodeRepositoryPolicy): Promise<WorkerGitStateVerification> {

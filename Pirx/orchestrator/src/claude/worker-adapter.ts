@@ -130,15 +130,20 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     const result = validateWorkerResult(committed ? { ...(output as Record<string, unknown>), outcome: "CODE_PUSHED" } : output, request);
     if (!result.ok) throw new WorkerFailureError(contractDiagnostic(processResult.structuredOutput, result.violations[0]?.field, result.violations.some((item) => item.code === "binding_mismatch") ? "binding_mismatch" : "worker_contract_mismatch"));
     if (containsSecretShapedValue(JSON.stringify(result.value))) throw new WorkerFailureError(contractDiagnostic(output, "secret_shaped_value", "worker_contract_mismatch"));
+    let final: WorkerResult = result.value;
     if (result.ok && result.value.outcome === "CODE_PUSHED" && this.#repositoryPolicy !== undefined && this.#gitStateVerifier !== undefined) {
+      let pushed = result.value;
       if (committed) {
         const published = await this.#gitStateVerifier.publish!(request, result.value, this.#repositoryPolicy);
-        if (!published.ok) throw new WorkerFailureError(createWorkerFailureDiagnostic("git_state_mismatch", { stage: "git_state", providerMessage: published.message }));
+        if (!published.ok || published.commit === undefined) throw new WorkerFailureError(createWorkerFailureDiagnostic("git_state_mismatch", { stage: "git_state", providerMessage: published.message }));
+        // Record the full SHA Pirx pushed, not the worker's possibly abbreviated one.
+        pushed = { ...result.value, finalCommit: published.commit };
       }
-      const verified = await this.#gitStateVerifier.verify(request, result.value, this.#repositoryPolicy);
+      const verified = await this.#gitStateVerifier.verify(request, pushed, this.#repositoryPolicy);
       if (!verified.ok) throw new WorkerFailureError(createWorkerFailureDiagnostic("git_state_mismatch", { stage: "git_state", providerMessage: verified.message }));
+      final = pushed;
     }
-    return result.value;
+    return final;
   }
 }
 
