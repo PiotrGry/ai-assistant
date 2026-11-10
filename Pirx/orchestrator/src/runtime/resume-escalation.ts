@@ -161,6 +161,15 @@ export function isOperatorUnblockCheckpoint(checkpoint: { readonly id: string; r
 }
 
 /**
+ * Pirx refused the Attempt in its own input/contract check and never received
+ * worker output (no payload digest), so nothing external can be ambiguous.
+ * Unlike a worker-reported BLOCKED, a retry after a Pirx fix is safe.
+ */
+export function isPreWorkerBlock(attempt: AttemptSnapshot): boolean {
+  return attempt.state === "terminal" && attempt.result === "BLOCKED" && attempt.diagnostic?.code === "binding_mismatch" && attempt.diagnostic.stage === "worker_contract" && attempt.diagnostic.payloadDigest === undefined;
+}
+
+/**
  * Durably approve one more resume of a Task stopped by the resume failure
  * limit. Ambiguous results stay blocked: they need reconciliation, not retry.
  * The daemon still validates the workspace, acquires a Lease and creates the
@@ -185,10 +194,11 @@ export function unblockEscalatedTask(store: RuntimeSqliteStore, input: OperatorU
     }
     if (existing.outcome !== "not_found") return existing;
     if (task.value.state !== "blocked") return { outcome: "conflict" as const, message: `Task state ${task.value.state} is not blocked.` };
-    if (latest.result !== "FAILED" && latest.result !== "QUOTA_EXHAUSTED") return { outcome: "invalid_record" as const, message: `Latest Attempt result ${latest.result} cannot be resumed by unblock; ambiguous or blocked results need reconciliation.` };
+    const preWorker = isPreWorkerBlock(latest);
+    if (latest.result !== "FAILED" && latest.result !== "QUOTA_EXHAUSTED" && !preWorker) return { outcome: "invalid_record" as const, message: `Latest Attempt result ${latest.result} cannot be resumed by unblock; ambiguous or blocked results need reconciliation.` };
     const escalation = checkpoints.latestByTask(task.value.id);
     if (escalation.outcome !== "success") return escalation;
-    if (escalation.value.id !== checkpointId(task.value.id, latest.id, "RESUME_FAILURE_LIMIT_REACHED") || task.value.blockingReason !== escalation.value.blockingReason) return { outcome: "conflict" as const, message: "Task is not blocked by the resume failure limit." };
+    if (preWorker ? escalation.value.previousAttemptId !== latest.id : escalation.value.id !== checkpointId(task.value.id, latest.id, "RESUME_FAILURE_LIMIT_REACHED") || task.value.blockingReason !== escalation.value.blockingReason) return { outcome: "conflict" as const, message: "Task is not blocked by the resume failure limit." };
     const { kind: _kind, schemaVersion: _schemaVersion, ...base } = escalation.value;
     const created = createCheckpoint({
       ...base,

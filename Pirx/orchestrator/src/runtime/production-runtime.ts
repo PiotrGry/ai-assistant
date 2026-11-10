@@ -8,7 +8,7 @@ import { CapabilityAwareWorkerExecutionPort, type WorkerAdapterRegistry } from "
 import { createWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
 import { quotaCooldownFromDiagnostic } from "./worker-recovery.js";
 import { startResumedAttempt } from "./resume.js";
-import { RESUME_ESCALATION_LIMITS, ResumeEscalationCoordinator, isOperatorUnblockCheckpoint } from "./resume-escalation.js";
+import { RESUME_ESCALATION_LIMITS, ResumeEscalationCoordinator, isOperatorUnblockCheckpoint, isPreWorkerBlock } from "./resume-escalation.js";
 import { WorkerLifecycleCoordinator } from "./worker-lifecycle.js";
 import { WORKSPACE_PROVISION_LIMITS, WorkspaceProvisioner, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
 import { WORKSPACE_RESUME_VALIDATION_LIMITS, WorkspaceResumeValidator, type WorkspaceResumeValidationRequest, type WorkspaceResumeValidationResult } from "./workspace-resume-validator.js";
@@ -224,7 +224,7 @@ export class ProductionRuntime {
     const previous = history.value[history.value.length - 1];
     const failedResume = task.value.state === "failed" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED");
     const operatorResume = task.value.state === "blocked" && previous?.state === "terminal" && previous.result === "BLOCKED" && previous.diagnostic?.code === "operator_input_required";
-    const operatorUnblock = task.value.state === "blocked" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED");
+    const operatorUnblock = task.value.state === "blocked" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED" || isPreWorkerBlock(previous));
     if (failedResume || operatorResume || operatorUnblock) {
       if (previous === undefined) return portFailure("Resume Attempt history is unavailable.", "conflict");
       const checkpoint = this.#store.checkpoints.latestByTask(taskId);

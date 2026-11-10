@@ -484,6 +484,7 @@ export {
   RESUME_ESCALATION_SCHEMA_VERSION,
   ResumeEscalationCoordinator,
   isOperatorUnblockCheckpoint,
+  isPreWorkerBlock,
   operatorUnblockCheckpointId,
   unblockEscalatedTask,
   type OperatorUnblockAcceptance,

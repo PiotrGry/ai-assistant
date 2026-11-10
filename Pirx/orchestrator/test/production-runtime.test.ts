@@ -8,6 +8,9 @@ import {
   ProductionRuntime,
   RuntimeSqliteStore,
   createWorkerFailureDiagnostic,
+  WorkerFailureError,
+  isPreWorkerBlock,
+  unblockEscalatedTask,
   createCheckpoint,
   createTask,
   retryTask,
@@ -170,6 +173,53 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
     assert.equal(store.tasks.list().outcome, "success");
     const allTasks = store.tasks.list();
     if (allTasks.outcome === "success") assert.equal(allTasks.value.length, 1);
+    runtime.close();
+  } finally {
+    try { store.close(); } catch { /* runtime may already have closed it */ }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an operator can retry a Task that Pirx blocked in its own input check before the worker ran", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-production-preworker-unblock-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  let calls = 0; let clock = now;
+  try {
+    const created = createTask({ id: taskId, githubReference: issue, goal: "Retry after a Pirx input fix", scope: "production composition", acceptanceCriteria: ["same Task, new Attempt"], priority: 1, risk: "low", requiredCapabilities: ["repository.write", "git.push_assigned_branch"], createdAt: now });
+    assert.equal(created.ok, true); if (!created.ok) return;
+    assert.equal(store.tasks.create(created.value).outcome, "success");
+    assert.equal(store.selection.synchronize({ taskId, queueOrder: 1, dependencyState: "known", blockers: [], synchronizedAt: now }).outcome, "success");
+    const runtime = new ProductionRuntime(store, {
+      workerId: "pirx-worker", provider: "fake-claude", workerCapabilities: ["repository.write", "git.push_assigned_branch"],
+      repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }], worktreeParent: "/tmp/pirx-worktrees", leaseDurationMs: 60_000,
+      attemptIdFactory: (_task, ordinal) => `preworker-attempt-${ordinal}` as AttemptId,
+      workerAdapters: { get: () => ({ execute: async (request) => {
+        calls += 1;
+        // Same shape as gh-462 attempt 10: Pirx refused its own input; no worker output exists.
+        if (calls === 1) throw new WorkerFailureError(createWorkerFailureDiagnostic("binding_mismatch", { stage: "worker_contract", field: "task.goal", violationCode: "forbidden_field" }));
+        return { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED" as const, branch: request.workspace.branch, finalCommit: "c".repeat(40) };
+      } }) },
+      workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, `pirx-${request.taskId}-${request.attemptId}`) } }) },
+      resumeWorkspaceValidator: { validate: async () => ({ outcome: "valid", message: "exact durable workspace verified" }) },
+      clock: { now: () => clock },
+    });
+    assert.equal((await runtime.cycle()).outcome, "failed");
+    const blocked = store.tasks.get(taskId); assert.equal(blocked.outcome === "success" ? blocked.value.state : undefined, "blocked");
+    const first = store.attempts.listByTask(taskId); assert.equal(first.outcome, "success"); if (first.outcome !== "success") return;
+    const attempt = first.value[0]!;
+    assert.equal(isPreWorkerBlock(attempt), true);
+    // A contract failure on output Claude actually returned is not pre-worker.
+    if (attempt.state === "terminal" && attempt.diagnostic !== undefined) assert.equal(isPreWorkerBlock({ ...attempt, diagnostic: { ...attempt.diagnostic, payloadDigest: "a".repeat(64) } }), false);
+    assert.notEqual((await runtime.cycle()).outcome, "started");
+    assert.equal(calls, 1);
+    const unblocked = unblockEscalatedTask(store, { taskId, operationId: "op-preworker-unblock", reason: "Input check fixed", unblockedAt: now });
+    assert.equal(unblocked.outcome, "success", JSON.stringify(unblocked));
+    clock = "2026-09-15T21:02:00.000Z" as UtcTimestamp;
+    const retried = await runtime.cycle();
+    assert.equal(retried.outcome, "started", JSON.stringify(retried));
+    assert.equal(calls, 2);
+    const history = store.attempts.listByTask(taskId);
+    if (history.outcome === "success") { assert.equal(history.value.length, 2); assert.equal(history.value[1]?.predecessorAttemptId, attempt.id); }
     runtime.close();
   } finally {
     try { store.close(); } catch { /* runtime may already have closed it */ }
