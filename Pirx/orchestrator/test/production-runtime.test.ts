@@ -26,16 +26,17 @@ const issue = { owner: "PiotrGry", repository: "ai-assistant", issueNumber: 194,
 const repository = "PiotrGry/ai-assistant";
 const baseRevision = "a".repeat(40);
 
-async function setup(adapter: WorkerPort | null = { execute: async (request) => ({ kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED", branch: request.workspace.branch, finalCommit: "b".repeat(40) }) }): Promise<{ directory: string; store: RuntimeSqliteStore; runtime: ProductionRuntime; adapterCalls: { value: number } }> {
+async function setup(adapter: WorkerPort | null = { execute: async (request) => ({ kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED", branch: request.workspace.branch, finalCommit: "b".repeat(40) }) }): Promise<{ directory: string; store: RuntimeSqliteStore; runtime: ProductionRuntime; adapterCalls: { value: number }; gitTimeouts: Array<number | undefined> }> {
   const directory = await mkdtemp(join(tmpdir(), "pirx-production-runtime-"));
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
   const task = createTask({ id: taskId, githubReference: issue, goal: "Run assigned work", scope: "production composition", acceptanceCriteria: ["durable worker cycle"], priority: 1, risk: "low", requiredCapabilities: ["repository.write", "git.push_assigned_branch"], createdAt: now });
   if (!task.ok || store.tasks.create(task.value).outcome !== "success") throw new Error("task fixture failed");
   if (store.selection.synchronize({ taskId, queueOrder: 1, dependencyState: "known", blockers: [], synchronizedAt: now }).outcome !== "success") throw new Error("selection fixture failed");
   const adapterCalls = { value: 0 };
+  const gitTimeouts: Array<number | undefined> = [];
   const counted = adapter === null ? undefined : { execute: async (request: Parameters<WorkerPort["execute"]>[0], signal: AbortSignal) => { adapterCalls.value += 1; return adapter.execute(request, signal); } };
-  const runtime = new ProductionRuntime(store, { workerId: "pirx-worker", provider: "fake-claude", workerCapabilities: ["repository.write", "git.push_assigned_branch"], repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }], worktreeParent: "/tmp/pirx-worktrees", leaseDurationMs: 60_000, workerTimeoutMs: 5_000, workerAdapters: { get: () => counted }, workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, `pirx-${request.taskId}-${request.attemptId}`) } }) }, clock: { now: () => now } });
-  return { directory, store, runtime, adapterCalls };
+  const runtime = new ProductionRuntime(store, { workerId: "pirx-worker", provider: "fake-claude", workerCapabilities: ["repository.write", "git.push_assigned_branch"], repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }], worktreeParent: "/tmp/pirx-worktrees", leaseDurationMs: 60_000, workerTimeoutMs: 960_000, workerAdapters: { get: () => counted }, workspace: { provision: async (request) => (gitTimeouts.push(request.timeoutMs), { outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, `pirx-${request.taskId}-${request.attemptId}`) } }) }, clock: { now: () => now } });
+  return { directory, store, runtime, adapterCalls, gitTimeouts };
 }
 
 async function dispose(value: { directory: string; runtime: ProductionRuntime; store: RuntimeSqliteStore }): Promise<void> {
@@ -48,6 +49,8 @@ test("composes selection, Lease, Attempt, workspace, capability, worker lifecycl
     const result = await value.runtime.cycle();
     assert.equal(result.outcome, "started");
     assert.equal(value.adapterCalls.value, 1);
+    // A 16-minute worker idle window must not become a git step timeout (limit 120 s).
+    assert.deepEqual(value.gitTimeouts, [120_000]);
     assert.equal(value.runtime.status().recovered, true);
     const attempts = value.store.attempts.listByTask(taskId); assert.equal(attempts.outcome, "success");
     assert.equal(attempts.value.length, 1); assert.equal(attempts.value[0]?.state, "terminal"); assert.equal(attempts.value[0]?.result, "CODE_PUSHED");
@@ -101,7 +104,7 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
   const directory = await mkdtemp(join(tmpdir(), "pirx-production-quota-resume-"));
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
   let clock = now;
-  let calls = 0;
+  let calls = 0; const validationTimeouts: Array<number | undefined> = [];
   try {
     const created = createTask({ id: taskId, githubReference: issue, goal: "Resume after quota", scope: "production composition", acceptanceCriteria: ["same Task, new Attempt"], priority: 1, risk: "low", requiredCapabilities: ["repository.write", "git.push_assigned_branch"], createdAt: now });
     assert.equal(created.ok, true);
@@ -116,7 +119,7 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
       repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }],
       worktreeParent: "/tmp/pirx-worktrees",
       leaseDurationMs: 60_000,
-      workerTimeoutMs: 5_000,
+      workerTimeoutMs: 960_000,
       attemptIdFactory: (_task, ordinal) => `quota-resume-attempt-${ordinal}` as AttemptId,
       workerAdapters: { get: () => ({ execute: async (request) => {
         calls += 1;
@@ -128,7 +131,7 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
           : { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED" as const, branch: request.workspace.branch, finalCommit: "c".repeat(40) };
       } }) },
       workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, `pirx-${request.taskId}-${request.attemptId}`) } }) },
-      resumeWorkspaceValidator: { validate: async () => ({ outcome: "valid", message: "exact durable workspace verified" }) },
+      resumeWorkspaceValidator: { validate: async (request) => (validationTimeouts.push(request.timeoutMs), { outcome: "valid", message: "exact durable workspace verified" }) },
       clock: { now: () => clock },
     });
 
@@ -148,6 +151,8 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
     clock = "2026-09-15T21:02:00.000Z" as UtcTimestamp;
     const resumed = await runtime.cycle();
     assert.equal(resumed.outcome, "started", JSON.stringify(resumed));
+    // The worker idle window must not reach the resume validator (limit 120 s).
+    assert.deepEqual(validationTimeouts, [120_000]);
     assert.equal(calls, 2);
     const history = store.attempts.listByTask(taskId);
     assert.equal(history.outcome, "success");

@@ -10,8 +10,8 @@ import { quotaCooldownFromDiagnostic } from "./worker-recovery.js";
 import { startResumedAttempt } from "./resume.js";
 import { RESUME_ESCALATION_LIMITS, ResumeEscalationCoordinator, isOperatorUnblockCheckpoint } from "./resume-escalation.js";
 import { WorkerLifecycleCoordinator } from "./worker-lifecycle.js";
-import { WorkspaceProvisioner, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
-import { WorkspaceResumeValidator, type WorkspaceResumeValidationRequest, type WorkspaceResumeValidationResult } from "./workspace-resume-validator.js";
+import { WORKSPACE_PROVISION_LIMITS, WorkspaceProvisioner, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
+import { WORKSPACE_RESUME_VALIDATION_LIMITS, WorkspaceResumeValidator, type WorkspaceResumeValidationRequest, type WorkspaceResumeValidationResult } from "./workspace-resume-validator.js";
 import type { RunnableTaskCandidate } from "./task-selection.js";
 import type { AttemptId, AttemptSnapshot, TaskId, TaskSnapshot, UtcTimestamp } from "./task-domain.js";
 import { RuntimeSqliteStore, type RuntimeSqliteStoreOptions, type RuntimeSqliteStore as RuntimeSqliteStoreType, type StorageResult } from "./sqlite.js";
@@ -239,7 +239,7 @@ export class ProductionRuntime {
       const ownership = this.#store.workspaces.getByTaskAttempt(taskId, previous.id);
       if (ownership.outcome !== "success") return portFailure("Resume requires active durable workspace ownership.", "conflict");
       if (ownership.value.repository !== repository.repository || ownership.value.repositoryRoot !== repository.repositoryRoot || ownership.value.assignedBranch !== previous.branch || ownership.value.worktreePath !== previous.worktree) return portFailure("Resume workspace ownership does not match the predecessor Attempt.", "conflict");
-      const validated = await this.#resumeWorkspaceValidator.validate({ taskId, attemptId: previous.id, repository: ownership.value.repository, repositoryRoot: ownership.value.repositoryRoot, worktreePath: ownership.value.worktreePath, assignedBranch: ownership.value.assignedBranch, expectedCurrentCommit: ownership.value.currentRevision, expectedOwnershipVersion: ownership.value.version, ...(this.#options.workerTimeoutMs === undefined ? {} : { timeoutMs: this.#options.workerTimeoutMs }) });
+      const validated = await this.#resumeWorkspaceValidator.validate({ taskId, attemptId: previous.id, repository: ownership.value.repository, repositoryRoot: ownership.value.repositoryRoot, worktreePath: ownership.value.worktreePath, assignedBranch: ownership.value.assignedBranch, expectedCurrentCommit: ownership.value.currentRevision, expectedOwnershipVersion: ownership.value.version, timeoutMs: WORKSPACE_RESUME_VALIDATION_LIMITS.maxTimeoutMs });
       if (validated.outcome !== "valid") return portFailure(`Resume workspace validation failed: ${validated.outcome}.`, validated.outcome === "unknown" ? "unknown" : "conflict");
       const id = this.#options.attemptIdFactory?.(taskId, ordinal, now) ?? attemptId(taskId, ordinal, now);
       const resumed = startResumedAttempt(this.#store, taskId, { check: () => ({ repository: "present", branch: "present", worktree: "present", currentCommit: "present" }) }, { id, worker: workerId, provider: this.#options.provider, branch: ownership.value.assignedBranch, worktree: ownership.value.worktreePath, currentCommit: ownership.value.currentRevision }, now, { transferWorkspaceOwnership: true });
@@ -265,7 +265,8 @@ export class ProductionRuntime {
   async #invoke(candidate: RunnableTaskCandidate, attemptIdValue: AttemptId, signal: AbortSignal): Promise<ReturnType<typeof workerExecutionResult>> {
     const task = this.#store.tasks.get(candidate.task.id); const attempt = this.#store.attempts.get(attemptIdValue); const repository = task.outcome === "success" ? repositoryFor(task.value, this.#repositories) : undefined;
     if (task.outcome !== "success" || attempt.outcome !== "success" || repository === undefined || attempt.value.branch === undefined || attempt.value.worktree === undefined) return { outcome: "unknown", reason: "Assigned Task, Attempt, repository, or workspace identity is unavailable." };
-    const workspaceRequest: WorkspaceProvisionRequest = { taskId: task.value.id, attemptId: attempt.value.id, repositoryRoot: repository.repositoryRoot, assignedBranch: attempt.value.branch, expectedBaseRevision: repository.baseRevision, worktreeParent: this.#options.worktreeParent, ...(this.#options.workerTimeoutMs === undefined ? {} : { timeoutMs: this.#options.workerTimeoutMs }), signal };
+    const workspaceRequest: WorkspaceProvisionRequest = { taskId: task.value.id, attemptId: attempt.value.id, repositoryRoot: repository.repositoryRoot, assignedBranch: attempt.value.branch, expectedBaseRevision: repository.baseRevision, worktreeParent: this.#options.worktreeParent, // Git steps have their own bound; workerTimeoutMs is the worker idle window.
+      timeoutMs: WORKSPACE_PROVISION_LIMITS.timeoutMs, signal };
     const ownership = this.#store.workspaces.getByTaskAttempt(task.value.id, attempt.value.id);
     let binding: WorkspaceBinding | undefined;
     if (ownership.outcome === "success") binding = { schemaVersion: 1, taskId: ownership.value.taskId, attemptId: ownership.value.attemptId, repositoryRoot: ownership.value.repositoryRoot, assignedBranch: ownership.value.assignedBranch, expectedBaseRevision: ownership.value.expectedBaseRevision, worktreePath: ownership.value.worktreePath };
