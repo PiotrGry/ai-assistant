@@ -45,7 +45,13 @@ test("a code worker commits and Pirx pushes the reported commit with the worker'
 
     // A diverged remote is never overwritten; the push error reaches the diagnostic.
     git(worktree, "reset", "-q", "--hard", "HEAD~1"); await writeFile(join(worktree, "a.txt"), "other\n"); git(worktree, "commit", "-q", "-am", "other");
-    await assert.rejects(worker(false).execute(request.value, new AbortController().signal), (error: unknown) => isWorkerFailureError(error) && error.diagnostic.code === "git_state_mismatch" && /git push failed/u.test(error.diagnostic.providerMessage ?? ""));
+    await assert.rejects(worker(false).execute(request.value, new AbortController().signal), (error: unknown) => isWorkerFailureError(error) && error.diagnostic.code === "push_rejected" && /git push failed/u.test(error.diagnostic.providerMessage ?? ""));
+    assert.equal(git(remote, "rev-parse", `refs/heads/${branch}`), result.finalCommit);
+
+    // A pre-push gate that refuses the push (gh-462: pip-audit) blocks with the hook output, not git_state_mismatch.
+    git(worktree, "reset", "-q", "--hard", result.finalCommit); await writeFile(join(worktree, "a.txt"), "hooked\n"); git(worktree, "commit", "-q", "-am", "hooked");
+    await writeFile(join(worktree, ".git", "hooks", "pre-push"), "#!/bin/sh\necho 'pip-audit: vulnerabilities found'\nexit 1\n", { mode: 0o755 });
+    await assert.rejects(worker(false).execute(request.value, new AbortController().signal), (error: unknown) => isWorkerFailureError(error) && error.diagnostic.code === "push_rejected" && /pip-audit: vulnerabilities found/u.test(error.diagnostic.providerMessage ?? ""));
     assert.equal(git(remote, "rev-parse", `refs/heads/${branch}`), result.finalCommit);
   } finally { store.close(); await rm(root, { recursive: true, force: true }); }
 });

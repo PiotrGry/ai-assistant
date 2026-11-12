@@ -3,12 +3,12 @@ import { resolve } from "node:path";
 import type { LeaseAcquireInput, LeaseId, LeaseRecord } from "./lease.js";
 import { CapabilityEnforcementGate, type CapabilityAuditSink } from "./capability-gate.js";
 import { SingleWorkerScheduler, type SchedulerCycleResult, type SchedulerOptions, type SchedulerPortResult } from "./scheduler.js";
-import { createWorkerRequest, type WorkerPort, type WorkerRequest, type WorkerRequestInput, type WorkerResult } from "./worker-contract.js";
+import { createWorkerRequest, resultOutcome, type WorkerPort, type WorkerRequest, type WorkerRequestInput, type WorkerResult } from "./worker-contract.js";
 import { CapabilityAwareWorkerExecutionPort, type WorkerAdapterRegistry } from "./worker-execution.js";
 import { createWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
 import { quotaCooldownFromDiagnostic } from "./worker-recovery.js";
 import { startResumedAttempt } from "./resume.js";
-import { RESUME_ESCALATION_LIMITS, ResumeEscalationCoordinator, isOperatorUnblockCheckpoint, isPreWorkerBlock } from "./resume-escalation.js";
+import { RESUME_ESCALATION_LIMITS, ResumeEscalationCoordinator, isOperatorUnblockCheckpoint, isOperatorRetryableBlock } from "./resume-escalation.js";
 import { WorkerLifecycleCoordinator } from "./worker-lifecycle.js";
 import { WORKSPACE_PROVISION_LIMITS, WorkspaceProvisioner, worktreeDirectoryName, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
 import { WORKSPACE_RESUME_VALIDATION_LIMITS, WorkspaceResumeValidator, type WorkspaceResumeValidationRequest, type WorkspaceResumeValidationResult } from "./workspace-resume-validator.js";
@@ -116,16 +116,10 @@ function workerExecutionResult(value: Awaited<ReturnType<WorkerLifecycleCoordina
   if (value.outcome === "terminal_recorded" || value.outcome === "projection_pending" || value.outcome === "replayed") return value.result.outcome === "CODE_PUSHED" ? { outcome: "success", summary: "Worker lifecycle recorded CODE_PUSHED." } : value.result.outcome === "CANCELLED" ? { outcome: "cancelled", reason: value.result.reason } : { outcome: "failed", reason: value.result.reason };
   return value.outcome === "cancelled" ? { outcome: "cancelled", reason: value.message } : value.outcome === "reconciliation_required" || value.outcome === "invalid_request" || value.outcome === "conflict" || value.outcome === "storage_error" ? { outcome: "unknown", reason: value.message } : { outcome: "unknown", reason: "Worker lifecycle returned an unsupported outcome." };
 }
-function failureOutcome(diagnostic: WorkerFailureDiagnostic): "BLOCKED" | "FAILED" | "QUOTA_EXHAUSTED" | "CANCELLED" {
-  if (diagnostic.code === "quota_exhausted") return "QUOTA_EXHAUSTED";
-  if (diagnostic.code === "cancellation") return "CANCELLED";
-  if (["capability_denied", "permission_denied", "authentication", "binding_mismatch"].includes(diagnostic.code)) return "BLOCKED";
-  return "FAILED";
-}
 function capabilityFailureResult(request: WorkerRequest, execution: Awaited<ReturnType<CapabilityAwareWorkerExecutionPort["execute"]>>): WorkerResult {
   if (execution.outcome === "allowed") return execution.value;
   const diagnostic = execution.diagnostic;
-  return { kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: failureOutcome(diagnostic), reason: diagnostic.message, diagnostic };
+  return { kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: resultOutcome(diagnostic.code), reason: diagnostic.message, diagnostic };
 }
 
 export class ProductionRuntime {
@@ -224,7 +218,7 @@ export class ProductionRuntime {
     const previous = history.value[history.value.length - 1];
     const failedResume = task.value.state === "failed" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED");
     const operatorResume = task.value.state === "blocked" && previous?.state === "terminal" && previous.result === "BLOCKED" && previous.diagnostic?.code === "operator_input_required";
-    const operatorUnblock = task.value.state === "blocked" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED" || isPreWorkerBlock(previous));
+    const operatorUnblock = task.value.state === "blocked" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED" || isOperatorRetryableBlock(previous));
     if (failedResume || operatorResume || operatorUnblock) {
       if (previous === undefined) return portFailure("Resume Attempt history is unavailable.", "conflict");
       const checkpoint = this.#store.checkpoints.latestByTask(taskId);

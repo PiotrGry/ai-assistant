@@ -485,6 +485,7 @@ export {
   ResumeEscalationCoordinator,
   isOperatorUnblockCheckpoint,
   isPreWorkerBlock,
+  isOperatorRetryableBlock,
   operatorUnblockCheckpointId,
   unblockEscalatedTask,
   type OperatorUnblockAcceptance,

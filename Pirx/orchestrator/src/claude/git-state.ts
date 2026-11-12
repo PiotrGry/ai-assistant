@@ -7,6 +7,8 @@ export interface WorkerGitStateVerification {
   readonly message: string;
   /** publish only: the full SHA that was pushed. */
   readonly commit?: string;
+  /** publish only: git push ran and exited non-zero (a hook or the remote refused it), not a timeout. */
+  readonly rejected?: boolean;
 }
 
 export interface WorkerGitStateVerifier {
@@ -31,7 +33,7 @@ export class GitWorkerStateVerifier implements WorkerGitStateVerifier {
     // No force: a diverged remote branch is a conflict for a human, not something to overwrite.
     const pushed = await this.#git.run(["push", policy.remoteName, `${head.stdout.trim()}:refs/heads/${request.workspace.branch}`], request.workspace.worktree, 120_000);
     // Repository hooks (pre-push) report on stdout; keep the tail of both streams.
-    if (pushed.outcome !== "success") return { ok: false, message: `git push failed (${pushed.outcome}): ${`${pushed.stdout}\n${pushed.stderr}`.replace(/\u001b\[[0-9;]*m/gu, "").trim().slice(-1900) || "no output"}` };
+    if (pushed.outcome !== "success") return { ok: false, rejected: pushed.outcome === "git_failure", message: `git push failed (${pushed.outcome}): ${`${pushed.stdout}\n${pushed.stderr}`.replace(/\u001b\[[0-9;]*m/gu, "").trim().slice(-1900) || "no output"}` };
     return { ok: true, message: "Pushed the reported commit to the assigned branch.", commit: head.stdout.trim().toLowerCase() };
   }
 

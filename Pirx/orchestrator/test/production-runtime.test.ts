@@ -10,6 +10,7 @@ import {
   createWorkerFailureDiagnostic,
   WorkerFailureError,
   isPreWorkerBlock,
+  isOperatorRetryableBlock,
   unblockEscalatedTask,
   createCheckpoint,
   createTask,
@@ -181,7 +182,12 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
   }
 });
 
-test("an operator can retry a Task that Pirx blocked in its own input check before the worker ran", async () => {
+for (const [blockedBy, blockingDiagnostic] of [
+  // Same shape as gh-462 attempt 10: Pirx refused its own input; no worker output exists.
+  ["Pirx blocked in its own input check before the worker ran", () => createWorkerFailureDiagnostic("binding_mismatch", { stage: "worker_contract", field: "task.goal", violationCode: "forbidden_field" })],
+  // Same shape as gh-462 attempt 13: the repository's pre-push gate refused the worker's commit.
+  ["the repository rejected the push of the worker's commit", () => createWorkerFailureDiagnostic("push_rejected", { stage: "git_state", providerMessage: "git push failed (git_failure): pip-audit: vulnerabilities found" })],
+] as const) test(`an operator can retry a Task that ${blockedBy}`, async () => {
   const directory = await mkdtemp(join(tmpdir(), "pirx-production-preworker-unblock-"));
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
   let calls = 0; let clock = now;
@@ -196,8 +202,7 @@ test("an operator can retry a Task that Pirx blocked in its own input check befo
       attemptIdFactory: (_task, ordinal) => `preworker-attempt-${ordinal}` as AttemptId,
       workerAdapters: { get: () => ({ execute: async (request) => {
         calls += 1;
-        // Same shape as gh-462 attempt 10: Pirx refused its own input; no worker output exists.
-        if (calls === 1) throw new WorkerFailureError(createWorkerFailureDiagnostic("binding_mismatch", { stage: "worker_contract", field: "task.goal", violationCode: "forbidden_field" }));
+        if (calls === 1) throw new WorkerFailureError(blockingDiagnostic());
         return { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED" as const, branch: request.workspace.branch, finalCommit: "c".repeat(40) };
       } }) },
       workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)) } }) },
@@ -208,9 +213,9 @@ test("an operator can retry a Task that Pirx blocked in its own input check befo
     const blocked = store.tasks.get(taskId); assert.equal(blocked.outcome === "success" ? blocked.value.state : undefined, "blocked");
     const first = store.attempts.listByTask(taskId); assert.equal(first.outcome, "success"); if (first.outcome !== "success") return;
     const attempt = first.value[0]!;
-    assert.equal(isPreWorkerBlock(attempt), true);
+    assert.equal(isOperatorRetryableBlock(attempt), true);
     // A contract failure on output Claude actually returned is not pre-worker.
-    if (attempt.state === "terminal" && attempt.diagnostic !== undefined) assert.equal(isPreWorkerBlock({ ...attempt, diagnostic: { ...attempt.diagnostic, payloadDigest: "a".repeat(64) } }), false);
+    if (attempt.state === "terminal" && attempt.diagnostic?.code === "binding_mismatch") assert.equal(isPreWorkerBlock({ ...attempt, diagnostic: { ...attempt.diagnostic, payloadDigest: "a".repeat(64) } }), false);
     assert.notEqual((await runtime.cycle()).outcome, "started");
     assert.equal(calls, 1);
     const unblocked = unblockEscalatedTask(store, { taskId, operationId: "op-preworker-unblock", reason: "Input check fixed", unblockedAt: now });

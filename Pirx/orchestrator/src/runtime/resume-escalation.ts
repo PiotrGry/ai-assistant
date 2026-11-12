@@ -170,6 +170,15 @@ export function isPreWorkerBlock(attempt: AttemptSnapshot): boolean {
 }
 
 /**
+ * A BLOCKED Attempt an operator may retry: a pre-worker block, or a push the
+ * repository rejected (e.g. a pre-push gate). Pirx never force-pushes, so
+ * pushing the same commit again after the repository is fixed is safe.
+ */
+export function isOperatorRetryableBlock(attempt: AttemptSnapshot): boolean {
+  return isPreWorkerBlock(attempt) || (attempt.state === "terminal" && attempt.result === "BLOCKED" && attempt.diagnostic?.code === "push_rejected" && attempt.diagnostic.stage === "git_state");
+}
+
+/**
  * Durably approve one more resume of a Task stopped by the resume failure
  * limit. Ambiguous results stay blocked: they need reconciliation, not retry.
  * The daemon still validates the workspace, acquires a Lease and creates the
@@ -194,7 +203,7 @@ export function unblockEscalatedTask(store: RuntimeSqliteStore, input: OperatorU
     }
     if (existing.outcome !== "not_found") return existing;
     if (task.value.state !== "blocked") return { outcome: "conflict" as const, message: `Task state ${task.value.state} is not blocked.` };
-    const preWorker = isPreWorkerBlock(latest);
+    const preWorker = isOperatorRetryableBlock(latest);
     if (latest.result !== "FAILED" && latest.result !== "QUOTA_EXHAUSTED" && !preWorker) return { outcome: "invalid_record" as const, message: `Latest Attempt result ${latest.result} cannot be resumed by unblock; ambiguous or blocked results need reconciliation.` };
     const escalation = checkpoints.latestByTask(task.value.id);
     if (escalation.outcome !== "success") return escalation;

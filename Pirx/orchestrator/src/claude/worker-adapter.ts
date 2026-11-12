@@ -135,7 +135,8 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
       let pushed = result.value;
       if (committed) {
         const published = await this.#gitStateVerifier.publish!(request, result.value, this.#repositoryPolicy);
-        if (!published.ok || published.commit === undefined) throw new WorkerFailureError(createWorkerFailureDiagnostic("git_state_mismatch", { stage: "git_state", providerMessage: published.message }));
+        // A rejected push (pre-push hook, diverged branch) fails the same way on every retry; block for a human.
+        if (!published.ok || published.commit === undefined) throw new WorkerFailureError(createWorkerFailureDiagnostic(published.rejected === true ? "push_rejected" : "git_state_mismatch", { stage: "git_state", providerMessage: published.message }));
         // Record the full SHA Pirx pushed, not the worker's possibly abbreviated one.
         pushed = { ...result.value, finalCommit: published.commit };
       }

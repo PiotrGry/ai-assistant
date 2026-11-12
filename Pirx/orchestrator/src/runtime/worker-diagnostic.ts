@@ -21,6 +21,7 @@ export const WORKER_FAILURE_CODES = Object.freeze([
   "capability_denied",
   "permission_denied",
   "git_state_mismatch",
+  "push_rejected",
   "adapter_failure",
   "operator_input_required",
 ] as const);
@@ -99,6 +100,7 @@ const MESSAGES: Readonly<Record<WorkerFailureCode, string>> = Object.freeze({
   capability_denied: "Worker capability authorization was denied.",
   permission_denied: "Worker permission policy denied the requested operation.",
   git_state_mismatch: "Worker Git state did not match the assigned result.",
+  push_rejected: "The repository rejected the push of the worker's commit.",
   adapter_failure: "Worker adapter failed at its process boundary.",
   operator_input_required: "Worker requires an authorized operator decision before it can continue.",
 });

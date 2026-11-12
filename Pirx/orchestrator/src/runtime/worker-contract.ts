@@ -251,10 +251,11 @@ export function validateWorkerResult(value: unknown, request?: Pick<WorkerReques
   return success(Object.freeze({ ...base, outcome: value.outcome as WorkerNonSuccessOutcome, reason }));
 }
 
-function resultOutcome(code: WorkerFailureDiagnostic["code"]): WorkerNonSuccessOutcome {
+/** The one mapping from a failure code to a worker result outcome. */
+export function resultOutcome(code: WorkerFailureDiagnostic["code"]): WorkerNonSuccessOutcome {
   if (code === "quota_exhausted") return "QUOTA_EXHAUSTED";
   if (code === "cancellation") return "CANCELLED";
-  if (code === "capability_denied" || code === "permission_denied" || code === "authentication" || code === "binding_mismatch") return "BLOCKED";
+  if (code === "capability_denied" || code === "permission_denied" || code === "authentication" || code === "binding_mismatch" || code === "push_rejected") return "BLOCKED";
   return "FAILED";
 }
 
