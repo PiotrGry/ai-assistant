@@ -143,6 +143,12 @@ export interface OperatorUnblockInput {
   readonly operationId: string;
   readonly reason: string;
   readonly unblockedAt: UtcTimestamp;
+  /**
+   * Full SHA the operator moved the worktree to (e.g. after merging a fixed base).
+   * The successor Attempt resumes from it; resume validation still checks HEAD,
+   * the recorded base as ancestor, and a clean worktree.
+   */
+  readonly workspaceRevision?: string;
 }
 
 export interface OperatorUnblockAcceptance {
@@ -187,7 +193,9 @@ export function isOperatorRetryableBlock(attempt: AttemptSnapshot): boolean {
 export function unblockEscalatedTask(store: RuntimeSqliteStore, input: OperatorUnblockInput): StorageResult<OperatorUnblockAcceptance> {
   const reason = input.reason.trim();
   if (reason.length === 0 || reason.length > 256 || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(input.operationId)) return { outcome: "invalid_record", message: "Unblock requires a bounded reason and a safe operationId." };
-  return store.transaction<OperatorUnblockAcceptance>(({ tasks, attempts, checkpoints }) => {
+  const revision = input.workspaceRevision;
+  if (revision !== undefined && !/^[0-9a-f]{40}$/u.test(revision)) return { outcome: "invalid_record", message: "workspaceRevision must be a full lowercase 40-character Git SHA." };
+  return store.transaction<OperatorUnblockAcceptance>(({ tasks, attempts, checkpoints, workspaces }) => {
     const task = tasks.get(input.taskId);
     if (task.outcome !== "success") return task;
     const history = attempts.listByTask(input.taskId);
@@ -209,13 +217,23 @@ export function unblockEscalatedTask(store: RuntimeSqliteStore, input: OperatorU
     if (escalation.outcome !== "success") return escalation;
     if (preWorker ? escalation.value.previousAttemptId !== latest.id : escalation.value.id !== checkpointId(task.value.id, latest.id, "RESUME_FAILURE_LIMIT_REACHED") || task.value.blockingReason !== escalation.value.blockingReason) return { outcome: "conflict" as const, message: "Task is not blocked by the resume failure limit." };
     const { kind: _kind, schemaVersion: _schemaVersion, ...base } = escalation.value;
+    if (revision !== undefined) {
+      const ownership = workspaces.getByTaskAttempt(task.value.id, latest.id);
+      if (ownership.outcome !== "success") return ownership.outcome === "not_found" ? { outcome: "conflict" as const, message: "Moving the workspace requires active ownership by the latest Attempt." } : ownership;
+      if (ownership.value.state !== "active") return { outcome: "conflict" as const, message: "Moving the workspace requires active ownership by the latest Attempt." };
+      if (ownership.value.currentRevision !== revision) {
+        const moved = workspaces.updateCurrentRevision(latest.id, ownership.value.ownershipToken, ownership.value.version, revision, input.unblockedAt);
+        if (moved.outcome !== "success") return moved;
+      }
+    }
     const created = createCheckpoint({
       ...base,
+      ...(revision === undefined || base.currentCommit === undefined ? {} : { currentCommit: revision }),
       id,
       trigger: latest.result === "QUOTA_EXHAUSTED" ? "PROVIDER_QUOTA" : "RECOVERABLE_FAILURE",
       createdAt: input.unblockedAt,
       currentState: "blocked",
-      findings: [...base.findings, `Operator unblock reason: ${reason}`],
+      findings: [...base.findings, `Operator unblock reason: ${reason}`, ...(revision === undefined ? [] : [`Operator moved the workspace to ${revision}.`])],
       evidence: [...base.evidence, { reference: `operation:${input.operationId}`, summary: "Operator explicitly approved one more resume Attempt." }],
       lastAction: "operator unblocked the Task after resume escalation",
       resumeInstruction: "Resume once from the latest Attempt evidence; another failure escalates again.",

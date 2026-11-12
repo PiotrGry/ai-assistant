@@ -214,15 +214,15 @@ export function registerOrchestratorTools(server: McpServer, options: { readonly
 
   server.registerTool("pirx_task_unblock", {
     title: "Unblock a Task stopped by the resume failure limit",
-    description: "Durably approve one more resume Attempt for a Task blocked after repeated FAILED or QUOTA_EXHAUSTED resumes. Read pirx_task_history and the latest Attempt diagnostic first and state the reason. Ambiguous or operator-question blocks are refused. The daemon still validates the workspace and acquires a Lease; another failure escalates again.",
-    inputSchema: z.object({ taskId: operationIdSchema, operationId: operationIdSchema, reason: z.string().trim().min(1).max(256) }).strict(),
+    description: "Durably approve one more resume Attempt for a Task blocked after repeated FAILED or QUOTA_EXHAUSTED resumes. Read pirx_task_history and the latest Attempt diagnostic first and state the reason. Ambiguous or operator-question blocks are refused. The daemon still validates the workspace and acquires a Lease; another failure escalates again. Pass workspaceRevision (full SHA) only after the operator moved the Task worktree to that clean commit, e.g. merged a fixed base branch; the recorded base must stay its ancestor.",
+    inputSchema: z.object({ taskId: operationIdSchema, operationId: operationIdSchema, reason: z.string().trim().min(1).max(256), workspaceRevision: z.string().regex(/^[0-9a-f]{40}$/u).optional() }).strict(),
     outputSchema: z.union([
       z.object({ outcome: z.enum(["unblocked", "replayed"]), taskId: z.string(), checkpointId: z.string(), message: z.string() }),
       z.object({ outcome: z.enum(["authorization_required", "unconfigured", "not_found", "conflict", "invalid_request", "unavailable"]), taskId: z.string(), message: z.string() }),
     ]),
     annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: false },
   }, async (input, context) => {
-    const arguments_ = { taskId: input.taskId, operationId: input.operationId, reason: input.reason };
+    const arguments_ = { taskId: input.taskId, operationId: input.operationId, reason: input.reason, ...(input.workspaceRevision === undefined ? {} : { workspaceRevision: input.workspaceRevision }) };
     if (verifyHostAuthorization(options.authorizationSecret, context.mcpReq._meta, "pirx_task_unblock", arguments_) === undefined) return structured({ outcome: "authorization_required", taskId: input.taskId, message: "Exact host authorization is required to unblock a Task." }, true);
     if (options.port?.unblockTask === undefined) return structured({ outcome: "unconfigured", taskId: input.taskId, message: options.configurationError ?? "Task unblock is not configured." }, true);
     const value = options.port.unblockTask({ ...arguments_, unblockedAt: now() });
