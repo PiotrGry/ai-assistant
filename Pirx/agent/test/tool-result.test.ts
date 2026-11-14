@@ -145,3 +145,11 @@ test("history page too large does not return a cursor that would lose an Attempt
   assert.equal(parsed.outcome, "page_too_large");
   assert.equal(parsed.nextAfterOrdinal, undefined);
 });
+
+test("history compaction keeps the Attempt count the model needs to avoid reading a page as the whole history", () => {
+  const attempts = Array.from({ length: 5 }, (_, index) => ({ id: `attempt-${index + 10}`, ordinal: index + 10, state: "terminal", result: "FAILED", blockingReason: "long reason ".repeat(200) }));
+  const parsed = JSON.parse(toolResultToText({ structuredContent: { outcome: "success", task: { id: "gh-462", state: "blocked" }, totalAttempts: 14, olderAttempts: 9, olderFromAfterOrdinal: 0, attempts } }, 1_024, "pirx_task_history"));
+  assert.equal(parsed.totalAttempts, 14);
+  assert.equal(parsed.olderAttempts, 9);
+  assert.equal(parsed.olderFromAfterOrdinal, 0);
+});

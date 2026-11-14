@@ -3,15 +3,15 @@ import { resolve } from "node:path";
 import type { LeaseAcquireInput, LeaseId, LeaseRecord } from "./lease.js";
 import { CapabilityEnforcementGate, type CapabilityAuditSink } from "./capability-gate.js";
 import { SingleWorkerScheduler, type SchedulerCycleResult, type SchedulerOptions, type SchedulerPortResult } from "./scheduler.js";
-import { createWorkerRequest, type WorkerPort, type WorkerRequest, type WorkerRequestInput, type WorkerResult } from "./worker-contract.js";
+import { createWorkerRequest, resultOutcome, type WorkerPort, type WorkerRequest, type WorkerRequestInput, type WorkerResult } from "./worker-contract.js";
 import { CapabilityAwareWorkerExecutionPort, type WorkerAdapterRegistry } from "./worker-execution.js";
 import { createWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
 import { quotaCooldownFromDiagnostic } from "./worker-recovery.js";
 import { startResumedAttempt } from "./resume.js";
-import { RESUME_ESCALATION_LIMITS, ResumeEscalationCoordinator, isOperatorUnblockCheckpoint } from "./resume-escalation.js";
+import { RESUME_ESCALATION_LIMITS, ResumeEscalationCoordinator, isOperatorUnblockCheckpoint, isOperatorRetryableBlock } from "./resume-escalation.js";
 import { WorkerLifecycleCoordinator } from "./worker-lifecycle.js";
-import { WorkspaceProvisioner, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
-import { WorkspaceResumeValidator, type WorkspaceResumeValidationRequest, type WorkspaceResumeValidationResult } from "./workspace-resume-validator.js";
+import { WORKSPACE_PROVISION_LIMITS, WorkspaceProvisioner, worktreeDirectoryName, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
+import { WORKSPACE_RESUME_VALIDATION_LIMITS, WorkspaceResumeValidator, type WorkspaceResumeValidationRequest, type WorkspaceResumeValidationResult } from "./workspace-resume-validator.js";
 import type { RunnableTaskCandidate } from "./task-selection.js";
 import type { AttemptId, AttemptSnapshot, TaskId, TaskSnapshot, UtcTimestamp } from "./task-domain.js";
 import { RuntimeSqliteStore, type RuntimeSqliteStoreOptions, type RuntimeSqliteStore as RuntimeSqliteStoreType, type StorageResult } from "./sqlite.js";
@@ -116,16 +116,10 @@ function workerExecutionResult(value: Awaited<ReturnType<WorkerLifecycleCoordina
   if (value.outcome === "terminal_recorded" || value.outcome === "projection_pending" || value.outcome === "replayed") return value.result.outcome === "CODE_PUSHED" ? { outcome: "success", summary: "Worker lifecycle recorded CODE_PUSHED." } : value.result.outcome === "CANCELLED" ? { outcome: "cancelled", reason: value.result.reason } : { outcome: "failed", reason: value.result.reason };
   return value.outcome === "cancelled" ? { outcome: "cancelled", reason: value.message } : value.outcome === "reconciliation_required" || value.outcome === "invalid_request" || value.outcome === "conflict" || value.outcome === "storage_error" ? { outcome: "unknown", reason: value.message } : { outcome: "unknown", reason: "Worker lifecycle returned an unsupported outcome." };
 }
-function failureOutcome(diagnostic: WorkerFailureDiagnostic): "BLOCKED" | "FAILED" | "QUOTA_EXHAUSTED" | "CANCELLED" {
-  if (diagnostic.code === "quota_exhausted") return "QUOTA_EXHAUSTED";
-  if (diagnostic.code === "cancellation") return "CANCELLED";
-  if (["capability_denied", "permission_denied", "authentication", "binding_mismatch"].includes(diagnostic.code)) return "BLOCKED";
-  return "FAILED";
-}
 function capabilityFailureResult(request: WorkerRequest, execution: Awaited<ReturnType<CapabilityAwareWorkerExecutionPort["execute"]>>): WorkerResult {
   if (execution.outcome === "allowed") return execution.value;
   const diagnostic = execution.diagnostic;
-  return { kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: failureOutcome(diagnostic), reason: diagnostic.message, diagnostic };
+  return { kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: resultOutcome(diagnostic.code), reason: diagnostic.message, diagnostic };
 }
 
 export class ProductionRuntime {
@@ -224,7 +218,7 @@ export class ProductionRuntime {
     const previous = history.value[history.value.length - 1];
     const failedResume = task.value.state === "failed" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED");
     const operatorResume = task.value.state === "blocked" && previous?.state === "terminal" && previous.result === "BLOCKED" && previous.diagnostic?.code === "operator_input_required";
-    const operatorUnblock = task.value.state === "blocked" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED");
+    const operatorUnblock = task.value.state === "blocked" && previous?.state === "terminal" && (previous.result === "QUOTA_EXHAUSTED" || previous.result === "FAILED" || isOperatorRetryableBlock(previous));
     if (failedResume || operatorResume || operatorUnblock) {
       if (previous === undefined) return portFailure("Resume Attempt history is unavailable.", "conflict");
       const checkpoint = this.#store.checkpoints.latestByTask(taskId);
@@ -239,7 +233,7 @@ export class ProductionRuntime {
       const ownership = this.#store.workspaces.getByTaskAttempt(taskId, previous.id);
       if (ownership.outcome !== "success") return portFailure("Resume requires active durable workspace ownership.", "conflict");
       if (ownership.value.repository !== repository.repository || ownership.value.repositoryRoot !== repository.repositoryRoot || ownership.value.assignedBranch !== previous.branch || ownership.value.worktreePath !== previous.worktree) return portFailure("Resume workspace ownership does not match the predecessor Attempt.", "conflict");
-      const validated = await this.#resumeWorkspaceValidator.validate({ taskId, attemptId: previous.id, repository: ownership.value.repository, repositoryRoot: ownership.value.repositoryRoot, worktreePath: ownership.value.worktreePath, assignedBranch: ownership.value.assignedBranch, expectedCurrentCommit: ownership.value.currentRevision, expectedOwnershipVersion: ownership.value.version, ...(this.#options.workerTimeoutMs === undefined ? {} : { timeoutMs: this.#options.workerTimeoutMs }) });
+      const validated = await this.#resumeWorkspaceValidator.validate({ taskId, attemptId: previous.id, repository: ownership.value.repository, repositoryRoot: ownership.value.repositoryRoot, worktreePath: ownership.value.worktreePath, assignedBranch: ownership.value.assignedBranch, expectedCurrentCommit: ownership.value.currentRevision, expectedOwnershipVersion: ownership.value.version, timeoutMs: WORKSPACE_RESUME_VALIDATION_LIMITS.maxTimeoutMs });
       if (validated.outcome !== "valid") return portFailure(`Resume workspace validation failed: ${validated.outcome}.`, validated.outcome === "unknown" ? "unknown" : "conflict");
       const id = this.#options.attemptIdFactory?.(taskId, ordinal, now) ?? attemptId(taskId, ordinal, now);
       const resumed = startResumedAttempt(this.#store, taskId, { check: () => ({ repository: "present", branch: "present", worktree: "present", currentCommit: "present" }) }, { id, worker: workerId, provider: this.#options.provider, branch: ownership.value.assignedBranch, worktree: ownership.value.worktreePath, currentCommit: ownership.value.currentRevision }, now, { transferWorkspaceOwnership: true });
@@ -256,7 +250,7 @@ export class ProductionRuntime {
     }
     const id = this.#options.attemptIdFactory?.(taskId, ordinal, now) ?? attemptId(taskId, ordinal, now);
     const assignedBranch = this.#options.branchFactory?.(task.value) ?? branch(task.value);
-    const worktree = resolve(this.#options.worktreeParent, `pirx-${taskId}-${id}`);
+    const worktree = resolve(this.#options.worktreeParent, worktreeDirectoryName(taskId, id));
     const started = this.#store.startAttempt(taskId, { id, worker: workerId, provider: this.#options.provider, ...(previous?.id === undefined ? {} : { predecessorAttemptId: previous.id }), branch: assignedBranch, worktree, ...(previous?.state === "terminal" && previous.finalCommit !== undefined ? { currentCommit: previous.finalCommit } : {}) }, now);
     if (started.outcome !== "success") return portFailure(started.message, started.outcome === "conflict" ? "conflict" : "failed");
     return { outcome: "success", value: { attemptId: started.value.attempt.id } };
@@ -265,7 +259,8 @@ export class ProductionRuntime {
   async #invoke(candidate: RunnableTaskCandidate, attemptIdValue: AttemptId, signal: AbortSignal): Promise<ReturnType<typeof workerExecutionResult>> {
     const task = this.#store.tasks.get(candidate.task.id); const attempt = this.#store.attempts.get(attemptIdValue); const repository = task.outcome === "success" ? repositoryFor(task.value, this.#repositories) : undefined;
     if (task.outcome !== "success" || attempt.outcome !== "success" || repository === undefined || attempt.value.branch === undefined || attempt.value.worktree === undefined) return { outcome: "unknown", reason: "Assigned Task, Attempt, repository, or workspace identity is unavailable." };
-    const workspaceRequest: WorkspaceProvisionRequest = { taskId: task.value.id, attemptId: attempt.value.id, repositoryRoot: repository.repositoryRoot, assignedBranch: attempt.value.branch, expectedBaseRevision: repository.baseRevision, worktreeParent: this.#options.worktreeParent, ...(this.#options.workerTimeoutMs === undefined ? {} : { timeoutMs: this.#options.workerTimeoutMs }), signal };
+    const workspaceRequest: WorkspaceProvisionRequest = { taskId: task.value.id, attemptId: attempt.value.id, repositoryRoot: repository.repositoryRoot, assignedBranch: attempt.value.branch, expectedBaseRevision: repository.baseRevision, worktreeParent: this.#options.worktreeParent, // Git steps have their own bound; workerTimeoutMs is the worker idle window.
+      timeoutMs: WORKSPACE_PROVISION_LIMITS.timeoutMs, signal };
     const ownership = this.#store.workspaces.getByTaskAttempt(task.value.id, attempt.value.id);
     let binding: WorkspaceBinding | undefined;
     if (ownership.outcome === "success") binding = { schemaVersion: 1, taskId: ownership.value.taskId, attemptId: ownership.value.attemptId, repositoryRoot: ownership.value.repositoryRoot, assignedBranch: ownership.value.assignedBranch, expectedBaseRevision: ownership.value.expectedBaseRevision, worktreePath: ownership.value.worktreePath };

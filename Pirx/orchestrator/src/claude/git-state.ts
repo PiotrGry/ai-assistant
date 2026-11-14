@@ -5,18 +5,57 @@ import type { ClaudeCodeRepositoryPolicy } from "./worker-profile.js";
 export interface WorkerGitStateVerification {
   readonly ok: boolean;
   readonly message: string;
+  /** publish only: the full local HEAD SHA (pushed on success, refused on rejection). */
+  readonly commit?: string;
+  /** publish only: git push ran and exited non-zero (a hook or the remote refused it), not a timeout. */
+  readonly rejected?: boolean;
 }
 
 export interface WorkerGitStateVerifier {
+  /** Push the worker's reported commit to its assigned branch; Pirx owns the push, not the sandboxed worker. */
+  publish?(request: WorkerRequest, result: Extract<WorkerResult, { readonly outcome: "CODE_PUSHED" }>, policy: ClaudeCodeRepositoryPolicy): Promise<WorkerGitStateVerification>;
   verify(request: WorkerRequest, result: Extract<WorkerResult, { readonly outcome: "CODE_PUSHED" }>, policy: ClaudeCodeRepositoryPolicy): Promise<WorkerGitStateVerification>;
 }
 
 function fail(message: string): WorkerGitStateVerification { return { ok: false, message: message.slice(0, 256) }; }
 
+export const PUSH_TIMEOUT_MS = 900_000;
+
+/**
+ * The repository itself refused the push: a pre-push hook or the remote
+ * rejected the ref. git exits 1 and says "failed to push some refs". Network,
+ * authentication and killed pushes (timeout, output overflow) exit 128 or by
+ * signal and stay retryable failures.
+ */
+export function isRepositoryRejection(outcome: string, exitCode: number | null, output: string): boolean {
+  return outcome === "git_failure" && exitCode === 1 && /failed to push some refs/u.test(output);
+}
+
 export class GitWorkerStateVerifier implements WorkerGitStateVerifier {
   readonly #git: GitWorkspaceCommandRunner;
 
   public constructor(git = new GitWorkspaceCommandRunner()) { this.#git = git; }
+
+  public async publish(request: WorkerRequest, result: Extract<WorkerResult, { readonly outcome: "CODE_PUSHED" }>, policy: ClaudeCodeRepositoryPolicy): Promise<WorkerGitStateVerification> {
+    if (request.workspace.worktree !== policy.assignedWorktree || result.branch !== request.workspace.branch) return fail("Worker result workspace or branch does not match the assigned policy.");
+    if (!/^[0-9a-f]{7,64}$/iu.test(result.finalCommit)) return fail("Worker result final commit is not a valid Git revision.");
+    // Check branch and cleanliness before the push: a remote write must never precede a local state Pirx then rejects.
+    const branch = await this.#git.run(["symbolic-ref", "--short", "HEAD"], request.workspace.worktree, 30_000);
+    if (branch.outcome !== "success" || branch.stdout.trim() !== request.workspace.branch) return fail("Assigned worktree is not on the requested branch.");
+    const status = await this.#git.run(["status", "--porcelain=v1", "--untracked-files=all"], request.workspace.worktree, 30_000);
+    if (status.outcome !== "success" || status.stdout.length !== 0) return fail("Assigned worktree is not clean after the reported commit.");
+    const head = await this.#git.run(["rev-parse", "HEAD"], request.workspace.worktree, 30_000);
+    // Workers often report an abbreviated SHA; it must still name HEAD exactly.
+    if (head.outcome !== "success" || !head.stdout.trim().toLowerCase().startsWith(result.finalCommit.toLowerCase())) return fail(`Local Git HEAD ${head.stdout.trim() || "unknown"} does not match the worker result ${result.finalCommit}.`);
+    const commit = head.stdout.trim().toLowerCase();
+    // No force: a diverged remote branch is a conflict for a human, not something to overwrite.
+    // ponytail: fixed bound sized for zdrovena's full pre-push gate; make it per-repository config if another repo needs more.
+    const pushed = await this.#git.run(["push", policy.remoteName, `${commit}:refs/heads/${request.workspace.branch}`], request.workspace.worktree, PUSH_TIMEOUT_MS);
+    if (pushed.outcome === "success") return { ok: true, message: "Pushed the reported commit to the assigned branch.", commit };
+    // Repository hooks (pre-push) report on stdout; keep the tail of both streams.
+    const output = `${pushed.stdout}\n${pushed.stderr}`.replace(/\u001b\[[0-9;]*m/gu, "").trim();
+    return { ok: false, rejected: isRepositoryRejection(pushed.outcome, pushed.exitCode, output), commit, message: `git push failed (${pushed.outcome}): ${output.slice(-1900) || "no output"}` };
+  }
 
   public async verify(request: WorkerRequest, result: Extract<WorkerResult, { readonly outcome: "CODE_PUSHED" }>, policy: ClaudeCodeRepositoryPolicy): Promise<WorkerGitStateVerification> {
     if (request.workspace.worktree !== policy.assignedWorktree || result.branch !== request.workspace.branch) return fail("Worker result workspace or branch does not match the assigned policy.");

@@ -21,6 +21,7 @@ export const WORKER_FAILURE_CODES = Object.freeze([
   "capability_denied",
   "permission_denied",
   "git_state_mismatch",
+  "push_rejected",
   "adapter_failure",
   "operator_input_required",
 ] as const);
@@ -80,6 +81,8 @@ export interface WorkerFailureDiagnostic {
   readonly fieldNames?: readonly string[];
   readonly payloadLength?: number;
   readonly payloadDigest?: string;
+  /** Pirx-observed full HEAD SHA for a push_rejected Attempt: the commit an operator retry pushes. */
+  readonly observedCommit?: string;
   readonly providerRecovery?: WorkerProviderRecoveryMetadata;
 }
 
@@ -99,6 +102,7 @@ const MESSAGES: Readonly<Record<WorkerFailureCode, string>> = Object.freeze({
   capability_denied: "Worker capability authorization was denied.",
   permission_denied: "Worker permission policy denied the requested operation.",
   git_state_mismatch: "Worker Git state did not match the assigned result.",
+  push_rejected: "The repository rejected the push of the worker's commit.",
   adapter_failure: "Worker adapter failed at its process boundary.",
   operator_input_required: "Worker requires an authorized operator decision before it can continue.",
 });
@@ -127,6 +131,7 @@ export function createWorkerFailureDiagnostic(code: WorkerFailureCode, details: 
   const fieldNames = safeFields(details.fieldNames);
   const payloadLength = safeNumber(details.payloadLength, 1_048_576);
   const payloadDigest = typeof details.payloadDigest === "string" && /^[0-9a-f]{64}$/u.test(details.payloadDigest) ? details.payloadDigest : undefined;
+  const observedCommit = typeof details.observedCommit === "string" && /^[0-9a-f]{40}$/u.test(details.observedCommit) ? details.observedCommit : undefined;
   let providerRecovery: WorkerProviderRecoveryMetadata | undefined;
   try {
     providerRecovery = code !== "quota_exhausted" ? undefined : normalizeWorkerProviderRecoveryMetadata(details.providerRecovery);
@@ -151,12 +156,27 @@ export function createWorkerFailureDiagnostic(code: WorkerFailureCode, details: 
     ...(fieldNames === undefined ? {} : { fieldNames }),
     ...(payloadLength === undefined ? {} : { payloadLength }),
     ...(payloadDigest === undefined ? {} : { payloadDigest }),
+    ...(observedCommit === undefined ? {} : { observedCommit }),
     ...(providerRecovery === undefined ? {} : { providerRecovery }),
   });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A worker may describe its failure in its own words. Keep the code, use the
+ * canonical message, and move the worker's text into providerMessage so it is
+ * not lost. Persisted diagnostics still go through the strict validator.
+ */
+export function adoptWorkerAuthoredDiagnostic(value: unknown): unknown {
+  if (!isRecord(value) || typeof value.code !== "string" || !WORKER_FAILURE_CODES.includes(value.code as WorkerFailureCode)) return value;
+  const canonical = MESSAGES[value.code as WorkerFailureCode];
+  if (value.message === canonical) return value;
+  const authored = [value.message, value.providerMessage].filter((item): item is string => typeof item === "string" && item.trim().length > 0).join("\n");
+  const { providerMessage: _ignored, ...rest } = value;
+  return { ...rest, message: canonical, ...(authored.length === 0 ? {} : authored.length > 2048 ? { providerMessage: authored.slice(0, 2048), providerMessageTruncated: true } : { providerMessage: authored }) };
 }
 
 export function validateWorkerFailureDiagnostic(value: unknown): WorkerFailureDiagnostic | undefined {
@@ -170,6 +190,8 @@ export function validateWorkerFailureDiagnostic(value: unknown): WorkerFailureDi
   const fieldNames = value.fieldNames === undefined ? undefined : safeFields(value.fieldNames);
   const payloadLength = value.payloadLength === undefined ? undefined : safeNumber(value.payloadLength, 1_048_576);
   const payloadDigest = value.payloadDigest === undefined ? undefined : typeof value.payloadDigest === "string" && /^[0-9a-f]{64}$/u.test(value.payloadDigest) ? value.payloadDigest : undefined;
+  const observedCommit = value.observedCommit === undefined ? undefined : typeof value.observedCommit === "string" && /^[0-9a-f]{40}$/u.test(value.observedCommit) ? value.observedCommit : undefined;
+  if (value.observedCommit !== undefined && observedCommit === undefined) return undefined;
   let providerRecovery: WorkerProviderRecoveryMetadata | undefined;
   try { providerRecovery = normalizeWorkerProviderRecoveryMetadata(value.providerRecovery as WorkerProviderRecoveryMetadata | undefined); }
   catch { providerRecovery = undefined; }
@@ -179,9 +201,9 @@ export function validateWorkerFailureDiagnostic(value: unknown): WorkerFailureDi
   if (value.providerMessage !== undefined && (typeof value.providerMessage !== "string" || value.providerMessage.length === 0 || value.providerMessage.length > 2048)) return undefined;
   if (value.providerMessageTruncated !== undefined && typeof value.providerMessageTruncated !== "boolean") return undefined;
   if (value.correlationId !== undefined && safeText(value.correlationId, 128) === undefined) return undefined;
-  const allowed = new Set(["correlationId", "providerMessageTruncated", "providerMessage", "schemaVersion", "code", "message", "exitCode", "durationMs", "stage", "field", "violationCode", "receivedType", "fieldNames", "payloadLength", "payloadDigest", "providerRecovery"]);
+  const allowed = new Set(["correlationId", "providerMessageTruncated", "providerMessage", "schemaVersion", "code", "message", "exitCode", "durationMs", "stage", "field", "violationCode", "receivedType", "fieldNames", "payloadLength", "payloadDigest", "observedCommit", "providerRecovery"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) return undefined;
-  return Object.freeze({ schemaVersion: 1, code: value.code as WorkerFailureCode, message: value.message, ...(typeof value.correlationId === "string" ? { correlationId: value.correlationId } : {}), ...(value.providerMessageTruncated === true ? { providerMessageTruncated: true } : {}), ...(value.providerMessage === undefined ? {} : { providerMessage: String(diagnosticContext(value.providerMessage)) }), ...(exitCode === undefined ? {} : { exitCode }), ...(durationMs === undefined ? {} : { durationMs }), ...(stage === undefined ? {} : { stage }), ...(field === undefined ? {} : { field }), ...(violationCode === undefined ? {} : { violationCode }), ...(receivedType === undefined ? {} : { receivedType }), ...(fieldNames === undefined ? {} : { fieldNames }), ...(payloadLength === undefined ? {} : { payloadLength }), ...(payloadDigest === undefined ? {} : { payloadDigest }), ...(providerRecovery === undefined ? {} : { providerRecovery }) });
+  return Object.freeze({ schemaVersion: 1, code: value.code as WorkerFailureCode, message: value.message, ...(typeof value.correlationId === "string" ? { correlationId: value.correlationId } : {}), ...(value.providerMessageTruncated === true ? { providerMessageTruncated: true } : {}), ...(value.providerMessage === undefined ? {} : { providerMessage: String(diagnosticContext(value.providerMessage)) }), ...(exitCode === undefined ? {} : { exitCode }), ...(durationMs === undefined ? {} : { durationMs }), ...(stage === undefined ? {} : { stage }), ...(field === undefined ? {} : { field }), ...(violationCode === undefined ? {} : { violationCode }), ...(receivedType === undefined ? {} : { receivedType }), ...(fieldNames === undefined ? {} : { fieldNames }), ...(payloadLength === undefined ? {} : { payloadLength }), ...(payloadDigest === undefined ? {} : { payloadDigest }), ...(observedCommit === undefined ? {} : { observedCommit }), ...(providerRecovery === undefined ? {} : { providerRecovery }) });
 }
 
 export class WorkerFailureError extends Error {

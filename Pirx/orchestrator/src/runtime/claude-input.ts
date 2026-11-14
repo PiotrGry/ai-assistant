@@ -84,7 +84,18 @@ export interface ClaudeInputViolation { readonly code: ClaudeInputViolationCode;
 export type ClaudeInputResult<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly violations: readonly ClaudeInputViolation[] };
 
 const RESPONSE_OUTCOMES = Object.freeze(["CODE_PUSHED", "BLOCKED", "FAILED", "QUOTA_EXHAUSTED", "CANCELLED", "UNKNOWN"]);
-const SECRET_PATTERN = /(token|secret|password|passwd|api[_-]?key|authorization|cookie|private[_-]?key|credential|connection[_ -]?string)/iu;
+// Field names are Pirx-defined, so a keyword match is safe there. Values are
+// prose (Issues, operator reasons, PR descriptions): only secret-shaped text is rejected.
+const SECRET_FIELD_PATTERN = /(token|secret|password|passwd|api[_-]?key|authorization|cookie|private[_-]?key|credential|connection[_ -]?string)/iu;
+const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
+  /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/iu,
+  /\b(?:proxy-)?authorization\s*:\s*[^\r\n]+/iu,
+  /\bbearer\s+[A-Za-z0-9._~+/=-]+/iu,
+  /\b(?:cookie|set-cookie)\s*:\s*[^\r\n]+/iu,
+  /\b(?:password|passwd|pwd|secret|token|api[_-]?key|connection(?:[_ -]?string)?)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s;,]+)/iu,
+  /\b(?:ghp_|github_pat_|xox[baprs]-|sk-[A-Za-z0-9_-])[A-Za-z0-9._-]+/u,
+];
+export function containsSecretShapedValue(value: string): boolean { return SECRET_VALUE_PATTERNS.some((pattern) => pattern.test(value)); }
 
 function fail(...violations: ClaudeInputViolation[]): ClaudeInputResult<never> { return { ok: false, violations: Object.freeze(violations) }; }
 function violation(code: ClaudeInputViolationCode, field: string, message: string): ClaudeInputViolation { return { code, field, message }; }
@@ -95,8 +106,8 @@ function text(value: unknown, field: string, max: number): string | ClaudeInputV
   return value.trim();
 }
 function secret(value: unknown, field: string): ClaudeInputViolation | undefined {
-  if (SECRET_PATTERN.test(field)) return violation("forbidden_field", field, "Secret-shaped fields are not allowed in Claude input.");
-  if (typeof value === "string" && SECRET_PATTERN.test(value)) return violation("forbidden_field", field, "Secret-shaped values are not allowed in Claude input.");
+  if (SECRET_FIELD_PATTERN.test(field.split(".").pop() ?? field)) return violation("forbidden_field", field, "Secret-shaped fields are not allowed in Claude input.");
+  if (typeof value === "string" && containsSecretShapedValue(value)) return violation("forbidden_field", field, "Secret-shaped values are not allowed in Claude input.");
   if (isRecord(value)) for (const [key, child] of Object.entries(value)) { const nested = secret(child, `${field}.${key}`); if (nested !== undefined) return nested; }
   if (Array.isArray(value)) for (const [index, child] of value.entries()) { const nested = secret(child, `${field}[${index}]`); if (nested !== undefined) return nested; }
   return undefined;

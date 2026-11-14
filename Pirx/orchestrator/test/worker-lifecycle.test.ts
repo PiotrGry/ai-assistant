@@ -152,6 +152,23 @@ test("invokes one worker, rejects conflicting identity, and fails closed for uns
   } finally { value.store.close(); await rm(value.directory, { recursive: true, force: true }); }
 });
 
+test("keeps worker prose that names secret categories without carrying a secret", async () => {
+  const value = await storeFixture();
+  try {
+    const input = request(value.store);
+    // PR text such as "moved the connection string" made a pushed result UNKNOWN under the old keyword check.
+    const prose = "Moved the connection string to config and documented the private key path.";
+    const pushed = { ...result(input, "CODE_PUSHED"), pullRequestTitle: "fix: move connection settings", pullRequestBody: `## What\n${prose}` } as WorkerResult;
+    const coordinator = new WorkerLifecycleCoordinator(value.store, { execute: async () => pushed }, { now: () => t1 });
+    const recorded = await coordinator.execute(input, new AbortController().signal);
+    assert.equal(recorded.outcome, "terminal_recorded");
+    if (recorded.outcome === "terminal_recorded") {
+      assert.equal(recorded.result.outcome, "CODE_PUSHED");
+      assert.equal(recorded.attempt.state === "terminal" ? recorded.attempt.pullRequestBody : undefined, `## What\n${prose}`);
+    }
+  } finally { value.store.close(); await rm(value.directory, { recursive: true, force: true }); }
+});
+
 test("does not invoke after pre-cancellation and requires reconciliation after an uncertain restart", async () => {
   const value = await storeFixture();
   let calls = 0;

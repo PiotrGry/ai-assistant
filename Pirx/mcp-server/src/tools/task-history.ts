@@ -26,11 +26,12 @@ function response(value: Record<string, unknown>) {
 }
 
 function summarizeAttempt(attempt: AttemptSnapshot) {
-  const base = { id: attempt.id, taskId: attempt.taskId, ordinal: attempt.ordinal, state: attempt.state, startedAt: attempt.startedAt, worker: attempt.worker, provider: attempt.provider };
+  const base = { id: attempt.id, taskId: attempt.taskId, ordinal: attempt.ordinal, state: attempt.state, startedAt: attempt.startedAt, worker: attempt.worker, provider: attempt.provider, ...(attempt.branch === undefined ? {} : { branch: attempt.branch }) };
   if (attempt.state === "running") return base;
   const diagnostic = attempt.diagnostic;
   return {
     ...base, result: attempt.result, endedAt: attempt.endedAt,
+    ...(attempt.finalCommit === undefined ? {} : { finalCommit: attempt.finalCommit }),
     ...(attempt.blockingReason === undefined ? {} : { blockingReason: diagnosticContext(attempt.blockingReason) }),
     ...(diagnostic === undefined ? { diagnosticAvailable: false } : {
       diagnosticAvailable: true,
@@ -44,7 +45,7 @@ function summarizeAttempt(attempt: AttemptSnapshot) {
 
 export function registerTaskHistory(server: McpServer, filename: string | undefined, configurationError?: string, checkBinding: RuntimeBindingCheck = () => {}): void {
   server.registerTool("pirx_task_history", {
-    description: "Read the durable state and paged Attempts of a specific Task, including Tasks outside Queue. Use taskId or repository plus issueNumber. Pass nextAfterOrdinal for the next page. Use attemptId alone for its sanitized diagnostic, when available; diagnostic.providerMessage holds the bounded Claude CLI error output when it was recorded (Attempts run before 2026-11-04 have none). No work is started.",
+    description: "Read the durable state and Attempts of a specific Task, including Tasks outside Queue. Use taskId or repository plus issueNumber. Without afterOrdinal it returns the newest Attempts, totalAttempts and, when older ones exist, olderAttempts; pass afterOrdinal: 0 (olderFromAfterOrdinal) to read from the first Attempt, then nextAfterOrdinal for the next page. Use attemptId alone for its sanitized diagnostic, when available; diagnostic.providerMessage holds the bounded Claude CLI error output when it was recorded (Attempts run before 2026-11-04 have none). No work is started.",
     inputSchema,
     annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
   }, async (input) => {
@@ -81,7 +82,12 @@ export function registerTaskHistory(server: McpServer, filename: string | undefi
         const task = runtime.tasks.get(taskId);
         if (task.outcome !== "success") return task;
         const limit = input.limit ?? 5;
-        const rows = runtime.database.prepare("SELECT id FROM runtime_attempts WHERE task_id = ? AND ordinal > ? ORDER BY ordinal LIMIT ?").all(taskId, input.afterOrdinal ?? 0, limit + 1) as Array<{ id: string }>;
+        const totalAttempts = (runtime.database.prepare("SELECT COUNT(*) AS n FROM runtime_attempts WHERE task_id = ?").get(taskId) as { n: number }).n;
+        // gh-462: a status question read the five oldest of 14 Attempts as the whole history.
+        // Without afterOrdinal, show the newest page; paging forward from there finds nothing.
+        const rows = (input.afterOrdinal === undefined
+          ? (runtime.database.prepare("SELECT id FROM runtime_attempts WHERE task_id = ? ORDER BY ordinal DESC LIMIT ?").all(taskId, limit) as Array<{ id: string }>).reverse()
+          : runtime.database.prepare("SELECT id FROM runtime_attempts WHERE task_id = ? AND ordinal > ? ORDER BY ordinal LIMIT ?").all(taskId, input.afterOrdinal, limit + 1)) as Array<{ id: string }>;
         const attempts: ReturnType<typeof summarizeAttempt>[] = [];
         for (const row of rows.slice(0, limit)) {
           const attempt = runtime.attempts.get(row.id);
@@ -92,8 +98,11 @@ export function registerTaskHistory(server: McpServer, filename: string | undefi
         return { outcome: "success", value: {
           outcome: "success",
           task: { id, state, createdAt, updatedAt, ...(githubReference === undefined ? {} : { githubReference }), ...(blockingReason === undefined ? {} : { blockingReason: diagnosticContext(blockingReason) }) },
+          totalAttempts,
           attempts,
           ...(rows.length > limit ? { nextAfterOrdinal: attempts.at(-1)?.ordinal } : {}),
+          // The newest page has nothing after it; tell the reader older Attempts exist and how to reach them.
+          ...(input.afterOrdinal === undefined && totalAttempts > attempts.length ? { olderAttempts: totalAttempts - attempts.length, olderFromAfterOrdinal: 0 } : {}),
         } };
       });
       if (snapshot.outcome === "success") return response(snapshot.value);

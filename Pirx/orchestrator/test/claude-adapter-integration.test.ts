@@ -264,7 +264,8 @@ test("appends the exact terminal variant requirements to the worker prompt", asy
     } };
     const processAdapter = new ClaudeCodeProcessAdapter({ runner, inputSource: { create: (input) => inputFor(input, "new") }, promptRenderer: { render: () => "Inspect and perform the assigned bounded repair." } });
     await processAdapter.execute(request("new", value.worktree), new AbortController().signal);
-    assert.match(prompt, /CODE_PUSHED include branch and finalCommit/u);
+    assert.match(prompt, /CODE_COMMITTED include branch, finalCommit, pullRequestTitle, and pullRequestBody/u);
+    assert.match(prompt, /do not push/u);
     assert.match(prompt, /non-success outcome include reason/u);
     assert.match(prompt, /Do not wrap the JSON in Markdown/u);
   } finally { await rm(value.root, { recursive: true, force: true }); }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createWorkerFailureDiagnostic, validateWorkerFailureDiagnostic } from "../src/runtime/worker-diagnostic.js";
+import { adoptWorkerAuthoredDiagnostic, createWorkerFailureDiagnostic, validateWorkerFailureDiagnostic } from "../src/runtime/worker-diagnostic.js";
 
 test("provider evidence survives persistence with bounded redacted text", () => {
   const diagnostic = createWorkerFailureDiagnostic("process_failure", { providerMessage: "error_max_turns: Bearer private-value token=private-value " + "x".repeat(3000) });
@@ -37,4 +37,12 @@ test("diagnostics already persisted in runtime storage stay readable", () => {
   for (const code of ["process_failure", "binding_mismatch", "quota_exhausted"] as const) {
     assert.notEqual(validateWorkerFailureDiagnostic(JSON.parse(JSON.stringify(createWorkerFailureDiagnostic(code)))), undefined, code);
   }
+});
+
+test("observedCommit survives persistence only as a full SHA", () => {
+  const pirx = createWorkerFailureDiagnostic("push_rejected", { stage: "git_state", observedCommit: "a".repeat(40) });
+  assert.equal(validateWorkerFailureDiagnostic(JSON.parse(JSON.stringify(pirx)))?.observedCommit, "a".repeat(40));
+  assert.equal(validateWorkerFailureDiagnostic(adoptWorkerAuthoredDiagnostic(pirx))?.observedCommit, "a".repeat(40));
+  assert.equal(createWorkerFailureDiagnostic("push_rejected", { observedCommit: "abc" }).observedCommit, undefined);
+  assert.equal(validateWorkerFailureDiagnostic({ ...pirx, observedCommit: "abc" }), undefined);
 });

@@ -60,9 +60,18 @@ function sanitized(value: string): string { return value.replace(/(?:bearer\s+|a
 function result(outcome: WorkspaceProvisionOutcome, message: string, errorCode?: WorkspaceProvisionResult["errorCode"], binding?: WorkspaceBinding): WorkspaceProvisionResult { return { outcome, message: sanitized(message), ...(errorCode === undefined ? {} : { errorCode }), ...(binding === undefined ? {} : { binding }) }; }
 function env(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const keys = ["HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "TEMP", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT"] as const;
-  return Object.fromEntries(keys.flatMap((key) => source[key] === undefined ? [] : [[key, source[key]!]]));
+  // Pirx parses git's messages (e.g. "failed to push some refs"); keep them untranslated on any host.
+  return { ...Object.fromEntries(keys.flatMap((key) => source[key] === undefined ? [] : [[key, source[key]!]])), LC_ALL: "C", LANGUAGE: "C" };
 }
 function existingPathError(error: unknown): boolean { return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "ENOENT"; }
+
+/**
+ * Attempt IDs contain ':'; tools such as uv reject path segments with it,
+ * which broke the repository pre-push hook for gh-462. Keep names to [A-Za-z0-9._-].
+ */
+export function worktreeDirectoryName(taskId: string, attemptId: string): string {
+  return `pirx-${taskId}-${attemptId}`.replace(/[^A-Za-z0-9._-]/gu, "-");
+}
 
 export class GitWorkspaceCommandRunner {
   readonly #executable: string;
@@ -110,7 +119,7 @@ export class WorkspaceProvisioner {
 
   provision(request: WorkspaceProvisionRequest): Promise<WorkspaceProvisionResult> {
     const invalid = validateRequest(request); if (invalid !== undefined) return Promise.resolve(invalid);
-    const repositoryRoot = resolve(request.repositoryRoot); const worktreePath = resolve(request.worktreeParent, `pirx-${request.taskId}-${request.attemptId}`); const key = `${repositoryRoot}\u0000${request.taskId}\u0000${request.attemptId}\u0000${request.assignedBranch}\u0000${request.expectedBaseRevision}`; const previous = this.#locks.get(worktreePath) ?? Promise.resolve<WorkspaceProvisionResult>(result("unknown", "unused"));
+    const repositoryRoot = resolve(request.repositoryRoot); const worktreePath = resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)); const key = `${repositoryRoot}\u0000${request.taskId}\u0000${request.attemptId}\u0000${request.assignedBranch}\u0000${request.expectedBaseRevision}`; const previous = this.#locks.get(worktreePath) ?? Promise.resolve<WorkspaceProvisionResult>(result("unknown", "unused"));
     const current = previous.catch(() => result("unknown", "Previous workspace claim failed.", "unknown")).then(() => this.#provision(request, repositoryRoot, worktreePath, key));
     this.#locks.set(worktreePath, current);
     void current.finally(() => { if (this.#locks.get(worktreePath) === current) this.#locks.delete(worktreePath); });

@@ -82,6 +82,10 @@ function summary(row: Record<string, unknown> | undefined, options: { issue?: bo
   return Object.freeze({ id: row.id, state: row.state, ...(options.issue && typeof row.issue_number === "number" ? { issueNumber: row.issue_number } : {}), ...(options.ordinal && typeof row.ordinal === "number" ? { ordinal: row.ordinal } : {}), ...(options.result && typeof row.result === "string" ? { result: row.result } : {}), ...(options.queue && typeof row.queue_order === "number" ? { queueOrder: row.queue_order } : {}), ...(options.expiry && canonicalTimestamp(row.expires_at) ? { expiresAt: row.expires_at } : {}) });
 }
 
+const DIAGNOSTIC_PRUNE_EVERY = 500;
+const DIAGNOSTIC_ROUTINE_RETENTION_MS = 7 * 86_400_000;
+const ROUTINE_OUTCOMES = Object.freeze(["idle", "running", "synchronized", "replayed", "recorded", "waiting", "paused"]);
+
 export class OrchestratorControlRepository {
   readonly #store: RuntimeSqliteStore;
   public constructor(store: RuntimeSqliteStore) { this.#store = store; }
@@ -95,7 +99,10 @@ export class OrchestratorControlRepository {
       const workerFailures = history?.outcome === "success" ? history.value.slice(-3).flatMap((attempt) => attempt.state === "terminal" ? [{ attemptId: attempt.id, ordinal: attempt.ordinal, result: attempt.result, diagnostic: attempt.diagnostic }] : []) : [];
       const enriched = workerFailures.length > 0 ? { ...event, details: { ...details as object, workerFailures } } : event;
       const result = this.#store.database.prepare("INSERT INTO runtime_orchestrator_diagnostics (recorded_at,event,outcome,diagnostic_json) VALUES (?,?,?,?)").run(at, event.event, event.outcome, JSON.stringify(diagnosticContext(enriched)));
-      return { outcome: "success", value: Number(result.lastInsertRowid) };
+      const sequence = Number(result.lastInsertRowid);
+      // Steady-state heartbeats (about 5k rows a day) carry no evidence after a week; failures and transitions stay forever.
+      if (sequence % DIAGNOSTIC_PRUNE_EVERY === 0) this.#store.database.prepare(`DELETE FROM runtime_orchestrator_diagnostics WHERE recorded_at < ? AND outcome IN (${ROUTINE_OUTCOMES.map(() => "?").join(",")})`).run(new Date(Date.parse(at) - DIAGNOSTIC_ROUTINE_RETENTION_MS).toISOString(), ...ROUTINE_OUTCOMES);
+      return { outcome: "success", value: sequence };
     });
   }
 

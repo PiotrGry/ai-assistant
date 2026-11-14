@@ -1,4 +1,5 @@
 import { pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
 
 import { ProductionClaudeWorker } from "./claude/production-worker.js";
 import { loadGitHubConfig, type GitHubConfig } from "./github/config.js";
@@ -56,7 +57,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
       return 0;
     }
     const store = RuntimeSqliteStore.open({ filename: config.databasePath, environment: host.env, mode: "existing" });
-    const worker = new ProductionClaudeWorker({ store, repositories: config.repositories, environment: host.env });
+    const worker = new ProductionClaudeWorker({ store, repositories: config.repositories, environment: host.env, transcriptDirectory: join(dirname(config.databasePath), "worker-logs") });
     runtime = new ProductionRuntime(store, {
       workerId: config.workerId, provider: config.provider, workerCapabilities: config.workerCapabilities,
       repositories: config.repositories.map(({ repository, repositoryRoot, baseBranch, baseRevision }) => ({ repository, repositoryRoot, baseBranch, baseRevision })),

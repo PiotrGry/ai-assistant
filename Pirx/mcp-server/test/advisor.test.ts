@@ -9,7 +9,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/server";
 import { RuntimeSqliteStore, createTask } from "@pirx/orchestrator";
-import { askAdvisor, createAdvisorServer, registerConversationLog } from "../src/advisor.js";
+import { ADVISOR_TIMEOUT_MS, askAdvisor, createAdvisorServer, ollamaAdvisor, registerConversationLog } from "../src/advisor.js";
 
 function textResult(result: Awaited<ReturnType<Client["callTool"]>>): Record<string, unknown> {
   const block = result.content.find((item) => item.type === "text");
@@ -150,4 +150,28 @@ test("Advisor history reports a missing runtime database without creating it", a
     assert.match(JSON.stringify(result.content), /database does not exist/u);
     await assert.rejects(access(filename), { code: "ENOENT" });
   } finally { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("an advisor failure records how long it waited, and the model request keeps the model warm and short", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-advisor-timeout-"));
+  const store = RuntimeSqliteStore.open({ filename: join(root, "runtime.sqlite") });
+  const originalFetch = globalThis.fetch;
+  try {
+    // Every production question timed out at the old 45 s bound on a cold 27B load.
+    assert.ok(ADVISOR_TIMEOUT_MS >= 120_000);
+    const now = new Date().toISOString() as never;
+    const task = createTask({ id: "task" as never, goal: "Repair labels", scope: "labels", acceptanceCriteria: ["keep packing information"], priority: 1, risk: "low", requiredCapabilities: ["repository.read"], createdAt: now });
+    assert.ok(task.ok);
+    assert.equal(store.tasks.create(task.value).outcome, "success");
+    assert.equal(store.startAttempt(task.value.id, { id: "attempt" as never, worker: "claude", provider: "claude-code" }, now).outcome, "success");
+    const failed = await askAdvisor(store, "task", "attempt", "q1", "Which field?", async () => { throw new Error("The operation was aborted due to timeout"); });
+    assert.equal(failed.state, "failed");
+    assert.match(failed.answer ?? "", /aborted due to timeout \(after \d+ s of 150 s\)/u);
+
+    let body: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => { body = JSON.parse(String(init?.body)) as Record<string, unknown>; return new Response(JSON.stringify({ message: { content: "Use referenceNumber." } }), { status: 200 }); }) as typeof fetch;
+    assert.equal(await ollamaAdvisor("prompt", new AbortController().signal), "Use referenceNumber.");
+    assert.equal(body?.keep_alive, "30m");
+    assert.ok(((body?.options as { num_predict?: number } | undefined)?.num_predict ?? Infinity) <= 512);
+  } finally { globalThis.fetch = originalFetch; store.close(); await rm(root, { recursive: true, force: true }); }
 });

@@ -77,7 +77,12 @@ export interface TerminalAttemptSnapshot extends Omit<RunningAttemptSnapshot, "s
   readonly finalCommit?: string;
   readonly blockingReason?: string;
   readonly diagnostic?: WorkerFailureDiagnostic;
+  /** Worker-authored pull request text for a CODE_PUSHED Attempt. */
+  readonly pullRequestTitle?: string;
+  readonly pullRequestBody?: string;
 }
+
+export const PULL_REQUEST_TEXT_LIMITS = Object.freeze({ title: 256, body: 20_000 } as const);
 
 export type AttemptSnapshot = RunningAttemptSnapshot | TerminalAttemptSnapshot;
 
@@ -138,6 +143,8 @@ export type AttemptTransition =
       readonly progress?: string;
       readonly testSummary?: string;
       readonly diagnostic?: WorkerFailureDiagnostic;
+      readonly pullRequestTitle?: string;
+      readonly pullRequestBody?: string;
     };
 
 export interface AttemptProgressUpdate {
@@ -382,11 +389,21 @@ function validateAttemptSnapshot(value: unknown): DomainResult<AttemptSnapshot> 
   const blocking = safeOptionalText(value.blockingReason, "blockingReason");
   if (!finalCommit.ok) return finalCommit;
   if (!blocking.ok) return blocking;
+  const pullRequest = pullRequestText(value.pullRequestTitle, value.pullRequestBody);
+  if (!pullRequest.ok) return pullRequest;
   const diagnostic = value.diagnostic === undefined ? undefined : validateWorkerFailureDiagnostic(value.diagnostic);
   if (value.diagnostic !== undefined && diagnostic === undefined) return error("serialization_error", "Attempt diagnostic is malformed or unsafe.", "diagnostic");
   if (value.result === "CODE_PUSHED" && (value.branch === undefined || finalCommit.value === undefined)) return error("invariant_violation", "CODE_PUSHED requires branch and finalCommit.", "finalCommit");
   if (value.result !== "CODE_PUSHED" && blocking.value === undefined) return error("invariant_violation", `${value.result} requires blockingReason.`, "blockingReason");
-  return ok(freezeAttempt({ ...common, state: "terminal", result: value.result, endedAt, ...(finalCommit.value === undefined ? {} : { finalCommit: finalCommit.value }), ...(blocking.value === undefined ? {} : { blockingReason: blocking.value }), ...(diagnostic === undefined ? {} : { diagnostic }) }));
+  return ok(freezeAttempt({ ...common, state: "terminal", result: value.result, endedAt, ...(finalCommit.value === undefined ? {} : { finalCommit: finalCommit.value }), ...(blocking.value === undefined ? {} : { blockingReason: blocking.value }), ...(diagnostic === undefined ? {} : { diagnostic }), ...pullRequest.value }));
+}
+
+function pullRequestText(title: unknown, body: unknown): DomainResult<{ pullRequestTitle?: string; pullRequestBody?: string }> {
+  const parsedTitle = safeOptionalText(title, "pullRequestTitle", PULL_REQUEST_TEXT_LIMITS.title);
+  if (!parsedTitle.ok) return parsedTitle;
+  const parsedBody = safeOptionalText(body, "pullRequestBody", PULL_REQUEST_TEXT_LIMITS.body);
+  if (!parsedBody.ok) return parsedBody;
+  return ok({ ...(parsedTitle.value === undefined ? {} : { pullRequestTitle: parsedTitle.value }), ...(parsedBody.value === undefined ? {} : { pullRequestBody: parsedBody.value }) });
 }
 
 function validateAttemptSet(task: TaskSnapshot, attempts: readonly AttemptSnapshot[]): DomainResult<void> {
@@ -503,6 +520,8 @@ export function transitionAttempt(attempt: AttemptSnapshot, expectedState: Attem
   const testSummary = safeOptionalText(transition.testSummary, "testSummary", 2_000);
   if (!finalCommit.ok) return finalCommit;
   if (!blocking.ok) return blocking;
+  const pullRequest = pullRequestText(transition.pullRequestTitle, transition.pullRequestBody);
+  if (!pullRequest.ok) return pullRequest;
   const diagnostic = transition.diagnostic === undefined ? undefined : validateWorkerFailureDiagnostic(transition.diagnostic);
   if (transition.diagnostic !== undefined && diagnostic === undefined) return error("invalid_input", "Attempt diagnostic is malformed or unsafe.", "diagnostic");
   if (!currentCommit.ok) return currentCommit;
@@ -512,7 +531,7 @@ export function transitionAttempt(attempt: AttemptSnapshot, expectedState: Attem
   const branch = transition.branch ?? attempt.branch;
   if (transition.result === "CODE_PUSHED" && (branch === undefined || finalCommit.value === undefined)) return error("invariant_violation", "CODE_PUSHED requires branch and finalCommit.", "finalCommit");
   if (transition.result !== "CODE_PUSHED" && blocking.value === undefined) return error("invariant_violation", `${transition.result} requires blockingReason.`, "blockingReason");
-  return ok(freezeAttempt({ ...attempt, state: "terminal", result: transition.result, endedAt: evaluatedAt, ...(branch === undefined ? {} : { branch }), ...(finalCommit.value === undefined ? {} : { finalCommit: finalCommit.value }), ...(blocking.value === undefined ? {} : { blockingReason: blocking.value }), ...(diagnostic === undefined ? {} : { diagnostic }), ...(currentCommit.value === undefined ? {} : { currentCommit: currentCommit.value }), ...(checkpoint.value === undefined ? {} : { checkpointReference: checkpoint.value }), ...(progress.value === undefined ? {} : { progress: progress.value }), ...(testSummary.value === undefined ? {} : { testSummary: testSummary.value }) }));
+  return ok(freezeAttempt({ ...attempt, state: "terminal", result: transition.result, endedAt: evaluatedAt, ...(branch === undefined ? {} : { branch }), ...(finalCommit.value === undefined ? {} : { finalCommit: finalCommit.value }), ...(blocking.value === undefined ? {} : { blockingReason: blocking.value }), ...(diagnostic === undefined ? {} : { diagnostic }), ...(currentCommit.value === undefined ? {} : { currentCommit: currentCommit.value }), ...(checkpoint.value === undefined ? {} : { checkpointReference: checkpoint.value }), ...(progress.value === undefined ? {} : { progress: progress.value }), ...(testSummary.value === undefined ? {} : { testSummary: testSummary.value }) , ...pullRequest.value}));
 }
 
 export function recordAttemptProgress(attempt: RunningAttemptSnapshot, expectedState: AttemptState, update: AttemptProgressUpdate, evaluatedAt: UtcTimestamp): DomainResult<RunningAttemptSnapshot> {

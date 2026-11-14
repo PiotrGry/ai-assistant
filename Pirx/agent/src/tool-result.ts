@@ -51,7 +51,7 @@ function summarizeDiagnosticResult(value: unknown, maxCharacters: number, toolNa
   if (toolName === "pirx_task_history" && Array.isArray(result.attempts)) {
     const task = record(result.task);
     const attempts: Record<string, unknown>[] = [];
-    const compact: Record<string, unknown> = { outcome: "success", truncated: true, task: { id: task?.id, state: task?.state }, attempts };
+    const compact: Record<string, unknown> = { outcome: "success", truncated: true, task: { id: task?.id, state: task?.state }, ...(Number.isSafeInteger(result.totalAttempts) ? { totalAttempts: result.totalAttempts } : {}), ...(Number.isSafeInteger(result.olderAttempts) ? { olderAttempts: result.olderAttempts, olderFromAfterOrdinal: 0 } : {}), attempts };
     for (const item of result.attempts) {
       const attempt = record(item);
       if (attempt === undefined || !Number.isSafeInteger(attempt.ordinal)) break;

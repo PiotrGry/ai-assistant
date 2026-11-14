@@ -6,7 +6,8 @@ import { buildWorkerResultSchema as buildCanonicalWorkerResultSchema } from "../
 
 export const CLAUDE_CODE_WORKER_PROFILE_SCHEMA_VERSION = 1 as const;
 export const CLAUDE_CODE_WORKER_PROFILE_LIMITS = Object.freeze({
-  maxTurns: 32,
+  // Optional backstop only; by default the worker runs until it finishes.
+  maxTurns: 1_000,
   maxTestCommands: 16,
   maxCommandCharacters: 256,
   maxPathCharacters: 2_048,
@@ -41,7 +42,7 @@ export interface ClaudeCodeWorkerProfile {
   readonly allowedTools: readonly string[];
   readonly disallowedTools: readonly string[];
   readonly permissionMode: "dontAsk";
-  readonly maxTurns: number;
+  readonly maxTurns?: number;
   readonly remoteName: string;
   readonly assignedBranch: string;
   readonly testCommands: readonly string[];
@@ -96,7 +97,8 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
     "Bash(rm *)", "Bash(sh *)", "Bash(bash *)", "Bash(zsh *)", "Bash(curl *)", "Bash(wget *)",
     "Bash(git reset *)", "Bash(git clean *)", "Bash(git checkout *)", "Bash(git switch *)",
     "Bash(git branch -D *)", "Bash(git branch --delete *)", "Bash(git remote *)", "Bash(git config *)",
-    "Bash(git push --force *)", "Bash(git push -f *)", "Bash(git push --delete *)", "Bash(git push --mirror *)",
+    // Pirx pushes the reported commit outside the sandbox; the worker never pushes.
+    "Bash(git push *)", "Bash(git -C * push *)",
   ];
   if (policy.advisorConfig !== undefined) {
     denied.splice(denied.indexOf("mcp__*"), 1);
@@ -110,17 +112,13 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
   if (parsedCapabilities.includes("repository.write")) {
     for (const tool of ["Edit", "Write"]) { tools.push(tool); allow(tool, allowed); }
   }
-  const bashNeeded = parsedCapabilities.some((value) => value === "tests.run" || value === "git.commit" || value === "git.push_assigned_branch");
+  const bashNeeded = parsedCapabilities.some((value) => value === "tests.run" || value === "git.commit");
   if (bashNeeded) {
     tools.push("Bash");
     if (parsedCapabilities.includes("tests.run")) for (const command of policy.testCommands) allow(`Bash(${command})`, allowed);
     if (parsedCapabilities.includes("git.commit")) {
       for (const rule of ["Bash(git status:*)", "Bash(git diff:*)", "Bash(git add:*)", "Bash(git commit -m:*)", "Bash(git rev-parse HEAD)"]) allow(rule, allowed);
       for (const rule of [`Bash(git -C ${assignedWorktree} status:*)`, `Bash(git -C ${assignedWorktree} diff:*)`, `Bash(git -C ${assignedWorktree} add:*)`, `Bash(git -C ${assignedWorktree} commit -m:*)`, `Bash(git -C ${assignedWorktree} rev-parse HEAD)`]) allow(rule, allowed);
-    }
-    if (parsedCapabilities.includes("git.push_assigned_branch")) {
-      allow(`Bash(git push ${policy.remoteName} HEAD:refs/heads/${request.workspace.branch})`, allowed);
-      allow(`Bash(git -C ${assignedWorktree} push ${policy.remoteName} HEAD:refs/heads/${request.workspace.branch})`, allowed);
     }
   }
   for (const tool of ["Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch"]) if (!tools.includes(tool)) denied.push(tool);
@@ -133,7 +131,7 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
     allowedTools: Object.freeze(allowed),
     disallowedTools: Object.freeze([...new Set(denied)]),
     permissionMode: "dontAsk",
-    maxTurns: policy.maxTurns ?? 16,
+    ...(policy.maxTurns === undefined ? {} : { maxTurns: policy.maxTurns }),
     remoteName: policy.remoteName,
     assignedBranch: request.workspace.branch,
     testCommands: Object.freeze([...policy.testCommands]),

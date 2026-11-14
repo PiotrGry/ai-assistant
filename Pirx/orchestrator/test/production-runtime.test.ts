@@ -8,6 +8,10 @@ import {
   ProductionRuntime,
   RuntimeSqliteStore,
   createWorkerFailureDiagnostic,
+  WorkerFailureError,
+  isPreWorkerBlock,
+  isOperatorRetryableBlock,
+  unblockEscalatedTask,
   createCheckpoint,
   createTask,
   retryTask,
@@ -18,6 +22,7 @@ import {
   type TaskId,
   type UtcTimestamp,
   type WorkerPort,
+  worktreeDirectoryName,
 } from "../src/index.js";
 
 const now = "2026-09-15T21:00:00.000Z" as UtcTimestamp;
@@ -26,16 +31,17 @@ const issue = { owner: "PiotrGry", repository: "ai-assistant", issueNumber: 194,
 const repository = "PiotrGry/ai-assistant";
 const baseRevision = "a".repeat(40);
 
-async function setup(adapter: WorkerPort | null = { execute: async (request) => ({ kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED", branch: request.workspace.branch, finalCommit: "b".repeat(40) }) }): Promise<{ directory: string; store: RuntimeSqliteStore; runtime: ProductionRuntime; adapterCalls: { value: number } }> {
+async function setup(adapter: WorkerPort | null = { execute: async (request) => ({ kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED", branch: request.workspace.branch, finalCommit: "b".repeat(40) }) }): Promise<{ directory: string; store: RuntimeSqliteStore; runtime: ProductionRuntime; adapterCalls: { value: number }; gitTimeouts: Array<number | undefined> }> {
   const directory = await mkdtemp(join(tmpdir(), "pirx-production-runtime-"));
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
   const task = createTask({ id: taskId, githubReference: issue, goal: "Run assigned work", scope: "production composition", acceptanceCriteria: ["durable worker cycle"], priority: 1, risk: "low", requiredCapabilities: ["repository.write", "git.push_assigned_branch"], createdAt: now });
   if (!task.ok || store.tasks.create(task.value).outcome !== "success") throw new Error("task fixture failed");
   if (store.selection.synchronize({ taskId, queueOrder: 1, dependencyState: "known", blockers: [], synchronizedAt: now }).outcome !== "success") throw new Error("selection fixture failed");
   const adapterCalls = { value: 0 };
+  const gitTimeouts: Array<number | undefined> = [];
   const counted = adapter === null ? undefined : { execute: async (request: Parameters<WorkerPort["execute"]>[0], signal: AbortSignal) => { adapterCalls.value += 1; return adapter.execute(request, signal); } };
-  const runtime = new ProductionRuntime(store, { workerId: "pirx-worker", provider: "fake-claude", workerCapabilities: ["repository.write", "git.push_assigned_branch"], repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }], worktreeParent: "/tmp/pirx-worktrees", leaseDurationMs: 60_000, workerTimeoutMs: 5_000, workerAdapters: { get: () => counted }, workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, `pirx-${request.taskId}-${request.attemptId}`) } }) }, clock: { now: () => now } });
-  return { directory, store, runtime, adapterCalls };
+  const runtime = new ProductionRuntime(store, { workerId: "pirx-worker", provider: "fake-claude", workerCapabilities: ["repository.write", "git.push_assigned_branch"], repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }], worktreeParent: "/tmp/pirx-worktrees", leaseDurationMs: 60_000, workerTimeoutMs: 960_000, workerAdapters: { get: () => counted }, workspace: { provision: async (request) => (gitTimeouts.push(request.timeoutMs), { outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)) } }) }, clock: { now: () => now } });
+  return { directory, store, runtime, adapterCalls, gitTimeouts };
 }
 
 async function dispose(value: { directory: string; runtime: ProductionRuntime; store: RuntimeSqliteStore }): Promise<void> {
@@ -48,6 +54,8 @@ test("composes selection, Lease, Attempt, workspace, capability, worker lifecycl
     const result = await value.runtime.cycle();
     assert.equal(result.outcome, "started");
     assert.equal(value.adapterCalls.value, 1);
+    // A 16-minute worker idle window must not become a git step timeout (limit 120 s).
+    assert.deepEqual(value.gitTimeouts, [120_000]);
     assert.equal(value.runtime.status().recovered, true);
     const attempts = value.store.attempts.listByTask(taskId); assert.equal(attempts.outcome, "success");
     assert.equal(attempts.value.length, 1); assert.equal(attempts.value[0]?.state, "terminal"); assert.equal(attempts.value[0]?.result, "CODE_PUSHED");
@@ -101,7 +109,7 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
   const directory = await mkdtemp(join(tmpdir(), "pirx-production-quota-resume-"));
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
   let clock = now;
-  let calls = 0;
+  let calls = 0; const validationTimeouts: Array<number | undefined> = [];
   try {
     const created = createTask({ id: taskId, githubReference: issue, goal: "Resume after quota", scope: "production composition", acceptanceCriteria: ["same Task, new Attempt"], priority: 1, risk: "low", requiredCapabilities: ["repository.write", "git.push_assigned_branch"], createdAt: now });
     assert.equal(created.ok, true);
@@ -116,7 +124,7 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
       repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }],
       worktreeParent: "/tmp/pirx-worktrees",
       leaseDurationMs: 60_000,
-      workerTimeoutMs: 5_000,
+      workerTimeoutMs: 960_000,
       attemptIdFactory: (_task, ordinal) => `quota-resume-attempt-${ordinal}` as AttemptId,
       workerAdapters: { get: () => ({ execute: async (request) => {
         calls += 1;
@@ -127,8 +135,8 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
           ? { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "QUOTA_EXHAUSTED" as const, reason: diagnostic.message, diagnostic }
           : { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED" as const, branch: request.workspace.branch, finalCommit: "c".repeat(40) };
       } }) },
-      workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, `pirx-${request.taskId}-${request.attemptId}`) } }) },
-      resumeWorkspaceValidator: { validate: async () => ({ outcome: "valid", message: "exact durable workspace verified" }) },
+      workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)) } }) },
+      resumeWorkspaceValidator: { validate: async (request) => (validationTimeouts.push(request.timeoutMs), { outcome: "valid", message: "exact durable workspace verified" }) },
       clock: { now: () => clock },
     });
 
@@ -148,6 +156,8 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
     clock = "2026-09-15T21:02:00.000Z" as UtcTimestamp;
     const resumed = await runtime.cycle();
     assert.equal(resumed.outcome, "started", JSON.stringify(resumed));
+    // The worker idle window must not reach the resume validator (limit 120 s).
+    assert.deepEqual(validationTimeouts, [120_000]);
     assert.equal(calls, 2);
     const history = store.attempts.listByTask(taskId);
     assert.equal(history.outcome, "success");
@@ -165,6 +175,76 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
     assert.equal(store.tasks.list().outcome, "success");
     const allTasks = store.tasks.list();
     if (allTasks.outcome === "success") assert.equal(allTasks.value.length, 1);
+    runtime.close();
+  } finally {
+    try { store.close(); } catch { /* runtime may already have closed it */ }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+for (const [blockedBy, blockingDiagnostic, workspaceRevision, expectedResume] of [
+  // Same shape as gh-462 attempt 10: Pirx refused its own input; no worker output exists.
+  ["Pirx blocked in its own input check before the worker ran", () => createWorkerFailureDiagnostic("binding_mismatch", { stage: "worker_contract", field: "task.goal", violationCode: "forbidden_field" }), undefined, undefined],
+  // Same shape as gh-462 attempt 13: the repository's pre-push gate refused the worker's commit;
+  // the operator fixes the base, merges it into the worktree and resumes from that commit.
+  ["the repository rejected the push of the worker's commit", () => createWorkerFailureDiagnostic("push_rejected", { stage: "git_state", providerMessage: "git push failed (git_failure): pip-audit: vulnerabilities found" }), "d".repeat(40), "d".repeat(40)],
+  // After a hook fix outside the worktree, a plain unblock resumes from the commit Pirx saw refused.
+  ["the repository rejected a commit and the operator only fixed the hook", () => createWorkerFailureDiagnostic("push_rejected", { stage: "git_state", providerMessage: "git push failed (git_failure): error: failed to push some refs", observedCommit: "e".repeat(40) }), undefined, "e".repeat(40)],
+] as const) test(`an operator can retry a Task that ${blockedBy}`, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-production-preworker-unblock-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  let calls = 0; let clock = now; let resumedFrom: string | undefined;
+  try {
+    const created = createTask({ id: taskId, githubReference: issue, goal: "Retry after a Pirx input fix", scope: "production composition", acceptanceCriteria: ["same Task, new Attempt"], priority: 1, risk: "low", requiredCapabilities: ["repository.write", "git.push_assigned_branch"], createdAt: now });
+    assert.equal(created.ok, true); if (!created.ok) return;
+    assert.equal(store.tasks.create(created.value).outcome, "success");
+    assert.equal(store.selection.synchronize({ taskId, queueOrder: 1, dependencyState: "known", blockers: [], synchronizedAt: now }).outcome, "success");
+    const runtime = new ProductionRuntime(store, {
+      workerId: "pirx-worker", provider: "fake-claude", workerCapabilities: ["repository.write", "git.push_assigned_branch"],
+      repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }], worktreeParent: "/tmp/pirx-worktrees", leaseDurationMs: 60_000,
+      attemptIdFactory: (_task, ordinal) => `preworker-attempt-${ordinal}` as AttemptId,
+      workerAdapters: { get: () => ({ execute: async (request) => {
+        calls += 1;
+        if (calls === 1) throw new WorkerFailureError(blockingDiagnostic());
+        const resumed = store.attempts.get(request.attemptId); resumedFrom = resumed.outcome === "success" ? resumed.value.currentCommit : undefined;
+        return { kind: "worker_result" as const, schemaVersion: 1 as const, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED" as const, branch: request.workspace.branch, finalCommit: "c".repeat(40) };
+      } }) },
+      workspace: { provision: async (request) => ({ outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)) } }) },
+      resumeWorkspaceValidator: { validate: async () => ({ outcome: "valid", message: "exact durable workspace verified" }) },
+      clock: { now: () => clock },
+    });
+    assert.equal((await runtime.cycle()).outcome, "failed");
+    const blocked = store.tasks.get(taskId); assert.equal(blocked.outcome === "success" ? blocked.value.state : undefined, "blocked");
+    const first = store.attempts.listByTask(taskId); assert.equal(first.outcome, "success"); if (first.outcome !== "success") return;
+    const attempt = first.value[0]!;
+    assert.equal(isOperatorRetryableBlock(attempt), true);
+    // A contract failure on output Claude actually returned is not pre-worker.
+    if (attempt.state === "terminal" && attempt.diagnostic?.code === "binding_mismatch") assert.equal(isPreWorkerBlock({ ...attempt, diagnostic: { ...attempt.diagnostic, payloadDigest: "a".repeat(64) } }), false);
+    assert.notEqual((await runtime.cycle()).outcome, "started");
+    assert.equal(calls, 1);
+    assert.equal(unblockEscalatedTask(store, { taskId, operationId: "op-bad-revision", reason: "x", unblockedAt: now, workspaceRevision: "abc123" }).outcome, "invalid_record");
+    // A mistyped revision is corrected by unblocking again with the right one, before the Task resumes.
+    if (workspaceRevision !== undefined) assert.equal(unblockEscalatedTask(store, { taskId, operationId: "op-typo", reason: "Merged fixed base", unblockedAt: now, workspaceRevision: "f".repeat(40) }).outcome, "success");
+    const unblocked = unblockEscalatedTask(store, { taskId, operationId: "op-preworker-unblock", reason: "Input check fixed", unblockedAt: now, ...(workspaceRevision === undefined ? {} : { workspaceRevision }) });
+    assert.equal(unblocked.outcome, "success", JSON.stringify(unblocked));
+    // The resumed worker reads this Checkpoint: after a correction it names only the right commit.
+    const unblockCheckpoint = store.checkpoints.latestByTask(taskId);
+    const findings = unblockCheckpoint.outcome === "success" ? unblockCheckpoint.value.findings.join("\n") : "";
+    if (workspaceRevision !== undefined) { assert.match(findings, new RegExp(`moved the workspace to ${workspaceRevision}`, "u")); assert.doesNotMatch(findings, /f{40}/u); }
+    if (unblockCheckpoint.outcome === "success" && unblockCheckpoint.value.currentCommit !== undefined && expectedResume !== undefined) assert.equal(unblockCheckpoint.value.currentCommit, expectedResume);
+    clock = "2026-09-15T21:02:00.000Z" as UtcTimestamp;
+    const retried = await runtime.cycle();
+    assert.equal(retried.outcome, "started", JSON.stringify(retried));
+    assert.equal(calls, 2);
+    const history = store.attempts.listByTask(taskId);
+    if (history.outcome === "success") {
+      assert.equal(history.value.length, 2); assert.equal(history.value[1]?.predecessorAttemptId, attempt.id);
+      if (expectedResume !== undefined) {
+        assert.equal(resumedFrom, expectedResume);
+        const ownership = store.workspaces.getByTask(taskId);
+        assert.equal(ownership.outcome === "success" ? ownership.value.attemptId : undefined, history.value[1]?.id);
+      }
+    }
     runtime.close();
   } finally {
     try { store.close(); } catch { /* runtime may already have closed it */ }
@@ -263,4 +343,8 @@ test("blocks startup when a durable active Lease needs reconciliation and preven
     const stopped = await slow.runtime.shutdown(); assert.equal(stopped.outcome, "stopped"); assert.equal(slow.adapterCalls.value, 1);
     await first;
   } finally { slow.store.close(); await rm(slow.directory, { recursive: true, force: true }); }
+});
+
+test("worktree directory names avoid ':' so tools such as uv accept the path (gh-462)", () => {
+  assert.equal(worktreeDirectoryName("gh-462-5c40", "attempt:gh-462-5c40:12:1794315588056"), "pirx-gh-462-5c40-attempt-gh-462-5c40-12-1794315588056");
 });

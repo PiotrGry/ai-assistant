@@ -57,9 +57,11 @@ test("maps the complete code-worker grant to a bounded Claude profile", () => {
   assert.ok(value.value.allowedTools.includes("WebSearch"));
   assert.equal(value.value.disallowedTools.includes("WebFetch"), false);
   assert.equal(value.value.permissionMode, "dontAsk");
-  assert.equal(value.value.maxTurns, 16);
+  assert.equal(value.value.maxTurns, undefined);
   assert.ok(value.value.allowedTools.includes("Bash(pnpm check)"));
-  assert.ok(value.value.allowedTools.includes("Bash(git push origin HEAD:refs/heads/pirx/worker-profile)"));
+  // Pirx pushes; the worker may not.
+  assert.equal(value.value.allowedTools.some((item) => item.includes("git push") || item.includes(" push ")), false);
+  assert.ok(value.value.disallowedTools.includes("Bash(git push *)"));
   assert.ok(value.value.allowedTools.includes("Bash(git status:*)"));
   assert.ok(value.value.allowedTools.includes("Bash(git diff:*)"));
   assert.ok(value.value.allowedTools.includes("Bash(git add:*)"));
@@ -68,7 +70,6 @@ test("maps the complete code-worker grant to a bounded Claude profile", () => {
   assert.ok(value.value.allowedTools.includes(`Bash(git -C ${worktree} status:*)`));
   assert.ok(value.value.allowedTools.includes(`Bash(git -C ${worktree} commit -m:*)`));
   assert.ok(value.value.allowedTools.includes(`Bash(git -C ${worktree} rev-parse HEAD)`));
-  assert.ok(value.value.allowedTools.includes(`Bash(git -C ${worktree} push origin HEAD:refs/heads/pirx/worker-profile)`));
   assert.ok(value.value.disallowedTools.includes("mcp__*"));
   assert.ok(value.value.disallowedTools.includes("Bash(git reset *)"));
   assert.equal(value.value.allowedTools.some((item) => item === "Bash"), false);
@@ -84,8 +85,13 @@ test("maps the complete code-worker grant to a bounded Claude profile", () => {
   assert.equal(args.includes("--permission-mode"), true);
   assert.equal(args.includes("dontAsk"), true);
   assert.equal(args.includes("bypassPermissions"), false);
-  assert.equal(args.includes("--max-turns"), true);
-  assert.equal(args[args.indexOf("--max-turns") + 1], "16");
+  // No turn bound unless the repository configures a backstop.
+  assert.equal(args.includes("--max-turns"), false);
+  const bounded = buildClaudeCodeWorkerProfile(request(), { ...policy, maxTurns: 200 });
+  assert.equal(bounded.ok, true);
+  if (!bounded.ok) return;
+  const boundedArgs = buildClaudeWorkerArguments("worker-profile-correlation", "bounded prompt", buildWorkerResultSchema(request()), bounded.value);
+  assert.equal(boundedArgs[boundedArgs.indexOf("--max-turns") + 1], "200");
   assert.equal(args.filter((value) => value === "--allowedTools").length, 1);
   assert.equal(args.filter((value) => value === "--disallowedTools").length, 1);
   assert.match(args[args.indexOf("--allowedTools") + 1] ?? "", /Bash\(git status:\*\),Bash\(git diff:\*\)/u);

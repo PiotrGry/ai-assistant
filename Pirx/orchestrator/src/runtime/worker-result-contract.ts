@@ -1,4 +1,4 @@
-import type { AttemptId, TaskId } from "./task-domain.js";
+import { PULL_REQUEST_TEXT_LIMITS, type AttemptId, type TaskId } from "./task-domain.js";
 import { buildWorkerFailureDiagnosticSchema, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
 
 export const WORKER_RESULT_CONTRACT_SCHEMA_VERSION = 1 as const;
@@ -24,7 +24,7 @@ export interface WorkerResultBase {
 }
 
 export type WorkerResult =
-  | (WorkerResultBase & { readonly outcome: "CODE_PUSHED"; readonly branch: string; readonly finalCommit: string })
+  | (WorkerResultBase & { readonly outcome: "CODE_PUSHED"; readonly branch: string; readonly finalCommit: string; readonly pullRequestTitle?: string; readonly pullRequestBody?: string })
   | (WorkerResultBase & { readonly outcome: WorkerNonSuccessOutcome; readonly reason: string; readonly diagnostic?: WorkerFailureDiagnostic });
 
 export const WORKER_RESULT_COMMON_FIELDS = Object.freeze([
@@ -46,7 +46,7 @@ export interface WorkerResultVariantContract {
 const codePushed = Object.freeze({
   outcome: "CODE_PUSHED",
   required: Object.freeze([...WORKER_RESULT_COMMON_FIELDS, "branch", "finalCommit"]),
-  optional: Object.freeze([]),
+  optional: Object.freeze(["pullRequestTitle", "pullRequestBody"]),
   forbidden: Object.freeze(["reason", "diagnostic"]),
 } satisfies WorkerResultVariantContract);
 
@@ -54,7 +54,19 @@ const nonSuccess = (outcome: WorkerNonSuccessOutcome): WorkerResultVariantContra
   outcome,
   required: Object.freeze([...WORKER_RESULT_COMMON_FIELDS, "reason"]),
   optional: Object.freeze(["diagnostic"]),
-  forbidden: Object.freeze(["branch", "finalCommit"]),
+  forbidden: Object.freeze(["branch", "finalCommit", "pullRequestTitle", "pullRequestBody"]),
+});
+
+/**
+ * What a code worker returns on success. The worker only commits; Pirx pushes
+ * the reported commit and records the Attempt as CODE_PUSHED.
+ */
+export const WORKER_COMMITTED_OUTCOME = "CODE_COMMITTED" as const;
+const codeCommitted = Object.freeze({
+  outcome: WORKER_COMMITTED_OUTCOME,
+  required: Object.freeze([...WORKER_RESULT_COMMON_FIELDS, "branch", "finalCommit", "pullRequestTitle", "pullRequestBody"]),
+  optional: Object.freeze([]),
+  forbidden: Object.freeze(["reason", "diagnostic"]),
 });
 
 /** The single semantic matrix used by validation, CLI projection and instructions. */
@@ -73,6 +85,8 @@ export const WORKER_RESULT_ALLOWED_FIELDS = Object.freeze([
   "finalCommit",
   "reason",
   "diagnostic",
+  "pullRequestTitle",
+  "pullRequestBody",
 ] as const);
 
 export function workerResultVariant(outcome: unknown): WorkerResultVariantContract | undefined {
@@ -86,7 +100,7 @@ function fields(fields: readonly string[]): string {
   return `${fields.slice(0, -1).join(", ")}, and ${fields[fields.length - 1]}`;
 }
 
-function variantInstruction(variant: WorkerResultVariantContract): string {
+function variantInstruction(variant: { readonly outcome: string; readonly required: readonly string[]; readonly optional: readonly string[]; readonly forbidden: readonly string[] }): string {
   const conditionalRequired = variant.required.filter((field) => !WORKER_RESULT_COMMON_FIELDS.includes(field as (typeof WORKER_RESULT_COMMON_FIELDS)[number]));
   const requiredText = conditionalRequired.length === 0 ? "include no variant-specific fields" : `include ${fields(conditionalRequired)}`;
   const forbiddenText = variant.forbidden.length === 0 ? "omit no fields" : `omit ${fields(variant.forbidden)}`;
@@ -101,7 +115,9 @@ export function workerResultContractInstruction(): string {
     .filter((field) => !WORKER_RESULT_COMMON_FIELDS.includes(field as (typeof WORKER_RESULT_COMMON_FIELDS)[number])))];
   return [
     "FINAL RESPONSE: return exactly one JSON object matching the supplied WorkerResult schema.",
-    ...WORKER_RESULT_VARIANTS.map(variantInstruction),
+    "On success commit your change on the assigned branch and do not push: Pirx pushes finalCommit and opens the pull request from pullRequestTitle and pullRequestBody (Markdown: what changed, why, how it was tested, open risks).",
+    variantInstruction(codeCommitted),
+    ...WORKER_RESULT_VARIANTS.filter((variant) => variant.outcome !== "CODE_PUSHED").map(variantInstruction),
     `For every non-success outcome include ${fields(nonSuccessRequired)}.`,
     "Do not wrap the JSON in Markdown or add commentary.",
   ].join(" ");
@@ -136,10 +152,12 @@ export function buildWorkerResultSchema(request: WorkerResultSchemaRequest): unk
     description: workerResultContractInstruction(),
     properties: {
       ...baseProperties,
-      outcome: { enum: [...WORKER_RESULT_OUTCOMES] },
+      outcome: { enum: [WORKER_COMMITTED_OUTCOME, ...WORKER_RESULT_OUTCOMES.filter((outcome) => outcome !== "CODE_PUSHED")] },
       branch: { type: "string", const: request.workspace.branch },
-      finalCommit: { type: "string", pattern: "^[0-9a-fA-F]{4,64}$" },
+      finalCommit: { type: "string", pattern: "^[0-9a-fA-F]{40}$", description: "Full 40-character SHA of HEAD (git rev-parse HEAD)." },
       reason: { type: "string", minLength: 1, maxLength: 1_000 },
+      pullRequestTitle: { type: "string", minLength: 1, maxLength: PULL_REQUEST_TEXT_LIMITS.title },
+      pullRequestBody: { type: "string", minLength: 1, maxLength: PULL_REQUEST_TEXT_LIMITS.body },
       diagnostic,
     },
   });

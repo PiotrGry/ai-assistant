@@ -77,7 +77,7 @@ test("upgrades an existing control record conservatively", async () => {
   let store = RuntimeSqliteStore.open({ filename });
   try {
     assert.equal(new OrchestratorControlRepository(store).heartbeat("running", t0).outcome, "success");
-    store.database.exec("DROP INDEX runtime_work_intakes_state; DROP TABLE runtime_work_intakes; DELETE FROM runtime_schema_migrations WHERE version = 36; DROP TABLE runtime_operator_decisions; DROP INDEX runtime_operator_questions_task; DROP TABLE runtime_operator_questions; DELETE FROM runtime_schema_migrations WHERE version = 35; DROP INDEX runtime_agent_questions_attempt; ALTER TABLE runtime_agent_questions DROP COLUMN failure_code; ALTER TABLE runtime_agent_questions DROP COLUMN owner_pid; ALTER TABLE runtime_agent_questions DROP COLUMN owner_host; DELETE FROM runtime_schema_migrations WHERE version = 34; ALTER TABLE runtime_orchestrator_control DROP COLUMN diagnostic_incomplete; ALTER TABLE runtime_orchestrator_control DROP COLUMN diagnostic_sequence; DELETE FROM runtime_schema_migrations WHERE version = 33");
+    store.database.exec("ALTER TABLE runtime_attempts DROP COLUMN pull_request_body; ALTER TABLE runtime_attempts DROP COLUMN pull_request_title; DELETE FROM runtime_schema_migrations WHERE version = 37; DROP INDEX runtime_work_intakes_state; DROP TABLE runtime_work_intakes; DELETE FROM runtime_schema_migrations WHERE version = 36; DROP TABLE runtime_operator_decisions; DROP INDEX runtime_operator_questions_task; DROP TABLE runtime_operator_questions; DELETE FROM runtime_schema_migrations WHERE version = 35; DROP INDEX runtime_agent_questions_attempt; ALTER TABLE runtime_agent_questions DROP COLUMN failure_code; ALTER TABLE runtime_agent_questions DROP COLUMN owner_pid; ALTER TABLE runtime_agent_questions DROP COLUMN owner_host; DELETE FROM runtime_schema_migrations WHERE version = 34; ALTER TABLE runtime_orchestrator_control DROP COLUMN diagnostic_incomplete; ALTER TABLE runtime_orchestrator_control DROP COLUMN diagnostic_sequence; DELETE FROM runtime_schema_migrations WHERE version = 33");
     store.close();
     store = RuntimeSqliteStore.open({ filename });
     const status = new OrchestratorControlRepository(store).status(t1, 120_000);
@@ -215,5 +215,28 @@ test("returns bounded active and next Queue entity summaries without task conten
       assert.equal(JSON.stringify(result.value).includes("do not expose"), false);
       assert.equal(JSON.stringify(result.value).includes("private operator reason"), false);
     }
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("pruning drops only week-old routine heartbeats and keeps every failure", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-diagnostic-prune-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  try {
+    const now = "2026-11-14T12:00:00.000Z" as UtcTimestamp;
+    const old = "2026-11-06T12:00:00.000Z";
+    const recent = "2026-11-10T12:00:00.000Z";
+    const insert = store.database.prepare("INSERT INTO runtime_orchestrator_diagnostics (sequence, recorded_at, event, outcome, diagnostic_json) VALUES (?, ?, ?, ?, '{}')");
+    insert.run(1, old, "cycle", "idle");
+    insert.run(2, old, "observability", "replayed");
+    insert.run(3, old, "cycle", "failed");
+    insert.run(4, old, "queue", "invalid_snapshot");
+    insert.run(5, recent, "cycle", "idle");
+    // Pruning runs on every 500th row; the next insert is sequence 500.
+    insert.run(499, recent, "control", "running");
+    const control = new OrchestratorControlRepository(store);
+    const entry = control.recordDiagnostic({ schemaVersion: 1, event: "cycle", outcome: "idle" }, now);
+    assert.equal(entry.outcome === "success" ? entry.value : undefined, 500);
+    const left = (store.database.prepare("SELECT sequence FROM runtime_orchestrator_diagnostics ORDER BY sequence").all() as Array<{ sequence: number }>).map((row) => row.sequence);
+    assert.deepEqual(left, [3, 4, 5, 499, 500]);
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });

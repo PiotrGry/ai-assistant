@@ -1,11 +1,12 @@
 import { diagnosticContext } from "../runtime/diagnostic-context.js";
 import { spawn, type ChildProcess } from "node:child_process";
+import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
-import type { ClaudeCodeWorkerProfile } from "./worker-profile.js";
+import { CLAUDE_CODE_WORKER_PROFILE_LIMITS, type ClaudeCodeWorkerProfile } from "./worker-profile.js";
 import { createWorkerFailureDiagnostic, type WorkerFailureCode } from "../runtime/worker-diagnostic.js";
 import { extractProviderRecoveryMetadata } from "../runtime/worker-recovery.js";
 import type { WorkerProviderRecoveryMetadata } from "../runtime/worker-availability.js";
@@ -68,6 +69,8 @@ export interface ClaudeStructuredRequest extends ClaudeRoundTripRequest {
   readonly prompt: string;
   readonly responseSchema: unknown;
   readonly workerProfile?: ClaudeCodeWorkerProfile;
+  /** Absolute path prefix; every raw stdout/stderr byte is appended to `<prefix>.stdout.jsonl` / `<prefix>.stderr.log`. */
+  readonly transcriptPath?: string;
 }
 
 export interface ClaudeRoundTripSuccess {
@@ -115,6 +118,8 @@ export interface ClaudeCodeCliRunnerOptions {
   /** Test seam for the fail-closed Claude Code compatibility check. */
   readonly versionProbe?: ClaudeVersionProbe;
   readonly terminationGraceMs?: number;
+  /** Test seam for the per-Attempt transcript bound. */
+  readonly maxTranscriptBytes?: number;
 }
 
 interface ClaudeJsonSchema {
@@ -198,7 +203,7 @@ export function buildClaudeStructuredArguments(requestId: string, prompt: string
 }
 export function buildClaudeWorkerArguments(requestId: string, prompt: string, responseSchema: unknown, profile: ClaudeCodeWorkerProfile): readonly string[] {
   const schema = JSON.stringify(responseSchema);
-  if (schema === undefined || Buffer.byteLength(schema, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || profile.permissionMode !== "dontAsk" || !Number.isSafeInteger(profile.maxTurns) || profile.maxTurns <= 1 || profile.maxTurns > 32 || profile.allowedTools.some((value) => /[\u0000-\u001f\u007f;&|<>`$\\]/u.test(value)) || profile.disallowedTools.some((value) => /[\u0000-\u001f\u007f]/u.test(value)) || JSON.stringify(profile).includes("bypassPermissions")) throw new RangeError("Claude code-worker profile is unsafe or invalid.");
+  if (schema === undefined || Buffer.byteLength(schema, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || profile.permissionMode !== "dontAsk" || (profile.maxTurns !== undefined && (!Number.isSafeInteger(profile.maxTurns) || profile.maxTurns <= 1 || profile.maxTurns > CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxTurns)) || profile.allowedTools.some((value) => /[\u0000-\u001f\u007f;&|<>`$\\]/u.test(value)) || profile.disallowedTools.some((value) => /[\u0000-\u001f\u007f]/u.test(value)) || JSON.stringify(profile).includes("bypassPermissions")) throw new RangeError("Claude code-worker profile is unsafe or invalid.");
   // Restricted mode ignores user/project customizations and confines file
   // tools. The inline strict settings add fail-closed file and process-level
   // isolation for the exact invocation without mutating operator config.
@@ -212,7 +217,7 @@ export function buildClaudeWorkerArguments(requestId: string, prompt: string, re
   if (profile.disallowedTools.length > 0) arguments_.push("--disallowedTools", profile.disallowedTools.join(","));
   // stream-json emits one event per agent step, so the idle watchdog sees
   // progress; the final "result" event has the same envelope as json mode.
-  arguments_.push("--permission-mode", profile.permissionMode, "--disable-slash-commands", "--no-session-persistence", "--max-turns", String(profile.maxTurns), "--output-format", "stream-json", "--verbose", "--json-schema", schema, prompt);
+  arguments_.push("--permission-mode", profile.permissionMode, "--disable-slash-commands", "--no-session-persistence", ...(profile.maxTurns === undefined ? [] : ["--max-turns", String(profile.maxTurns)]), "--output-format", "stream-json", "--verbose", "--json-schema", schema, prompt);
   return Object.freeze(arguments_);
 }
 function buildEnvironment(source: NodeJS.ProcessEnv, additional: Readonly<Record<string, string | undefined>> | undefined): NodeJS.ProcessEnv {
@@ -264,6 +269,20 @@ function validateStructuredOutput(value: unknown, requestId: string): value is {
   return value.requestId === requestId && typeof value.acknowledgement === "string" && value.acknowledgement.length > 0 && value.acknowledgement.length <= 256;
 }
 
+/** Per-Attempt raw transcript bound; past it Pirx writes a marker and stops recording, the worker keeps running. */
+export const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
+
+interface ExecuteInput {
+  readonly requestId: string; readonly startedAt: number; readonly workingDirectory: string;
+  readonly signal: AbortSignal | undefined; readonly timeoutMs: number;
+  readonly maxStdoutBytes: number; readonly maxStderrBytes: number;
+  readonly arguments: readonly string[];
+  readonly structuredOutput?: boolean;
+  /** stdout is stream-json: keep only the final result line, bound each line. */
+  readonly stream?: boolean;
+  readonly transcriptPath?: string;
+}
+
 export class ClaudeCodeCliRunner {
   private readonly executable: string;
   private readonly tempParentDirectory: string;
@@ -274,6 +293,7 @@ export class ClaudeCodeCliRunner {
   private readonly spawnProcess: ClaudeSpawn;
   private readonly versionProbe: ClaudeVersionProbe;
   private readonly terminationGraceMs: number;
+  private readonly maxTranscriptBytes: number;
   private workerVersionCheck: Promise<{ readonly ok: true; readonly version: string } | { readonly ok: false; readonly outcome: "claude_not_installed" | "unsupported_version" | "process_error"; readonly evidence: string }> | undefined;
 
   public constructor(options: ClaudeCodeCliRunnerOptions = {}) {
@@ -286,6 +306,7 @@ export class ClaudeCodeCliRunner {
     this.spawnProcess = options.spawnProcess ?? ((file, args, spawnOptions) => spawn(file, [...args], spawnOptions));
     this.versionProbe = options.versionProbe ?? probeClaudeVersion;
     this.terminationGraceMs = boundedInteger(options.terminationGraceMs, CLAUDE_TERMINATION_GRACE_MS, 5_000) ?? CLAUDE_TERMINATION_GRACE_MS;
+    this.maxTranscriptBytes = boundedInteger(options.maxTranscriptBytes, MAX_TRANSCRIPT_BYTES, MAX_TRANSCRIPT_BYTES) ?? MAX_TRANSCRIPT_BYTES;
   }
 
   public async run(request: ClaudeRoundTripRequest = {}): Promise<ClaudeRoundTripResult> {
@@ -366,7 +387,7 @@ export class ClaudeCodeCliRunner {
       const arguments_ = request.workerProfile === undefined
         ? buildClaudeStructuredArguments(request.requestId, request.prompt, request.responseSchema)
         : buildClaudeWorkerArguments(request.requestId, request.prompt, request.responseSchema, request.workerProfile);
-      return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: arguments_, structuredOutput: true, stream: request.workerProfile !== undefined }) as ClaudeStructuredResult;
+      return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: arguments_, structuredOutput: true, stream: request.workerProfile !== undefined, ...(request.transcriptPath === undefined ? {} : { transcriptPath: request.transcriptPath }) }) as ClaudeStructuredResult;
     } catch { return failure("process_error", request.requestId, startedAt, null); }
   }
 
@@ -387,15 +408,27 @@ export class ClaudeCodeCliRunner {
     return this.workerVersionCheck;
   }
 
-  private async execute(input: {
-    readonly requestId: string; readonly startedAt: number; readonly workingDirectory: string;
-    readonly signal: AbortSignal | undefined; readonly timeoutMs: number;
-    readonly maxStdoutBytes: number; readonly maxStderrBytes: number;
-    readonly arguments: readonly string[];
-    readonly structuredOutput?: boolean;
-    /** stdout is stream-json: keep only the final result line, bound each line. */
-    readonly stream?: boolean;
-  }): Promise<ClaudeRoundTripResult> {
+  private async execute(input: ExecuteInput): Promise<ClaudeRoundTripResult> {
+    // Nothing the worker says may be lost: no transcript file, no worker.
+    let transcript: { stdout: number; stderr: number } | undefined;
+    if (input.transcriptPath !== undefined) {
+      if (!isAbsolute(input.transcriptPath)) return failure("process_error", input.requestId, input.startedAt, null);
+      try {
+        mkdirSync(dirname(input.transcriptPath), { recursive: true, mode: 0o700 });
+        const stdoutFd = openSync(`${input.transcriptPath}.stdout.jsonl`, "a", 0o600);
+        try { transcript = { stdout: stdoutFd, stderr: openSync(`${input.transcriptPath}.stderr.log`, "a", 0o600) }; }
+        catch (error: unknown) { closeSync(stdoutFd); throw error; }
+      } catch (error: unknown) {
+        const base = failure("process_error", input.requestId, input.startedAt, null);
+        const code = isRecord(error) && typeof error.code === "string" ? error.code : "unknown";
+        return { ...base, diagnostic: createWorkerFailureDiagnostic(base.diagnostic.code, { ...base.diagnostic, stage: "process", providerMessage: `Worker transcript ${input.transcriptPath} could not be opened (${code}); the worker was not started.` }) };
+      }
+    }
+    try { return await this.executeProcess(input, transcript); }
+    finally { if (transcript !== undefined) { closeSync(transcript.stdout); closeSync(transcript.stderr); } }
+  }
+
+  private async executeProcess(input: ExecuteInput, transcript: { stdout: number; stderr: number } | undefined): Promise<ClaudeRoundTripResult> {
     const stdoutChunks: Buffer[] = [];
     let idleTimer: NodeJS.Timeout | undefined;
     // Silence, not elapsed time, ends a worker: any output restarts the window.
@@ -411,7 +444,9 @@ export class ClaudeCodeCliRunner {
     let outputLimitExceeded = false;
     let terminationStarted = false;
     let terminationTimer: NodeJS.Timeout | undefined;
-    let trigger: "timeout" | "cancelled" | "invalid_output" | undefined;
+    let trigger: "timeout" | "cancelled" | "invalid_output" | "process_error" | undefined;
+    let transcriptBytes = 0;
+    let transcriptError: string | undefined;
     let child: ChildProcess;
     const isolatedGroup = this.ownsProcessGroup;
     const signalChild = (signal: NodeJS.Signals): void => {
@@ -459,6 +494,18 @@ export class ClaudeCodeCliRunner {
     const append = (target: "stdout" | "stderr", value: unknown): void => {
       const chunk = asBuffer(value);
       armIdle();
+      // ponytail: synchronous append, bounded per Attempt; a WriteStream if worker output ever stalls the loop.
+      if (transcript !== undefined && transcriptBytes <= this.maxTranscriptBytes) {
+        const fd = target === "stdout" ? transcript.stdout : transcript.stderr;
+        try {
+          transcriptBytes += chunk.byteLength;
+          if (transcriptBytes <= this.maxTranscriptBytes) writeSync(fd, chunk);
+          else writeSync(fd, `\n[pirx: transcript truncated after ${this.maxTranscriptBytes} bytes]\n`);
+        } catch (error: unknown) {
+          transcriptError = isRecord(error) && typeof error.code === "string" ? error.code : "unknown";
+          if (trigger === undefined) trigger = "process_error"; terminate(); return;
+        }
+      }
       if (target === "stdout" && input.stream === true) { appendStream(chunk); return; }
       if (target === "stdout") {
         const remaining = input.maxStdoutBytes - stdoutBytes;
@@ -504,7 +551,7 @@ export class ClaudeCodeCliRunner {
     const failed = (...args: Parameters<typeof failure>): ClaudeRoundTripFailure => {
       const result = failure(...args);
       const envelope = isRecord(parsed) ? parsed : {};
-      const evidence = [envelope.subtype, envelope.errors, envelope.error, envelope.message, stderr].filter((value) => value !== undefined && value !== "").map((value) => typeof value === "string" ? value : JSON.stringify(diagnosticContext(value))).join("\n");
+      const evidence = [envelope.subtype, envelope.errors, envelope.error, envelope.message, envelope.is_error === true ? envelope.result : undefined, transcriptError === undefined ? undefined : `Worker transcript write failed (${transcriptError}).`, stderr].filter((value) => value !== undefined && value !== "").map((value) => typeof value === "string" ? value : JSON.stringify(diagnosticContext(value))).join("\n");
       return { ...result, diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, { ...result.diagnostic, stage: "process", ...(evidence ? { providerMessage: evidence } : {}), ...(outputLimitExceeded ? { providerMessageTruncated: true } : {}) }) };
     };
     if (trigger !== undefined) return failed(trigger, input.requestId, input.startedAt, exitCode);

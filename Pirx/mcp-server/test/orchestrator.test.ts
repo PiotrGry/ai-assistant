@@ -290,9 +290,19 @@ test("MCP Task history pages persisted Attempts and resolves the repository expl
     return JSON.parse(JSON.stringify(reply.structuredContent));
   };
   try {
-    const first = await lookup({ repository: "pirx/first", issueNumber: 42, limit: 1 });
-    assert.equal(first.task.id, "task-one");
-    assert.equal(first.task.state, "completed");
+    // Without afterOrdinal the newest Attempt comes first, with what CI lookups need.
+    const latest = await lookup({ repository: "pirx/first", issueNumber: 42, limit: 1 });
+    assert.equal(latest.task.id, "task-one");
+    assert.equal(latest.task.state, "completed");
+    assert.equal(latest.totalAttempts, 2);
+    // The newest page cannot page forward; it says older Attempts exist and where to start.
+    assert.equal(latest.olderAttempts, 1);
+    assert.equal(latest.olderFromAfterOrdinal, 0);
+    assert.equal(latest.attempts[0].id, "attempt-two");
+    assert.equal(latest.attempts[0].finalCommit, "a".repeat(40));
+    assert.equal(latest.attempts[0].branch, "pirx/task-history");
+    assert.equal(latest.nextAfterOrdinal, undefined);
+    const first = await lookup({ taskId: latest.task.id, afterOrdinal: 0, limit: 1 });
     assert.equal(first.attempts[0].correlationId, "fixture-correlation");
     assert.equal(first.nextAfterOrdinal, 1);
     const second = await lookup({ taskId: first.task.id, afterOrdinal: first.nextAfterOrdinal, limit: 1 });

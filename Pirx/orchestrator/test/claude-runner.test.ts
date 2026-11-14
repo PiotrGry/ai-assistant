@@ -63,6 +63,7 @@ if (mode === "stream-active") {
     if (step === 6) { clearInterval(timer); process.stdout.write(JSON.stringify(envelope({ ok: true })) + "\\n"); process.exit(0); }
   }, 40);
 }
+if (mode === "stream-error") { process.stdout.write(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: "Tool loop aborted: worktree index.lock exists" }) + "\\n"); process.exit(1); }
 if (mode === "stream-silent") { process.stdout.write(JSON.stringify({ type: "system", subtype: "init" }) + "\\n"); setInterval(() => {}, 1000); }
 if (mode === "delay") setTimeout(() => emit(envelope({ requestId, acknowledgement: "hello world acknowledged" })), 1000);
 `;
@@ -359,5 +360,54 @@ test("code workers run while they stream events and stop only after an idle wind
     const silent = await instance("stream-silent").runStructured({ requestId: "stream-silent", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root), timeoutMs: 100 });
     assert.equal(silent.outcome, "timeout");
     assert.equal(silent.diagnostic.code, "timeout");
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("code workers persist every raw stream byte, including the final result, to the transcript", async () => {
+  const value = await fixture();
+  try {
+    const transcriptPath = join(value.root, "logs", "task-1", "attempt-1");
+    const result = await new ClaudeCodeCliRunner({
+      executable: value.executable,
+      environment: { PATH: process.env.PATH, HOME: process.env.HOME },
+      additionalEnvironment: { PIRX_FAKE_MODE: "stream-active" },
+      versionProbe: async () => `${MINIMUM_CLAUDE_CODE_WORKER_VERSION} (Claude Code)`,
+    }).runStructured({ requestId: "stream-transcript", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root), timeoutMs: 1_000, maxStdoutBytes: 1_024, transcriptPath });
+    assert.equal(result.outcome, "success", JSON.stringify(result));
+    const lines = (await readFile(`${transcriptPath}.stdout.jsonl`, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { type: string; padding?: string });
+    // All 6 events (the oversized one too) plus the result envelope the contract checks later.
+    assert.equal(lines.length, 7);
+    assert.equal(lines[1]?.padding?.length, 4096);
+    assert.equal(lines[6]?.type, "result");
+    assert.equal(await readFile(`${transcriptPath}.stderr.log`, "utf8"), "");
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("a Claude error result keeps its human text in the diagnostic", async () => {
+  const value = await fixture();
+  try {
+    const result = await new ClaudeCodeCliRunner({ executable: value.executable, environment: { PATH: process.env.PATH, HOME: process.env.HOME }, additionalEnvironment: { PIRX_FAKE_MODE: "stream-error" }, versionProbe: async () => `${MINIMUM_CLAUDE_CODE_WORKER_VERSION} (Claude Code)` })
+      .runStructured({ requestId: "stream-error", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root), timeoutMs: 1_000, maxStdoutBytes: 1_024 });
+    assert.notEqual(result.outcome, "success");
+    if (result.outcome !== "success") assert.match(result.diagnostic.providerMessage ?? "", /worktree index\.lock exists/u);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("transcripts stop at their bound with a marker, and an unopenable transcript names its path", async () => {
+  const value = await fixture();
+  try {
+    const runner = (maxTranscriptBytes?: number) => new ClaudeCodeCliRunner({ executable: value.executable, environment: { PATH: process.env.PATH, HOME: process.env.HOME }, additionalEnvironment: { PIRX_FAKE_MODE: "stream-active" }, versionProbe: async () => `${MINIMUM_CLAUDE_CODE_WORKER_VERSION} (Claude Code)`, ...(maxTranscriptBytes === undefined ? {} : { maxTranscriptBytes }) });
+    const transcriptPath = join(value.root, "logs", "bounded");
+    const bounded = await runner(1_000).runStructured({ requestId: "bounded-transcript", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root), timeoutMs: 1_000, maxStdoutBytes: 1_024, transcriptPath });
+    // The worker is not stopped by the bound; only the recording is.
+    assert.equal(bounded.outcome, "success", JSON.stringify(bounded));
+    const text = await readFile(`${transcriptPath}.stdout.jsonl`, "utf8");
+    assert.ok(text.length < 1_000 + 200, String(text.length));
+    assert.match(text, /\[pirx: transcript truncated after 1000 bytes\]/u);
+    // A regular file where the directory should be: the worker never starts and the operator sees why.
+    await writeFile(join(value.root, "blocked"), "file");
+    const unopenable = await runner().runStructured({ requestId: "unopenable", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root), timeoutMs: 1_000, maxStdoutBytes: 1_024, transcriptPath: join(value.root, "blocked", "attempt") });
+    assert.equal(unopenable.outcome, "process_error");
+    if (unopenable.outcome === "process_error") assert.match(unopenable.diagnostic.providerMessage ?? "", /blocked\/attempt could not be opened \(E[A-Z]+\)/u);
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });

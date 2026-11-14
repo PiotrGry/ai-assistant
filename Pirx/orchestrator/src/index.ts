@@ -484,6 +484,8 @@ export {
   RESUME_ESCALATION_SCHEMA_VERSION,
   ResumeEscalationCoordinator,
   isOperatorUnblockCheckpoint,
+  isPreWorkerBlock,
+  isOperatorRetryableBlock,
   operatorUnblockCheckpointId,
   unblockEscalatedTask,
   type OperatorUnblockAcceptance,
@@ -947,6 +949,7 @@ export {
 } from "./runtime/claude-input.js";
 export {
   WORKSPACE_PROVISION_LIMITS,
+  worktreeDirectoryName,
   WORKSPACE_PROVISION_SCHEMA_VERSION,
   GitWorkspaceCommandRunner,
   WorkspaceProvisioner,
