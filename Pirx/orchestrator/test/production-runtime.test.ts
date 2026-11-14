@@ -182,12 +182,14 @@ test("resumes the same quota-failed Task with a new leased Attempt after cooldow
   }
 });
 
-for (const [blockedBy, blockingDiagnostic, workspaceRevision] of [
+for (const [blockedBy, blockingDiagnostic, workspaceRevision, expectedResume] of [
   // Same shape as gh-462 attempt 10: Pirx refused its own input; no worker output exists.
-  ["Pirx blocked in its own input check before the worker ran", () => createWorkerFailureDiagnostic("binding_mismatch", { stage: "worker_contract", field: "task.goal", violationCode: "forbidden_field" }), undefined],
+  ["Pirx blocked in its own input check before the worker ran", () => createWorkerFailureDiagnostic("binding_mismatch", { stage: "worker_contract", field: "task.goal", violationCode: "forbidden_field" }), undefined, undefined],
   // Same shape as gh-462 attempt 13: the repository's pre-push gate refused the worker's commit;
   // the operator fixes the base, merges it into the worktree and resumes from that commit.
-  ["the repository rejected the push of the worker's commit", () => createWorkerFailureDiagnostic("push_rejected", { stage: "git_state", providerMessage: "git push failed (git_failure): pip-audit: vulnerabilities found" }), "d".repeat(40)],
+  ["the repository rejected the push of the worker's commit", () => createWorkerFailureDiagnostic("push_rejected", { stage: "git_state", providerMessage: "git push failed (git_failure): pip-audit: vulnerabilities found" }), "d".repeat(40), "d".repeat(40)],
+  // After a hook fix outside the worktree, a plain unblock resumes from the commit Pirx saw refused.
+  ["the repository rejected a commit and the operator only fixed the hook", () => createWorkerFailureDiagnostic("push_rejected", { stage: "git_state", providerMessage: "git push failed (git_failure): error: failed to push some refs", observedCommit: "e".repeat(40) }), undefined, "e".repeat(40)],
 ] as const) test(`an operator can retry a Task that ${blockedBy}`, async () => {
   const directory = await mkdtemp(join(tmpdir(), "pirx-production-preworker-unblock-"));
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
@@ -221,8 +223,15 @@ for (const [blockedBy, blockingDiagnostic, workspaceRevision] of [
     assert.notEqual((await runtime.cycle()).outcome, "started");
     assert.equal(calls, 1);
     assert.equal(unblockEscalatedTask(store, { taskId, operationId: "op-bad-revision", reason: "x", unblockedAt: now, workspaceRevision: "abc123" }).outcome, "invalid_record");
+    // A mistyped revision is corrected by unblocking again with the right one, before the Task resumes.
+    if (workspaceRevision !== undefined) assert.equal(unblockEscalatedTask(store, { taskId, operationId: "op-typo", reason: "Merged fixed base", unblockedAt: now, workspaceRevision: "f".repeat(40) }).outcome, "success");
     const unblocked = unblockEscalatedTask(store, { taskId, operationId: "op-preworker-unblock", reason: "Input check fixed", unblockedAt: now, ...(workspaceRevision === undefined ? {} : { workspaceRevision }) });
     assert.equal(unblocked.outcome, "success", JSON.stringify(unblocked));
+    // The resumed worker reads this Checkpoint: after a correction it names only the right commit.
+    const unblockCheckpoint = store.checkpoints.latestByTask(taskId);
+    const findings = unblockCheckpoint.outcome === "success" ? unblockCheckpoint.value.findings.join("\n") : "";
+    if (workspaceRevision !== undefined) { assert.match(findings, new RegExp(`moved the workspace to ${workspaceRevision}`, "u")); assert.doesNotMatch(findings, /f{40}/u); }
+    if (unblockCheckpoint.outcome === "success" && unblockCheckpoint.value.currentCommit !== undefined && expectedResume !== undefined) assert.equal(unblockCheckpoint.value.currentCommit, expectedResume);
     clock = "2026-09-15T21:02:00.000Z" as UtcTimestamp;
     const retried = await runtime.cycle();
     assert.equal(retried.outcome, "started", JSON.stringify(retried));
@@ -230,8 +239,8 @@ for (const [blockedBy, blockingDiagnostic, workspaceRevision] of [
     const history = store.attempts.listByTask(taskId);
     if (history.outcome === "success") {
       assert.equal(history.value.length, 2); assert.equal(history.value[1]?.predecessorAttemptId, attempt.id);
-      if (workspaceRevision !== undefined) {
-        assert.equal(resumedFrom, workspaceRevision);
+      if (expectedResume !== undefined) {
+        assert.equal(resumedFrom, expectedResume);
         const ownership = store.workspaces.getByTask(taskId);
         assert.equal(ownership.outcome === "success" ? ownership.value.attemptId : undefined, history.value[1]?.id);
       }

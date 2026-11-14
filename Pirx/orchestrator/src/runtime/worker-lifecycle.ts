@@ -4,11 +4,11 @@ import { transitionAttempt, transitionTask, type AttemptSnapshot, type TaskSnaps
 import { invokeWorker, validateWorkerRequest, type WorkerPort, type WorkerRequest, type WorkerResult } from "./worker-contract.js";
 import { createWorkerFailureDiagnostic } from "./worker-diagnostic.js";
 import type { RuntimeSqliteStore } from "./sqlite.js";
+import { containsSecretShapedValue } from "./claude-input.js";
 
 const INVOCATION_STARTED = "worker invocation started";
 const SAFE_REASON = "Worker returned a bounded terminal result.";
 const UNSAFE_RESULT = "Worker result was rejected as unsafe.";
-const SECRET_PATTERN = /(?:bearer\s+|authorization\s*:|password\s*=|token\s*=|secret\s*=|private[_ -]?key|connection[_ -]?string)/iu;
 
 export type WorkerLifecycleOutcome = "terminal_recorded" | "replayed" | "projection_pending" | "reconciliation_required" | "invalid_request" | "conflict" | "cancelled" | "storage_error";
 export interface WorkerLifecycleEvent { readonly eventId: string; readonly taskId: string; readonly attemptId: string; readonly sequence: number; readonly eventType: "attempt_started" | "attempt_result"; readonly timestamp: UtcTimestamp; readonly summary: string; readonly branch?: string; readonly commit?: string; }
@@ -37,7 +37,8 @@ function resultFromAttempt(attempt: AttemptSnapshot): WorkerResult | undefined {
     : { ...base, outcome: attempt.result, reason: attempt.blockingReason ?? SAFE_REASON, ...(attempt.diagnostic === undefined ? {} : { diagnostic: attempt.diagnostic }) };
 }
 function safeWorkerResult(result: WorkerResult): WorkerResult {
-  if (!SECRET_PATTERN.test(JSON.stringify(result))) return result;
+  // Same secret-shaped check as the adapter: PR prose may name "connection string" or "private key".
+  if (!containsSecretShapedValue(JSON.stringify(result))) return result;
   return { kind: "worker_result", schemaVersion: 1, taskId: result.taskId, attemptId: result.attemptId, correlationId: result.correlationId, outcome: "UNKNOWN", reason: UNSAFE_RESULT };
 }
 function checkpointTrigger(result: WorkerResult): CheckpointInput["trigger"] {

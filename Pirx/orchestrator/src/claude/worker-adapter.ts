@@ -56,6 +56,14 @@ export type ClaudeCodeProcessResult =
 
 const DEFAULT_RESPONSE_SCHEMA = Object.freeze({ type: "object", additionalProperties: true });
 
+function withoutPirxObservations(value: unknown): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  const diagnostic = (value as { diagnostic?: unknown }).diagnostic;
+  if (typeof diagnostic !== "object" || diagnostic === null || !("observedCommit" in diagnostic)) return value;
+  const { observedCommit: _pirxOnly, ...rest } = diagnostic as Record<string, unknown>;
+  return { ...(value as Record<string, unknown>), diagnostic: rest };
+}
+
 function contractDiagnostic(value: unknown, field: string | undefined, code: "worker_contract_mismatch" | "binding_mismatch"): ReturnType<typeof createWorkerFailureDiagnostic> {
   let serialized = "";
   let fieldNames: readonly string[] | undefined;
@@ -123,9 +131,12 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     const processResult = await this.run(request, signal);
     if (processResult.outcome !== "success") throw new WorkerFailureError(processResult.diagnostic);
     // A code worker commits and reports CODE_COMMITTED; it becomes CODE_PUSHED only after Pirx pushes it below.
-    const output = processResult.structuredOutput;
+    // observedCommit is Pirx's own observation of a refused push; a worker cannot supply the commit an operator retry resumes from.
+    const output = withoutPirxObservations(processResult.structuredOutput);
     const committed = typeof output === "object" && output !== null && (output as { outcome?: unknown }).outcome === WORKER_COMMITTED_OUTCOME;
-    if (committed && (this.#repositoryPolicy === undefined || this.#gitStateVerifier?.publish === undefined || !request.capabilityGrant.grantedCapabilities.includes("git.push_assigned_branch"))) throw new WorkerFailureError(contractDiagnostic(output, "outcome", "worker_contract_mismatch"));
+    if (committed && (this.#repositoryPolicy === undefined || this.#gitStateVerifier?.publish === undefined)) throw new WorkerFailureError(contractDiagnostic(output, "outcome", "worker_contract_mismatch"));
+    // A policy without push is an operator decision, identical on every retry: block, do not auto-resume.
+    if (committed && !request.capabilityGrant.grantedCapabilities.includes("git.push_assigned_branch")) throw new WorkerFailureError(createWorkerFailureDiagnostic("capability_denied", { stage: "git_state", field: "git.push_assigned_branch", providerMessage: "The worker committed, but the Task grant does not include git.push_assigned_branch, so Pirx cannot push it." }));
     if (committed && ((output as Record<string, unknown>).pullRequestTitle === undefined || (output as Record<string, unknown>).pullRequestBody === undefined)) throw new WorkerFailureError(contractDiagnostic(output, "pullRequestBody", "worker_contract_mismatch"));
     const result = validateWorkerResult(committed ? { ...(output as Record<string, unknown>), outcome: "CODE_PUSHED" } : output, request);
     if (!result.ok) throw new WorkerFailureError(contractDiagnostic(processResult.structuredOutput, result.violations[0]?.field, result.violations.some((item) => item.code === "binding_mismatch") ? "binding_mismatch" : "worker_contract_mismatch"));
@@ -136,7 +147,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
       if (committed) {
         const published = await this.#gitStateVerifier.publish!(request, result.value, this.#repositoryPolicy);
         // A rejected push (pre-push hook, diverged branch) fails the same way on every retry; block for a human.
-        if (!published.ok || published.commit === undefined) throw new WorkerFailureError(createWorkerFailureDiagnostic(published.rejected === true ? "push_rejected" : "git_state_mismatch", { stage: "git_state", providerMessage: published.message }));
+        if (!published.ok || published.commit === undefined) throw new WorkerFailureError(createWorkerFailureDiagnostic(published.rejected === true ? "push_rejected" : "git_state_mismatch", { stage: "git_state", providerMessage: published.message, ...(published.rejected === true && published.commit !== undefined ? { observedCommit: published.commit } : {}) }));
         // Record the full SHA Pirx pushed, not the worker's possibly abbreviated one.
         pushed = { ...result.value, finalCommit: published.commit };
       }

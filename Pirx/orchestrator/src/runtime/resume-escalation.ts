@@ -202,38 +202,46 @@ export function unblockEscalatedTask(store: RuntimeSqliteStore, input: OperatorU
     if (history.outcome !== "success") return history;
     const latest = history.value[history.value.length - 1];
     if (latest?.state !== "terminal") return { outcome: "conflict" as const, message: "Task has no terminal latest Attempt to resume from." };
-    const id = operatorUnblockCheckpointId(task.value.id, latest.id);
-    const existing = checkpoints.get(id);
-    if (existing.outcome === "success") {
-      return existing.value.evidence.some((item) => item.reference === `operation:${input.operationId}`)
-        ? { outcome: "success" as const, value: { taskId: task.value.id, checkpointId: id, replayed: true } }
-        : { outcome: "conflict" as const, message: "This Attempt was already unblocked by another operation." };
-    }
-    if (existing.outcome !== "not_found") return existing;
-    if (task.value.state !== "blocked") return { outcome: "conflict" as const, message: `Task state ${task.value.state} is not blocked.` };
-    const preWorker = isOperatorRetryableBlock(latest);
-    if (latest.result !== "FAILED" && latest.result !== "QUOTA_EXHAUSTED" && !preWorker) return { outcome: "invalid_record" as const, message: `Latest Attempt result ${latest.result} cannot be resumed by unblock; ambiguous or blocked results need reconciliation.` };
-    const escalation = checkpoints.latestByTask(task.value.id);
-    if (escalation.outcome !== "success") return escalation;
-    if (preWorker ? escalation.value.previousAttemptId !== latest.id : escalation.value.id !== checkpointId(task.value.id, latest.id, "RESUME_FAILURE_LIMIT_REACHED") || task.value.blockingReason !== escalation.value.blockingReason) return { outcome: "conflict" as const, message: "Task is not blocked by the resume failure limit." };
-    const { kind: _kind, schemaVersion: _schemaVersion, ...base } = escalation.value;
-    if (revision !== undefined) {
+    const moveWorkspace = (to: string): StorageResult<void> => {
       const ownership = workspaces.getByTaskAttempt(task.value.id, latest.id);
       if (ownership.outcome !== "success") return ownership.outcome === "not_found" ? { outcome: "conflict" as const, message: "Moving the workspace requires active ownership by the latest Attempt." } : ownership;
       if (ownership.value.state !== "active") return { outcome: "conflict" as const, message: "Moving the workspace requires active ownership by the latest Attempt." };
-      if (ownership.value.currentRevision !== revision) {
-        const moved = workspaces.updateCurrentRevision(latest.id, ownership.value.ownershipToken, ownership.value.version, revision, input.unblockedAt);
-        if (moved.outcome !== "success") return moved;
-      }
+      if (ownership.value.currentRevision === to) return { outcome: "success" as const, value: undefined };
+      const moved = workspaces.updateCurrentRevision(latest.id, ownership.value.ownershipToken, ownership.value.version, to, input.unblockedAt);
+      return moved.outcome === "success" ? { outcome: "success" as const, value: undefined } : moved;
+    };
+    const id = operatorUnblockCheckpointId(task.value.id, latest.id);
+    const existing = checkpoints.get(id);
+    if (existing.outcome === "success") {
+      // Correcting a mistyped workspaceRevision before the Task resumed: the unconsumed unblock Checkpoint is
+      // replaced, because the successor's resume check compares its commit with the Checkpoint's.
+      const correcting = revision !== undefined && task.value.state === "blocked" && !existing.value.findings.includes(`Operator moved the workspace to ${revision}.`);
+      if (!correcting) return existing.value.evidence.some((item) => item.reference === `operation:${input.operationId}`)
+        ? { outcome: "success" as const, value: { taskId: task.value.id, checkpointId: id, replayed: true } }
+        : { outcome: "conflict" as const, message: "This Attempt was already unblocked by another operation." };
+      store.database.prepare("DELETE FROM runtime_checkpoints WHERE id = ? AND task_id = ?").run(id, task.value.id);
+    } else if (existing.outcome !== "not_found") return existing;
+    if (task.value.state !== "blocked") return { outcome: "conflict" as const, message: `Task state ${task.value.state} is not blocked.` };
+    const retryableBlock = isOperatorRetryableBlock(latest);
+    if (latest.result !== "FAILED" && latest.result !== "QUOTA_EXHAUSTED" && !retryableBlock) return { outcome: "invalid_record" as const, message: `Latest Attempt result ${latest.result} cannot be resumed by unblock; only failed, quota, pre-worker and push_rejected Attempts can, others need reconciliation.` };
+    const escalation = checkpoints.latestByTask(task.value.id);
+    if (escalation.outcome !== "success") return escalation;
+    if (retryableBlock ? escalation.value.previousAttemptId !== latest.id : escalation.value.id !== checkpointId(task.value.id, latest.id, "RESUME_FAILURE_LIMIT_REACHED") || task.value.blockingReason !== escalation.value.blockingReason) return { outcome: "conflict" as const, message: "Task is not blocked by the resume failure limit." };
+    const { kind: _kind, schemaVersion: _schemaVersion, ...base } = escalation.value;
+    // A rejected push leaves the worker's commit as HEAD while ownership still names the base; resume from that commit.
+    const target = revision ?? (latest.diagnostic?.code === "push_rejected" ? latest.diagnostic.observedCommit : undefined);
+    if (target !== undefined) {
+      const moved = moveWorkspace(target);
+      if (moved.outcome !== "success") return moved;
     }
     const created = createCheckpoint({
       ...base,
-      ...(revision === undefined || base.currentCommit === undefined ? {} : { currentCommit: revision }),
+      ...(target === undefined || base.currentCommit === undefined ? {} : { currentCommit: target }),
       id,
       trigger: latest.result === "QUOTA_EXHAUSTED" ? "PROVIDER_QUOTA" : "RECOVERABLE_FAILURE",
       createdAt: input.unblockedAt,
       currentState: "blocked",
-      findings: [...base.findings, `Operator unblock reason: ${reason}`, ...(revision === undefined ? [] : [`Operator moved the workspace to ${revision}.`])],
+      findings: [...base.findings, `Operator unblock reason: ${reason}`, ...(revision !== undefined ? [`Operator moved the workspace to ${revision}.`] : target !== undefined ? [`Resuming from the refused commit ${target}.`] : [])],
       evidence: [...base.evidence, { reference: `operation:${input.operationId}`, summary: "Operator explicitly approved one more resume Attempt." }],
       lastAction: "operator unblocked the Task after resume escalation",
       resumeInstruction: "Resume once from the latest Attempt evidence; another failure escalates again.",
