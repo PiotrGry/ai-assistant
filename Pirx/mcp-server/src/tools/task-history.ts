@@ -45,7 +45,7 @@ function summarizeAttempt(attempt: AttemptSnapshot) {
 
 export function registerTaskHistory(server: McpServer, filename: string | undefined, configurationError?: string, checkBinding: RuntimeBindingCheck = () => {}): void {
   server.registerTool("pirx_task_history", {
-    description: "Read the durable state and Attempts of a specific Task, including Tasks outside Queue. Use taskId or repository plus issueNumber. Without afterOrdinal it returns the newest Attempts and totalAttempts; pass afterOrdinal: 0 to read from the first Attempt, then nextAfterOrdinal for the next page. Use attemptId alone for its sanitized diagnostic, when available; diagnostic.providerMessage holds the bounded Claude CLI error output when it was recorded (Attempts run before 2026-11-04 have none). No work is started.",
+    description: "Read the durable state and Attempts of a specific Task, including Tasks outside Queue. Use taskId or repository plus issueNumber. Without afterOrdinal it returns the newest Attempts, totalAttempts and, when older ones exist, olderAttempts; pass afterOrdinal: 0 (olderFromAfterOrdinal) to read from the first Attempt, then nextAfterOrdinal for the next page. Use attemptId alone for its sanitized diagnostic, when available; diagnostic.providerMessage holds the bounded Claude CLI error output when it was recorded (Attempts run before 2026-11-04 have none). No work is started.",
     inputSchema,
     annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
   }, async (input) => {
@@ -101,6 +101,8 @@ export function registerTaskHistory(server: McpServer, filename: string | undefi
           totalAttempts,
           attempts,
           ...(rows.length > limit ? { nextAfterOrdinal: attempts.at(-1)?.ordinal } : {}),
+          // The newest page has nothing after it; tell the reader older Attempts exist and how to reach them.
+          ...(input.afterOrdinal === undefined && totalAttempts > attempts.length ? { olderAttempts: totalAttempts - attempts.length, olderFromAfterOrdinal: 0 } : {}),
         } };
       });
       if (snapshot.outcome === "success") return response(snapshot.value);

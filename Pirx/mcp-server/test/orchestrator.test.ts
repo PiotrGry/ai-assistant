@@ -295,6 +295,9 @@ test("MCP Task history pages persisted Attempts and resolves the repository expl
     assert.equal(latest.task.id, "task-one");
     assert.equal(latest.task.state, "completed");
     assert.equal(latest.totalAttempts, 2);
+    // The newest page cannot page forward; it says older Attempts exist and where to start.
+    assert.equal(latest.olderAttempts, 1);
+    assert.equal(latest.olderFromAfterOrdinal, 0);
     assert.equal(latest.attempts[0].id, "attempt-two");
     assert.equal(latest.attempts[0].finalCommit, "a".repeat(40));
     assert.equal(latest.attempts[0].branch, "pirx/task-history");
