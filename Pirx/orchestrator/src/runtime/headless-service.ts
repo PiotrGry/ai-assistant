@@ -79,6 +79,17 @@ function boundedReason(value: unknown): string {
   return message.replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, HEADLESS_SERVICE_LIMITS.maximumMessageCharacters);
 }
 
+/**
+ * Where an unclassified exception came from. The message is left out: it may
+ * quote provider payloads. Stack frames name only code locations.
+ */
+function thrown(error: unknown): { readonly name: string; readonly errorCode?: string; readonly stack?: string } {
+  if (!(error instanceof Error)) return { name: "unknown" };
+  const code = (error as { code?: unknown }).code;
+  const stack = error.stack?.split("\n").slice(1, 7).map((line) => line.trim()).filter((line) => line.startsWith("at ")).join("\n");
+  return { name: error.name, ...(typeof code === "string" ? { errorCode: code.slice(0, 64) } : {}), ...(stack ? { stack } : {}) };
+}
+
 function defaultSleep(durationMs: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
@@ -138,7 +149,11 @@ export class HeadlessOrchestratorService {
     this.#event("starting", "recovering");
     let recovery: SchedulerCycleResult;
     try { recovery = await this.#runtime.recover(); }
-    catch { return this.#stopRequested ? this.stop("stop_during_recovery") : this.#startupFailure("recovery_threw"); }
+    catch (error) {
+      if (this.#stopRequested) return this.stop("stop_during_recovery");
+      this.#event("cycle_error", "recovery_threw", "recovery_threw", { ...thrown(error), code: "recovery_threw" });
+      return this.#startupFailure("recovery_threw");
+    }
     if (this.#stopRequested) return this.stop("stop_during_recovery");
     if (recovery.outcome !== "idle") return this.#startupFailure(recovery.outcome === "reconciliation_required" ? recovery.reason : `unexpected_${recovery.outcome}`);
     this.#event("recovered", "success");
@@ -194,7 +209,7 @@ export class HeadlessOrchestratorService {
         if (this.#evaluateHostShutdown({ ...(queueOutcome === undefined ? {} : { queueOutcome }), ...(deliveryOutcome === undefined ? {} : { deliveryOutcome }), cycleOutcome: result.outcome })) return this.stop("host_shutdown_triggered");
       } catch (error) {
         delay = this.#errorIntervalMs;
-        this.#event("cycle_error", "contained", "cycle_threw", { name: error instanceof Error ? error.name : "unknown", code: "cycle_threw", unclassifiedException: true });
+        this.#event("cycle_error", "contained", "cycle_threw", { ...thrown(error), code: "cycle_threw", unclassifiedException: true });
         await this.#reconcileObservability();
       }
       if (!this.#stopRequested) await this.#sleep(delay, this.#wake.signal);

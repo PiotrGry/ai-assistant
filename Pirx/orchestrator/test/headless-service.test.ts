@@ -80,6 +80,11 @@ test("contains a cycle exception, uses the error delay, and continues to shutdow
   assert.deepEqual(delays, [250]);
   assert.equal(events.find((event) => event.event === "cycle_error")?.reason, "cycle_threw");
   assert.equal(JSON.stringify(events).includes("provider payload"), false);
+  // The location survives so the cause can be found without the message.
+  const stack = String((events.find((event) => event.event === "cycle_error")?.details as { stack?: unknown } | undefined)?.stack);
+  const frames = stack.split("\n");
+  assert.ok(frames.length >= 2 && frames.every((frame) => frame.startsWith("at ")), stack);
+  assert.match(frames[0]!, /headless-service\.test/u);
 });
 
 test("contains observability projection failure without blocking the work cycle", async () => {
@@ -299,4 +304,17 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) test(`CLI drains gracefully
     assert.equal(githubEnvironments[0]?.PIRX_GITHUB_REPOSITORY, "ai-assistant");
     assert.equal(loadGitHubConfig(githubEnvironments[0], { tokenProvider: () => "test-only" }).writeTargetExplicit, undefined);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a recovery exception is recorded with its location before startup fails", async () => {
+  const events: HeadlessServiceEvent[] = [];
+  const port = runtime({ recover: async () => { throw Object.assign(new Error("database payload must not escape"), { code: "SQLITE_BUSY" }); } });
+  const service = new HeadlessOrchestratorService(port, { cycleIntervalMs: 100, emit: (event) => events.push(event) });
+  const result = await service.run();
+  assert.equal(result.outcome, "startup_recovery_failed");
+  const recorded = events.find((event) => event.event === "cycle_error" && event.outcome === "recovery_threw");
+  const details = recorded?.details as { errorCode?: unknown; stack?: unknown } | undefined;
+  assert.equal(details?.errorCode, "SQLITE_BUSY");
+  assert.match(String(details?.stack), /^at .*headless-service\.test/u);
+  assert.equal(JSON.stringify(events).includes("payload must not escape"), false);
 });

@@ -217,3 +217,26 @@ test("returns bounded active and next Queue entity summaries without task conten
     }
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });
+
+test("pruning drops only week-old routine heartbeats and keeps every failure", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-diagnostic-prune-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  try {
+    const now = "2026-11-14T12:00:00.000Z" as UtcTimestamp;
+    const old = "2026-11-06T12:00:00.000Z";
+    const recent = "2026-11-10T12:00:00.000Z";
+    const insert = store.database.prepare("INSERT INTO runtime_orchestrator_diagnostics (sequence, recorded_at, event, outcome, diagnostic_json) VALUES (?, ?, ?, ?, '{}')");
+    insert.run(1, old, "cycle", "idle");
+    insert.run(2, old, "observability", "replayed");
+    insert.run(3, old, "cycle", "failed");
+    insert.run(4, old, "queue", "invalid_snapshot");
+    insert.run(5, recent, "cycle", "idle");
+    // Pruning runs on every 500th row; the next insert is sequence 500.
+    insert.run(499, recent, "control", "running");
+    const control = new OrchestratorControlRepository(store);
+    const entry = control.recordDiagnostic({ schemaVersion: 1, event: "cycle", outcome: "idle" }, now);
+    assert.equal(entry.outcome === "success" ? entry.value : undefined, 500);
+    const left = (store.database.prepare("SELECT sequence FROM runtime_orchestrator_diagnostics ORDER BY sequence").all() as Array<{ sequence: number }>).map((row) => row.sequence);
+    assert.deepEqual(left, [3, 4, 5, 499, 500]);
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
