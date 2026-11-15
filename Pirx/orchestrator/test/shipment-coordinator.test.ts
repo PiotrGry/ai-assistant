@@ -278,3 +278,100 @@ test("restarts between a blocked decision and retry recovery without duplicating
     reopened.close();
   } finally { await rm(value.directory, { recursive: true, force: true }); }
 });
+
+// gh-462: one 60 s CI poll timed out, the cycle stored that as final, and delivery said "waiting" for two days after CI passed.
+class ScriptedCi extends FakeCi {
+  script: Array<"timed_out" | "no_run" | "success"> = [];
+  override async resolvePullRequest(query: { readonly expectedHeadSha: string }): Promise<CiRunResult> {
+    const next = this.script.shift() ?? "success";
+    this.resolveCalls += 1;
+    if (next === "timed_out") return { outcome: "timed_out", message: "GitHub Actions watch timed out.", polls: 3 };
+    if (next === "no_run") return { outcome: "stale", message: "No run tests the requested head yet.", polls: 1 };
+    return { outcome: "success", run: run(query.expectedHeadSha, "run-green"), message: "green", polls: 1 };
+  }
+}
+
+test("a timed-out CI poll is not final: the next cycle observes CI again and merges", async () => {
+  const value = await fixture();
+  try {
+    const ci = new ScriptedCi(); ci.script = ["timed_out"];
+    const coordinator = new ShipmentCycleCoordinator(value.store, value.github, ci);
+    const waiting = await coordinator.run(request());
+    assert.equal(waiting.outcome, "pending_or_timeout");
+    assert.match(waiting.message, /CI "Required gate" on aaaaaaa for PR #196 is timed_out; Pirx checks again next cycle\./u);
+    const stored = value.store.shipmentCycles.getByEvent("shipment-event-1");
+    assert.equal(stored.outcome === "success" ? stored.value.outcome : "missing", undefined);
+    const merged = await coordinator.run(request());
+    assert.equal(merged.outcome, "recovery_success", JSON.stringify(merged));
+    assert.equal(value.github.mergeCalls, 1);
+    assert.equal(ci.resolveCalls, 3);
+  } finally { await dispose(value); }
+});
+
+test("a cycle stored as finally waiting by older code is reopened and completes", async () => {
+  const value = await fixture();
+  try {
+    const ci = new ScriptedCi(); ci.script = ["timed_out"];
+    const coordinator = new ShipmentCycleCoordinator(value.store, value.github, ci);
+    assert.equal((await coordinator.run(request())).outcome, "pending_or_timeout");
+    // The row and correlation exactly as the old code left them for gh-462.
+    value.store.database.prepare("UPDATE runtime_shipment_cycles SET state = 'blocked', outcome = 'pending_or_timeout', message = 'CI observation was durably correlated.' WHERE attempt_id = ?").run(attempt1);
+    const legacy = value.store.ciCorrelations.getByTaskAttempt(taskId, attempt1);
+    assert.equal(legacy.outcome === "success" ? legacy.value.state : "missing", "timed_out");
+    const merged = await coordinator.run(request());
+    assert.equal(merged.outcome, "recovery_success", JSON.stringify(merged));
+    assert.equal(value.github.mergeCalls, 1);
+  } finally { await dispose(value); }
+});
+
+test("no CI run for a just-pushed head is waiting inside the registration grace, and evidence after it", async () => {
+  const value = await fixture();
+  try {
+    const ci = new ScriptedCi(); ci.script = ["no_run", "no_run"];
+    const coordinator = new ShipmentCycleCoordinator(value.store, value.github, ci);
+    const early = await coordinator.run(request());
+    assert.equal(early.outcome, "pending_or_timeout", JSON.stringify(early));
+    const correlation = value.store.ciCorrelations.getByTaskAttempt(taskId, attempt1);
+    assert.equal(correlation.outcome === "success" ? correlation.value.state : "missing", "pending");
+    const late = await coordinator.run({ ...request(), now: new Date(Date.parse(t1) + 31 * 60_000).toISOString() as UtcTimestamp });
+    assert.equal(late.outcome, "stale_or_conflicting_evidence", JSON.stringify(late));
+  } finally { await dispose(value); }
+});
+
+test("a PR that is behind its base after green CI asks for a branch sync instead of a doomed merge", async () => {
+  const value = await fixture();
+  try {
+    const github = new BehindGithub();
+    const coordinator = new ShipmentCycleCoordinator(value.store, github, new ScriptedCi());
+    const behind = await coordinator.run(request());
+    assert.equal(behind.outcome, "base_behind", JSON.stringify(behind));
+    assert.match(behind.message, /PR #196 is behind develop/u);
+    assert.equal(github.mergeCalls, 0);
+    const stored = value.store.shipmentCycles.getByEvent("shipment-event-1");
+    assert.equal(stored.outcome === "success" ? stored.value.outcome : "missing", undefined);
+  } finally { await dispose(value); }
+});
+
+/** GitHub reports every PR as behind its base, as for a base branch that requires up-to-date PRs. */
+class BehindGithub extends FakeGithub {
+  override async createPullRequest(input: { readonly headBranch: string; readonly baseBranch: string; readonly body: string }): Promise<GitHubOperationResult<GitHubPullRequest>> {
+    const created = await super.createPullRequest(input as never);
+    if (created.outcome === "success") this.pull = { ...created.value, mergeableState: "behind" };
+    return created.outcome === "success" ? success(this.pull!, "create") : created;
+  }
+}
+
+test("a PR the repository's own auto-merge merged at the exact pushed head completes delivery without a second merge", async () => {
+  const value = await fixture();
+  try {
+    const ci = new ScriptedCi(); ci.script = ["timed_out"];
+    const coordinator = new ShipmentCycleCoordinator(value.store, value.github, ci);
+    assert.equal((await coordinator.run(request())).outcome, "pending_or_timeout");
+    // gh-462: GitHub Actions squash-merged PR #473 at e4070c9 while Pirx still waited on its timed-out poll.
+    value.github.pull = { ...value.github.pull!, state: "closed", merged: true, mergeCommitSha: "f".repeat(40) };
+    const done = await coordinator.run(request());
+    assert.equal(done.outcome, "recovery_success", JSON.stringify(done));
+    assert.equal(done.mergeSha, "f".repeat(40));
+    assert.equal(value.github.mergeCalls, 0);
+  } finally { await dispose(value); }
+});

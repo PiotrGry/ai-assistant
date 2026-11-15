@@ -99,7 +99,9 @@ export class GitHubFeaturePullRequestService {
     if (stored.baseBranch !== request.baseBranch || stored.observedHeadSha !== request.expectedHeadSha || stored.repository !== request.repository.owner + "/" + request.repository.repository) return generic("conflict", request, "Stored pull request provenance conflicts with the requested identity.", { provenance: stored });
     const remote = await this.#gateway.getPullRequest(stored.pullRequest.number, context(request));
     if (remote.outcome !== "success") return mapRemote(request, remote);
-    if (!exactPull(remote.value, stored.headBranch, stored.baseBranch, stored.observedHeadSha)) return generic("stale_head", request, "Stored pull request no longer matches its durable branch, base, or revision.", { provenance: stored, pullRequest: remote.value });
+    // Merged elsewhere (a repository auto-merge workflow merged gh-462's PR) at exactly the recorded head: that is delivery evidence, not a stale PR.
+    const mergedAtHead = remote.value.merged && remote.value.headBranch === stored.headBranch && remote.value.baseBranch === stored.baseBranch && remote.value.headSha === stored.observedHeadSha;
+    if (!mergedAtHead && !exactPull(remote.value, stored.headBranch, stored.baseBranch, stored.observedHeadSha)) return generic("stale_head", request, "Stored pull request no longer matches its durable branch, base, or revision.", { provenance: stored, pullRequest: remote.value });
     return generic("replayed", request, "Replayed the durable feature pull request relationship.", { pullRequest: remote.value, provenance: stored });
   }
 

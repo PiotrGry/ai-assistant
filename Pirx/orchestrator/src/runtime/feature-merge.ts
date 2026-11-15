@@ -110,6 +110,11 @@ export class FeatureMergeCoordinator {
     if (remote.outcome !== "success") return remoteOutcome(request, remote, repository);
     if (!exactPull(remote.value, record)) return output(request, "stale", "Feature PR no longer matches the exact durable provenance.", { repository, pullRequest: remote.value });
     if (remote.value.merged) {
+      // Merged by the repository itself (an auto-merge workflow) at the exact correlated head: record it, never merge again.
+      if (stored.outcome === "not_found") {
+        const recorded = this.#store.featureMerges.start({ schemaVersion: FEATURE_MERGE_SCHEMA_VERSION, taskId: request.taskId, attemptId: request.attemptId, repository, pullRequestNodeId: record.pullRequest.nodeId, pullRequestNumber: record.pullRequest.number, pullRequestUrl: record.pullRequest.url, headBranch: record.headBranch, baseBranch: record.baseBranch, expectedHeadSha: record.observedHeadSha, state: "pending", createdAt: request.now, updatedAt: request.now, version: 1 });
+        if (recorded.outcome !== "success") return remoteStorage(request, recorded, repository);
+      }
       const merged = this.#store.featureMerges.markMerged(request.taskId, request.attemptId, mergedSha(remote.value) ?? remote.value.headSha, request.now);
       if (merged.outcome !== "success") return remoteStorage(request, merged, repository);
       return output(request, stored.outcome === "success" ? "replayed" : "merged", "Feature PR was already merged at the exact correlated head.", { repository, pullRequest: remote.value, mergeSha: mergedSha(remote.value) ?? remote.value.headSha });

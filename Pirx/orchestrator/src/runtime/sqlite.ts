@@ -90,7 +90,7 @@ import {
   type WorkspaceOwnershipRecord,
   type WorkspaceOwnershipTransferInput,
 } from "./workspace-ownership.js";
-import type { CiCorrelationInput, CiCorrelationObservation, CiCorrelationRecord, CiCorrelationState } from "./ci-correlation.js";
+import { CI_REOBSERVABLE_STATES, isReobservableCiState, type CiCorrelationInput, type CiCorrelationObservation, type CiCorrelationRecord, type CiCorrelationState } from "./ci-correlation.js";
 import type { CiFailureEvidenceRecord } from "./ci-evidence.js";
 import type { FeatureMergeRecord } from "./feature-merge.js";
 import type { ShipmentCycleRecord, ShipmentCycleState, ShipmentOutcome } from "./shipment-coordinator.js";
@@ -2823,10 +2823,10 @@ export class CiCorrelationRepository {
       if (existing.outcome !== "success") return existing;
       const current = existing.value;
       const run = observation.run;
-      if (current.state !== "pending") return JSON.stringify({ state: observation.state, run }) === JSON.stringify({ state: current.state, run: current.providerRunId === undefined ? undefined : { providerRunId: current.providerRunId } }) ? existing : conflict("CI correlation is already terminal and cannot be rewritten.");
+      if (!isReobservableCiState(current.state)) return JSON.stringify({ state: observation.state, run }) === JSON.stringify({ state: current.state, run: current.providerRunId === undefined ? undefined : { providerRunId: current.providerRunId } }) ? existing : conflict("CI correlation is already terminal and cannot be rewritten.");
       try {
         const table = this.#store.database.prepare("SELECT 1 AS found FROM runtime_ci_correlations WHERE task_id = ? AND attempt_id = ?").get(current.taskId, current.attemptId) === undefined ? "runtime_retry_ci_correlations" : "runtime_ci_correlations";
-        this.#store.database.prepare(`UPDATE ${table} SET provider_run_id = ?, provider_run_url = ?, workflow_name = ?, provider_pipeline_id = ?, tested_revision = ?, state = ?, observed_at = ?, updated_at = ?, version = version + 1 WHERE task_id = ? AND attempt_id = ? AND version = ? AND state = 'pending'`).run(run?.providerRunId ?? null, run?.url ?? null, run?.name ?? null, run?.pipeline?.providerPipelineId ?? null, run?.testedRevision ?? null, observation.state, observation.observedAt, observation.observedAt, current.taskId, current.attemptId, current.version);
+        this.#store.database.prepare(`UPDATE ${table} SET provider_run_id = ?, provider_run_url = ?, workflow_name = ?, provider_pipeline_id = ?, tested_revision = ?, state = ?, observed_at = ?, updated_at = ?, version = version + 1 WHERE task_id = ? AND attempt_id = ? AND version = ? AND state IN (${CI_REOBSERVABLE_STATES.map(() => "?").join(",")})`).run(run?.providerRunId ?? null, run?.url ?? null, run?.name ?? null, run?.pipeline?.providerPipelineId ?? null, run?.testedRevision ?? null, observation.state, observation.observedAt, observation.observedAt, current.taskId, current.attemptId, current.version, ...CI_REOBSERVABLE_STATES);
         return this.getByTaskAttempt(taskId, attemptId);
       } catch (error: unknown) { return classifyStorageError(error); }
     });
@@ -2971,6 +2971,18 @@ export class ShipmentCycleRepository {
       try {
         this.#store.database.prepare("INSERT INTO runtime_shipment_cycles (task_id, attempt_id, schema_version, event_id, correlation_id, repository, head_branch, base_branch, expected_head_sha, provider, workflow_name, completion_mode, state, outcome, pull_request_number, pull_request_url, provider_run_id, evidence_digest, successor_attempt_id, merge_sha, message, created_at, updated_at, version) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, 1)").run(record.taskId, record.attemptId, record.eventId, record.correlationId, record.repository, record.headBranch, record.baseBranch, record.expectedHeadSha, record.provider, record.workflowName, record.completionMode, record.message, record.createdAt, record.updatedAt);
         return this.getByTaskAttempt(record.taskId, record.attemptId);
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
+  /** Reopen a cycle whose stored outcome only meant "not yet" (older rows); it resumes from `state`. */
+  public reopen(taskId: string, attemptId: string, state: "started" | "pr_correlated", updatedAt: UtcTimestamp): StorageResult<ShipmentCycleRecord> {
+    if (!utcTimestamp(updatedAt).ok) return invalidRecord();
+    return this.#store.execute(() => {
+      const current = this.getByTaskAttempt(taskId, attemptId); if (current.outcome !== "success") return current;
+      if (current.value.state !== "blocked" || !["pending_or_timeout", "rate_limited"].includes(current.value.outcome ?? "")) return conflict("Only a shipment cycle that was waiting can be reopened.");
+      try {
+        this.#store.database.prepare("UPDATE runtime_shipment_cycles SET state = ?, outcome = NULL, message = ?, updated_at = ?, version = version + 1 WHERE task_id = ? AND attempt_id = ? AND version = ?").run(state, "Shipment cycle reopened after a waiting outcome.", updatedAt, taskId, attemptId, current.value.version);
+        return this.getByTaskAttempt(taskId, attemptId);
       } catch (error: unknown) { return classifyStorageError(error); }
     });
   }

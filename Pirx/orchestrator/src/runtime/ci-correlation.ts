@@ -6,6 +6,17 @@ import type { PullRequestProvenanceRecord, RuntimeSqliteStore, StorageResult } f
 export const CI_CORRELATION_SCHEMA_VERSION = 1 as const;
 export type CiCorrelationState = Exclude<CiResolutionOutcome, "pending"> | "pending";
 
+/**
+ * States where the CI run may still finish: Pirx's bounded poll ended, the
+ * provider was briefly unavailable, or the run was cancelled and can be re-run.
+ * They are re-observed on every delivery cycle instead of being final.
+ */
+export const CI_REOBSERVABLE_STATES: readonly CiCorrelationState[] = Object.freeze(["pending", "timed_out", "retryable", "rate_limited", "unavailable", "cancelled"]);
+export function isReobservableCiState(state: CiCorrelationState): boolean { return CI_REOBSERVABLE_STATES.includes(state); }
+
+/** GitHub can take minutes to register a run for a new head; until then "no run" is not evidence. */
+export const CI_RUN_REGISTRATION_GRACE_MS = 30 * 60_000;
+
 export interface CiCorrelationInput {
   readonly taskId: TaskId;
   readonly attemptId: AttemptId;
@@ -87,11 +98,13 @@ function correlationInput(provenance: PullRequestProvenanceRecord, request: CiCo
   };
 }
 
-function stateFromCi(result: CiRunResult, expected: CiCorrelationRecord): CiCorrelationObservation {
+function laterTimestamp(left: UtcTimestamp, right: UtcTimestamp): UtcTimestamp { return Date.parse(right) > Date.parse(left) ? right : left; }
+
+function stateFromCi(result: CiRunResult, expected: CiCorrelationRecord, now: UtcTimestamp): CiCorrelationObservation {
   // CiCorrelation.provider is the CI provider. Attempt.provider identifies the code worker
   // and is intentionally a separate identity domain.
-  if (result.run !== undefined && (result.run.provider !== expected.provider || result.run.testedRevision !== expected.pushedCommit || result.run.headBranch !== expected.headBranch || result.run.name !== expected.requiredWorkflowName || !result.run.pullRequestNumbers.includes(expected.featurePullRequest.number))) return { state: "stale", observedAt: expected.updatedAt };
-  return { state: result.outcome, ...(result.run === undefined ? {} : { run: result.run }), observedAt: expected.updatedAt };
+  if (result.run !== undefined && (result.run.provider !== expected.provider || result.run.testedRevision !== expected.pushedCommit || result.run.headBranch !== expected.headBranch || result.run.name !== expected.requiredWorkflowName || !result.run.pullRequestNumbers.includes(expected.featurePullRequest.number))) return { state: "stale", observedAt: laterTimestamp(expected.updatedAt, now) };
+  return { state: result.outcome, ...(result.run === undefined ? {} : { run: result.run }), observedAt: laterTimestamp(expected.updatedAt, now) };
 }
 
 export class CiCorrelationService {
@@ -107,12 +120,16 @@ export class CiCorrelationService {
     const input = correlationInput(provenance.value, request);
     const started = this.#store.ciCorrelations.start(input);
     if (started.outcome !== "success") return failure(started.message, started.outcome === "storage_error" ? "storage_error" : "conflict");
-    if (started.value.state !== "pending") return { outcome: "replayed", state: started.value.state, record: started.value, message: "Replayed the durable CI correlation." };
+    if (!isReobservableCiState(started.value.state)) return { outcome: "replayed", state: started.value.state, record: started.value, message: "Replayed the durable CI correlation." };
     const query: CiRunByPullRequestQuery = { pullRequestNumber: request.featurePullRequestNumber, expectedHeadSha: request.expectedHeadSha, requiredWorkflowName: request.requiredWorkflowName };
     const context: CiRunQueryContext = { correlationId: request.correlationId, ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }), ...(request.pollIntervalMs === undefined ? {} : { pollIntervalMs: request.pollIntervalMs }), ...(request.maxFailedJobs === undefined ? {} : { maxFailedJobs: request.maxFailedJobs }), ...(request.maxFailedSteps === undefined ? {} : { maxFailedSteps: request.maxFailedSteps }), ...(request.signal === undefined ? {} : { signal: request.signal }) };
     let observed: CiRunResult;
     try { observed = await this.#gateway.resolvePullRequest(query, context); } catch { return failure("CI provider observation failed before a normalized result was returned.", "storage_error"); }
-    const normalized = stateFromCi(observed, started.value);
+    const normalized = stateFromCi(observed, started.value, request.now);
+    // No run for this exact head yet (just pushed): keep waiting instead of recording stale or not_found.
+    if (observed.run === undefined && (normalized.state === "not_found" || normalized.state === "stale") && Date.parse(request.now) - Date.parse(started.value.createdAt) < CI_RUN_REGISTRATION_GRACE_MS) {
+      return { outcome: "observed", state: "pending", record: started.value, ci: observed, message: `No "${request.requiredWorkflowName}" run for ${request.expectedHeadSha.slice(0, 7)} yet; Pirx checks again next cycle.` };
+    }
     const saved = this.#store.ciCorrelations.recordObservation(request.taskId, request.attemptId, normalized);
     if (saved.outcome !== "success") return failure(saved.message, saved.outcome === "storage_error" ? "storage_error" : "conflict");
     return { outcome: "observed", state: saved.value.state, record: saved.value, ci: observed, message: "CI observation was durably correlated." };

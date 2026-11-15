@@ -153,3 +153,13 @@ test("history compaction keeps the Attempt count the model needs to avoid readin
   assert.equal(parsed.olderAttempts, 9);
   assert.equal(parsed.olderFromAfterOrdinal, 0);
 });
+
+test("a large status result keeps worker, attention and delivery before diagnostics", () => {
+  const diagnostics = Array.from({ length: 40 }, (_, index) => ({ sequence: index + 1, event: "delivery", outcome: "waiting", details: { workerFailures: "x".repeat(400) } }));
+  const snapshot = { worker: { state: "idle" }, attentionRequired: { task: { id: "gh-462", state: "in_progress" }, reason: "Delivery has waited since 2026-11-12T21:25:57.584Z: CI is timed_out.", nextAction: "inspect_blocker" }, delivery: { stage: "pr_correlated", ciState: "timed_out", since: "2026-11-12T21:25:57.584Z" }, observedState: "running", diagnostics };
+  const parsed = JSON.parse(toolResultToText({ structuredContent: { outcome: "success", snapshot } }, 1_200, "pirx_orchestrator_status"));
+  assert.deepEqual(parsed.snapshot.worker, { state: "idle" });
+  assert.match(parsed.snapshot.attentionRequired.reason, /has waited since/u);
+  assert.equal(parsed.snapshot.delivery.ciState, "timed_out");
+  assert.ok(parsed.snapshot.diagnostics.length < 40);
+});
