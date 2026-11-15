@@ -17,6 +17,8 @@ export interface GitHubPullRequest {
   readonly baseBranch: string;
   readonly merged: boolean;
   readonly mergeable?: boolean;
+  /** GitHub's `mergeable_state`, e.g. "behind" when the base requires an up-to-date branch. */
+  readonly mergeableState?: string;
   readonly mergeCommitSha?: string;
 }
 export interface GitHubBranchHead { readonly branch: string; readonly sha: string; }
@@ -45,7 +47,7 @@ export interface GitHubPullRequestTransport {
 }
 
 interface RefPayload { readonly object?: unknown; }
-interface PullPayload { readonly number?: unknown; readonly html_url?: unknown; readonly state?: unknown; readonly title?: unknown; readonly body?: unknown; readonly head?: unknown; readonly base?: unknown; readonly merged?: unknown; readonly mergeable?: unknown; readonly merge_commit_sha?: unknown; }
+interface PullPayload { readonly number?: unknown; readonly html_url?: unknown; readonly state?: unknown; readonly title?: unknown; readonly body?: unknown; readonly head?: unknown; readonly base?: unknown; readonly merged?: unknown; readonly mergeable?: unknown; readonly mergeable_state?: unknown; readonly merge_commit_sha?: unknown; }
 interface PullCommitPayload { readonly sha?: unknown; }
 interface MergePayload { readonly merged?: unknown; readonly sha?: unknown; readonly message?: unknown; }
 const DEFAULT_RETRY: GitHubRetryPolicyOptions = { maxAttempts: 2, maxTotalDelayMs: 5_000, baseDelayMs: 250, maxDelayMs: 2_000, jitterRatio: 0 };
@@ -68,7 +70,8 @@ function mapPull(value: unknown): GitHubPullRequest | undefined {
   const title = value.title === undefined || value.title === null ? undefined : text(value.title, 512);
   const body = value.body === undefined || value.body === null ? undefined : markdown(value.body);
   const mergeCommitSha = sha(value.merge_commit_sha);
-  return { number, url: pullUrl, state, ...(title === undefined ? {} : { title }), ...(body === undefined ? {} : { body }), headBranch, headSha, baseBranch, merged: value.merged === true, ...(typeof value.mergeable === "boolean" ? { mergeable: value.mergeable } : {}), ...(mergeCommitSha === undefined ? {} : { mergeCommitSha }) };
+  const mergeableState = text(value.mergeable_state, 64);
+  return { number, url: pullUrl, state, ...(title === undefined ? {} : { title }), ...(body === undefined ? {} : { body }), headBranch, headSha, baseBranch, merged: value.merged === true, ...(typeof value.mergeable === "boolean" ? { mergeable: value.mergeable } : {}), ...(mergeableState === undefined ? {} : { mergeableState }), ...(mergeCommitSha === undefined ? {} : { mergeCommitSha }) };
 }
 
 export class GitHubPullRequestGateway implements GitHubPullRequestGatewayPort {

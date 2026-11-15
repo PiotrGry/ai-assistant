@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
 import { ProductionClaudeWorker } from "./claude/production-worker.js";
+import { FeatureBranchSyncService } from "./runtime/feature-branch-sync.js";
 import { loadGitHubConfig, type GitHubConfig } from "./github/config.js";
 import { GitHubActionsGateway } from "./github/ci-watch.js";
 import { GitHubCiGatewayAdapter } from "./github/ci-adapter.js";
@@ -97,6 +98,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
       config: item.repository,
       shipment: new ShipmentCycleCoordinator(store, item.pullRequests, item.ci),
       releaseMerge: new ReleaseMergeCoordinator(store, item.pullRequests, item.ci),
+      branchSync: new FeatureBranchSyncService(store),
     })), { timeoutMs: config.githubTimeoutMs });
     const service = new HeadlessOrchestratorService(runtime, {
       cycleIntervalMs: config.cycleIntervalMs, errorIntervalMs: config.errorIntervalMs,

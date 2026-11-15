@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { ShipmentCycleCoordinator, ShipmentCycleResult } from "./shipment-coordinator.js";
+import type { FeatureBranchSyncService } from "./feature-branch-sync.js";
 import type { ReleaseMergeCoordinator, ReleaseMergeResult } from "./release-merge.js";
 import { releaseId, type ReleaseId, type ReleasePullRequestIdentity } from "./release.js";
 import type { RuntimeSqliteStore } from "./sqlite.js";
@@ -32,6 +33,8 @@ export interface HeadlessDeliveryRepositoryRuntime {
   readonly config: HeadlessRepositoryConfig;
   readonly shipment: Pick<ShipmentCycleCoordinator, "run">;
   readonly releaseMerge: Pick<ReleaseMergeCoordinator, "merge">;
+  /** Merges the base into a PR branch GitHub reports as behind; without it such a PR blocks for a human. */
+  readonly branchSync?: Pick<FeatureBranchSyncService, "sync">;
 }
 
 export interface HeadlessDeliveryCoordinatorOptions {
@@ -121,11 +124,27 @@ export class HeadlessDeliveryCoordinator {
       mergePolicy: { headPattern: "^pirx/task-", baseBranch: repository.config.baseBranch, requiredChecks: [repository.config.delivery.featureWorkflowName], requiredApprovals: repository.config.delivery.featureRequiredApprovals, mergeMethod: repository.config.delivery.featureMergeMethod, requireMergeable: repository.config.delivery.requireMergeable },
       now, ...(this.#timeoutMs === undefined ? {} : { timeoutMs: this.#timeoutMs }),
     });
+    if (shipment.outcome === "base_behind") return this.#syncBranch(task, attempt, repository, shipment, now);
     if (shipment.outcome !== "recovery_success") return shipmentFailure(shipment);
     if (shipment.mergeSha === undefined) return output("reconciliation_required", false, "Successful feature shipment has no exact merge revision.", { taskId: task.id, attemptId: attempt.id });
     const featurePullRequest = pullIdentity(shipment);
     if (featurePullRequest === undefined) return output("reconciliation_required", false, "Successful feature shipment has no pull request identity.", { taskId: task.id, attemptId: attempt.id });
     return this.#release(task, attempt, repository, featurePullRequest, shipment.mergeSha, now, correlationId);
+  }
+
+  async #syncBranch(task: TaskSnapshot, attempt: TerminalAttemptSnapshot, repository: HeadlessDeliveryRepositoryRuntime, shipment: ShipmentCycleResult, now: UtcTimestamp): Promise<HeadlessDeliveryResult> {
+    const extra = { taskId: task.id, attemptId: attempt.id };
+    const block = (message: string): HeadlessDeliveryResult => {
+      // Stored once: a conflict or a refused push fails the same way every cycle and must not re-run the merge and hooks.
+      const saved = this.#store.shipmentCycles.advance(task.id, attempt.id, { state: "blocked", outcome: "policy_blocked", message: bounded(message) }, now);
+      return saved.outcome === "success" ? output("blocked", false, message, extra) : output("reconciliation_required", false, saved.message, extra);
+    };
+    if (repository.branchSync === undefined) return block(`${shipment.message} Branch sync is not configured, so a human must update the branch.`);
+    const synced = await repository.branchSync.sync({ taskId: task.id, attemptId: attempt.id, remoteName: repository.config.remoteName, baseBranch: repository.config.baseBranch, now });
+    if (synced.outcome === "synced") return output("waiting", false, synced.message, { taskId: task.id, ...(synced.successorAttemptId === undefined ? {} : { attemptId: synced.successorAttemptId }) });
+    if (synced.outcome === "retryable") return output("waiting", false, synced.message, extra);
+    if (synced.outcome === "reconciliation_required") return output("reconciliation_required", false, synced.message, extra);
+    return block(synced.conflictedFiles === undefined ? synced.message : `${synced.message} Files: ${synced.conflictedFiles.join(", ")}`);
   }
 
   async #release(task: TaskSnapshot, attempt: TerminalAttemptSnapshot, repository: HeadlessDeliveryRepositoryRuntime, featurePullRequest: ReleasePullRequestIdentity, releaseHead: string, now: UtcTimestamp, correlationId: string): Promise<HeadlessDeliveryResult> {

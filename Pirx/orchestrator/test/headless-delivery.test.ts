@@ -123,3 +123,48 @@ test("creates one immutable Release membership after exact-green feature merge a
     }
   } finally { await dispose({ directory: value.directory, store }); }
 });
+
+function startCycle(store: RuntimeSqliteStore): void {
+  const started = store.shipmentCycles.start({ schemaVersion: 1, taskId, attemptId, eventId: `shipment:${attemptId}`, correlationId: `delivery:${taskId}:${attemptId}`, repository: config.repository, headBranch: "pirx/task-headless-delivery", baseBranch: "develop", expectedHeadSha: sha, provider: "github-actions", workflowName: "CI", completionMode: "merge", state: "started", message: "Shipment cycle started.", createdAt: t1, updatedAt: t1, version: 1 });
+  if (started.outcome !== "success") throw new Error(started.message);
+}
+
+test("a PR behind its base is synced by Pirx and delivery then waits for CI on the new Attempt", async () => {
+  const value = await fixture();
+  try {
+    value.shipment.result = { outcome: "base_behind", taskId, attemptId, eventId: "shipment:fixture", message: "PR #1 is behind develop." };
+    const calls: Array<{ remoteName: string; baseBranch: string }> = [];
+    const successor = "headless-delivery-attempt-2" as AttemptId;
+    const delivery = new HeadlessDeliveryCoordinator(value.store, [{ ...value.runtime, branchSync: { sync: async (request) => { calls.push({ remoteName: request.remoteName, baseBranch: request.baseBranch }); return { outcome: "synced", message: "Pirx merged develop as ddddddd.", successorAttemptId: successor, commit: "d".repeat(40) }; } } }], { now: () => t1 });
+    const result = await delivery.reconcile();
+    assert.equal(result.outcome, "waiting");
+    assert.equal(result.attemptId, successor);
+    assert.equal(result.allowWorkerCycle, false);
+    assert.deepEqual(calls, [{ remoteName: "origin", baseBranch: "develop" }]);
+  } finally { await dispose(value); }
+});
+
+test("a sync conflict blocks delivery once, so the merge and repository hooks are not re-run every cycle", async () => {
+  const value = await fixture();
+  try {
+    startCycle(value.store);
+    value.shipment.result = { outcome: "base_behind", taskId, attemptId, eventId: "shipment:fixture", message: "PR #1 is behind develop." };
+    const delivery = new HeadlessDeliveryCoordinator(value.store, [{ ...value.runtime, branchSync: { sync: async () => ({ outcome: "conflict", message: "Merging develop conflicts in 1 file(s).", conflictedFiles: ["shared.txt"] }) } }], { now: () => t1 });
+    const result = await delivery.reconcile();
+    assert.equal(result.outcome, "blocked");
+    assert.match(result.message, /Files: shared\.txt/u);
+    const cycle = value.store.shipmentCycles.getByTaskAttempt(taskId, attemptId);
+    assert.equal(cycle.outcome === "success" ? `${cycle.value.state}:${cycle.value.outcome}` : "missing", "blocked:policy_blocked");
+  } finally { await dispose(value); }
+});
+
+test("without a branch sync a behind PR blocks with the reason instead of waiting forever", async () => {
+  const value = await fixture();
+  try {
+    startCycle(value.store);
+    value.shipment.result = { outcome: "base_behind", taskId, attemptId, eventId: "shipment:fixture", message: "PR #1 is behind develop." };
+    const result = await new HeadlessDeliveryCoordinator(value.store, [value.runtime], { now: () => t1 }).reconcile();
+    assert.equal(result.outcome, "blocked");
+    assert.match(result.message, /behind develop\. Branch sync is not configured/u);
+  } finally { await dispose(value); }
+});
