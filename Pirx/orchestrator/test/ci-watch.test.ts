@@ -175,6 +175,27 @@ test("watcher selects only the explicitly required workflow and fails closed on 
   const duplicate = new FakeGateway([], [run({ name: "Develop — Fast Gate" }), run({ id: 902, name: "Develop — Fast Gate" })]);
   const duplicateResult = await new GitHubActionsWatcher(duplicate, config, { clock }).watch({ pullRequestNumber: 189, expectedHeadSha: "sha-current", requiredWorkflowName: "Develop — Fast Gate", timeoutMs: 10 });
   assert.equal(duplicateResult.outcome, "ambiguous");
+
+  const otherFile = new FakeGateway([], [run({ name: "Develop — Fast Gate", workflowId: 7, status: "completed", conclusion: "success" }), run({ id: 902, name: "Develop — Fast Gate", workflowId: 8, status: "completed", conclusion: "success" })]);
+  const otherFileResult = await new GitHubActionsWatcher(otherFile, config, { clock }).watch({ pullRequestNumber: 189, expectedHeadSha: "sha-current", requiredWorkflowName: "Develop — Fast Gate", timeoutMs: 10 });
+  assert.equal(otherFileResult.outcome, "ambiguous");
+});
+
+test("watcher follows the newest run when the same required workflow ran twice on the exact head", async () => {
+  const clock = new FakeClock();
+  const rerun = new FakeGateway([], [run({ id: 903, name: "PR Validate", workflowId: 7, status: "completed", conclusion: "success" }), run({ id: 902, name: "PR Validate", workflowId: 7, status: "completed", conclusion: "failure" })]);
+  const rerunResult = await new GitHubActionsWatcher(rerun, config, { clock }).watch({ pullRequestNumber: 189, expectedHeadSha: "sha-current", requiredWorkflowName: "PR Validate", timeoutMs: 10 });
+  assert.equal(rerunResult.outcome, "success");
+  assert.equal(rerunResult.workflowRunId, 903);
+
+  const newerFailed = new FakeGateway([], [run({ id: 902, name: "PR Validate", workflowId: 7, status: "completed", conclusion: "success" }), run({ id: 903, name: "PR Validate", workflowId: 7, status: "completed", conclusion: "failure" })]);
+  const newerFailedResult = await new GitHubActionsWatcher(newerFailed, config, { clock }).watch({ pullRequestNumber: 189, expectedHeadSha: "sha-current", requiredWorkflowName: "PR Validate", timeoutMs: 10 });
+  assert.equal(newerFailedResult.outcome, "failed");
+  assert.equal(newerFailedResult.workflowRunId, 903);
+
+  const unnamed = new FakeGateway([], [run({ workflowId: 7 }), run({ id: 902, workflowId: 7 })]);
+  const unnamedResult = await new GitHubActionsWatcher(unnamed, config, { clock }).watch({ pullRequestNumber: 189, expectedHeadSha: "sha-current", timeoutMs: 10 });
+  assert.equal(unnamedResult.outcome, "ambiguous");
 });
 
 test("watcher exposes cancellation and timeout without another model/tool call", async () => {

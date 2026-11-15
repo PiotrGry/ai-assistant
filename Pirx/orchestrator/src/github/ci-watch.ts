@@ -601,6 +601,14 @@ export class GitHubActionsWatcher {
         attempts: 1,
       };
     }
+    // A re-run, or an approval of a run that was waiting, starts another run of the
+    // same workflow on the same head. GitHub's required checks then follow the
+    // newest run, so do the same. Runs whose workflow file is unknown or differs
+    // stay ambiguous: the name alone does not say which workflow is the gate.
+    const workflowId = matches[0]!.workflowId;
+    if (matches.length > 1 && request.requiredWorkflowName !== undefined && workflowId !== undefined && matches.every((run) => run.workflowId === workflowId)) {
+      return { result: { ...result, value: matches.reduce((newest, run) => (run.id > newest.id ? run : newest)) }, attempts: 1 };
+    }
     if (matches.length > 1) {
       return {
         result: failure("permanent_error", "conflict", request.requiredWorkflowName === undefined ? "Multiple GitHub Actions runs match the requested pull request head." : "Multiple GitHub Actions runs match the requested pull request head and required workflow.", result.correlationId, "not_accepted", result.response),
