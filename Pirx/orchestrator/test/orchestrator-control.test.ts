@@ -11,6 +11,7 @@ import {
   RuntimeSqliteStore,
   createTask,
   transitionTask,
+  transitionAttempt,
   type TaskId,
   type UtcTimestamp,
 } from "../src/index.js";
@@ -238,5 +239,42 @@ test("pruning drops only week-old routine heartbeats and keeps every failure", a
     assert.equal(entry.outcome === "success" ? entry.value : undefined, 500);
     const left = (store.database.prepare("SELECT sequence FROM runtime_orchestrator_diagnostics ORDER BY sequence").all() as Array<{ sequence: number }>).map((row) => row.sequence);
     assert.deepEqual(left, [3, 4, 5, 499, 500]);
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("status says a worker is idle while a pushed Task waits on delivery, and asks for a human when the wait is long or stopped", async () => {
+  // gh-462: chat read an in_progress Task with a CODE_PUSHED Attempt as "Claude is working; nothing needs intervention".
+  const directory = await mkdtemp(join(tmpdir(), "pirx-status-delivery-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  try {
+    const taskId = "status-delivery-task" as TaskId;
+    const attemptId = "status-delivery-attempt" as never;
+    const sha = "e".repeat(40);
+    const created = createTask({ id: taskId, githubReference: { owner: "PiotrGry", repository: "zdrovena", issueNumber: 462 }, goal: "Deliver", scope: "delivery", acceptanceCriteria: ["merged"], priority: 1, risk: "low", requiredCapabilities: ["repository.write"], createdAt: t0 });
+    assert.ok(created.ok); if (!created.ok) return;
+    assert.equal(store.tasks.create(created.value).outcome, "success");
+    const started = store.startAttempt(taskId, { id: attemptId, worker: "pepus-claude", provider: "claude-code", branch: "pirx/task-462", worktree: "/tmp/w" }, t0);
+    assert.equal(started.outcome, "success"); if (started.outcome !== "success") return;
+    const finished = transitionAttempt(started.value.attempt, "running", { type: "finish", result: "CODE_PUSHED", branch: "pirx/task-462", finalCommit: sha, currentCommit: sha }, t1);
+    assert.ok(finished.ok); if (!finished.ok) return;
+    assert.equal(store.attempts.update(finished.value, "running").outcome, "success");
+    assert.equal(store.shipmentCycles.start({ schemaVersion: 1, taskId, attemptId, eventId: `shipment:${attemptId}`, correlationId: "delivery", repository: "PiotrGry/zdrovena", headBranch: "pirx/task-462", baseBranch: "develop", expectedHeadSha: sha, provider: "github-actions", workflowName: "Fast Gate", completionMode: "merge", state: "started", message: "Shipment cycle started.", createdAt: t1, updatedAt: t1, version: 1 }).outcome, "success");
+    const control = new OrchestratorControlRepository(store);
+    const hour = (hours: number) => new Date(Date.parse(t1) + hours * 3_600_000).toISOString() as UtcTimestamp;
+
+    const soon = control.status(hour(1), 120_000);
+    assert.equal(soon.outcome, "success"); if (soon.outcome !== "success") return;
+    assert.deepEqual(soon.value.worker, { state: "idle" });
+    assert.equal(soon.value.delivery?.headSha, sha);
+    assert.equal(soon.value.delivery?.stage, "started");
+    assert.equal(soon.value.delivery?.since, t1);
+    assert.equal(soon.value.attentionRequired, undefined);
+
+    const late = control.status(hour(3), 120_000);
+    assert.equal(late.outcome === "success" ? late.value.attentionRequired?.reason : "missing", `Delivery has waited since ${t1}: Shipment cycle started.`);
+
+    assert.equal(store.shipmentCycles.advance(taskId, attemptId, { state: "blocked", outcome: "policy_blocked", message: "Merging develop conflicts in 1 file(s)." }, t1).outcome, "success");
+    const stopped = control.status(hour(1), 120_000);
+    assert.equal(stopped.outcome === "success" ? stopped.value.attentionRequired?.reason : "missing", "Delivery stopped: Merging develop conflicts in 1 file(s).");
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });

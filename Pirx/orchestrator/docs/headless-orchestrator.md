@@ -151,6 +151,26 @@ same exact-head policy. Deployment and production-verification provider ports
 remain explicit follow-up configuration; until available, the Release truthfully
 remains in `deploying` and the runtime Task remains active.
 
+Waiting is never final. A CI poll that times out, a run that is pending,
+cancelled or briefly unavailable, and a rate limit are observed again on the
+next cycle. Right after a push, a head with no CI run yet counts as waiting for
+30 minutes before it counts as stale.
+
+A PR that GitHub reports as `behind` after green CI is brought up to date by
+Pirx itself. Pirx merges the base branch into the Task worktree it owns,
+pushes the merge commit without force, and records it as a new `CODE_PUSHED`
+Attempt by `pirx-branch-sync`. CI and merge then follow the same exact-head
+rules for that commit. A merge conflict, a push the repository rejects, or five
+syncs in a row block delivery once, with the reason.
+
+A PR that the repository merged itself (for example an auto-merge workflow) at
+exactly the recorded head counts as merged; Pirx does not merge it again.
+
+`pirx_orchestrator_status` reports `worker.state` (`running` only while a leased
+Claude worker runs), a `delivery` summary with what the pushed commit waits for
+and since when, and `attentionRequired` when delivery stopped or has waited for
+more than two hours.
+
 Resource telemetry remains a separate follow-up Task.
 
 ## Durable execution observations

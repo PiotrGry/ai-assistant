@@ -100,7 +100,11 @@ export class SqliteOrchestratorControlToolPort implements OrchestratorControlToo
 
 const entitySchema = z.object({ diagnostic: z.unknown().optional(), id: z.string(), state: z.string(), issueNumber: z.number().int().positive().optional(), ordinal: z.number().int().positive().optional(), result: z.string().optional(), queueOrder: z.number().int().positive().optional(), expiresAt: z.string().optional() });
 const hostShutdownSchema = z.object({ requestOperationId: z.string(), target: z.enum(["queue_drained", "next_checkpoint"]), state: z.enum(["armed", "triggered", "draining", "poweroff_requested", "accepted", "cancelled", "failed"]), requestedAt: z.string(), version: z.number().int().positive(), triggeredAt: z.string().optional(), terminalAt: z.string().optional(), terminalOutcome: z.string().optional() });
+const workerSchema = z.object({ state: z.enum(["running", "idle"]), attemptId: z.string().optional() });
+const deliverySchema = z.object({ taskId: z.string(), attemptId: z.string(), headSha: z.string(), producedBy: z.string(), stage: z.string(), outcome: z.string().optional(), pullRequestNumber: z.number().int().positive().optional(), ciState: z.string().optional(), since: z.string(), message: z.string() });
 const snapshotSchema = z.object({
+  worker: workerSchema,
+  delivery: deliverySchema.optional(),
   attentionRequired: z.object({ task: entitySchema, attempt: entitySchema.optional(), reason: z.string(), nextAction: z.literal("inspect_blocker") }).optional(),
   diagnostics: z.array(z.object({ sequence: z.number().int().positive(), recordedAt: z.string(), event: z.string(), outcome: z.string(), reason: z.string().optional(), details: z.unknown().optional() })).optional(),
   schemaVersion: z.literal(1), requestedMode: z.enum(["running", "paused"]), observedState: z.enum(["starting", "running", "paused", "stopping", "stopped", "error"]), version: z.number().int().nonnegative(), heartbeatAt: z.string().optional(), heartbeatStale: z.boolean(), lastPersistedObservationIncomplete: z.boolean().optional(), lastQueueOutcome: z.string().optional(), lastDeliveryOutcome: z.string().optional(), lastCycleOutcome: z.string().optional(), activeTask: entitySchema.optional(), activeAttempt: entitySchema.optional(), activeLease: entitySchema.optional(), nextQueuedTask: entitySchema.optional(), activeRelease: entitySchema.optional(), hostShutdown: hostShutdownSchema.optional(),
@@ -158,7 +162,7 @@ export function registerOrchestratorTools(server: McpServer, options: { readonly
   const now = options.now ?? (() => new Date().toISOString() as UtcTimestamp);
   server.registerTool("pirx_orchestrator_status", {
     title: "Read Pirx orchestrator status",
-    description: "Read one bounded durable status snapshot for the headless Pirx orchestrator. This never starts work, reads prompts, or streams logs.",
+    description: "Read one bounded durable status snapshot for the headless Pirx orchestrator. worker.state says whether a Claude worker runs now; an in_progress Task with worker idle is waiting on delivery or a human. delivery says what the pushed commit waits for and since when. attentionRequired present means a human should act. This never starts work, reads prompts, or streams logs.",
     inputSchema: z.object({ staleAfterMs: z.number().int().min(1_000).max(3_600_000).optional() }).strict(),
     outputSchema: statusOutputSchema,
     annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },

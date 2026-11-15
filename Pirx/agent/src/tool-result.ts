@@ -73,10 +73,16 @@ function summarizeDiagnosticResult(value: unknown, maxCharacters: number, toolNa
   if (toolName === "pirx_orchestrator_status") {
     const snapshot = record(result.snapshot);
     if (snapshot === undefined || !Array.isArray(snapshot.diagnostics)) return undefined;
-    const diagnostics = snapshot.diagnostics;
-    const summary: Record<string, unknown> = { outcome: "success", truncated: true, snapshot: { diagnostics: [] } };
-    const compactSnapshot = summary.snapshot as { diagnostics: Record<string, unknown>[]; [key: string]: unknown };
-    for (const item of diagnostics) {
+    const compactSnapshot: Record<string, unknown> & { diagnostics: Record<string, unknown>[] } = { diagnostics: [] };
+    const summary: Record<string, unknown> = { outcome: "success", truncated: true, snapshot: compactSnapshot };
+    const fits = (): boolean => JSON.stringify(summary).length <= maxCharacters;
+    // What the operator asks about goes in first: is a worker running, does a human need to act, what does delivery wait for.
+    for (const key of ["worker", "attentionRequired", "delivery", "observedState", "requestedMode", "activeTask", "lastDeliveryOutcome", "heartbeatStale"]) {
+      if (snapshot[key] === undefined) continue;
+      compactSnapshot[key] = snapshot[key];
+      if (!fits()) delete compactSnapshot[key];
+    }
+    for (const item of snapshot.diagnostics) {
       const diagnostic = record(item);
       if (diagnostic === undefined || !Number.isSafeInteger(diagnostic.sequence)) continue;
       const compact: Record<string, unknown> = { sequence: diagnostic.sequence };
@@ -86,20 +92,15 @@ function summarizeDiagnosticResult(value: unknown, maxCharacters: number, toolNa
         if (typeof diagnostic[key] === "string") compact[key] = diagnostic[key];
       }
       compactSnapshot.diagnostics.push(compact);
-      if (JSON.stringify(summary).length > maxCharacters) {
+      if (!fits()) {
         delete compact.event;
         delete compact.outcome;
-        if (JSON.stringify(summary).length > maxCharacters) delete compact.details;
-        if (JSON.stringify(summary).length > maxCharacters) {
+        if (!fits()) delete compact.details;
+        if (!fits()) {
           compactSnapshot.diagnostics.pop();
           break;
         }
       }
-    }
-    for (const key of ["observedState", "requestedMode"]) {
-      if (typeof snapshot[key] !== "string") continue;
-      compactSnapshot[key] = snapshot[key];
-      if (JSON.stringify(summary).length > maxCharacters) delete compactSnapshot[key];
     }
     return JSON.stringify(summary);
   }

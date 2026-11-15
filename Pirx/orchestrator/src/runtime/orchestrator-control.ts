@@ -56,7 +56,29 @@ export interface OrchestratorStatusSnapshot {
   readonly hostShutdown?: OrchestratorHostShutdownSummary;
   readonly diagnostics?: readonly OrchestratorDiagnostic[];
   readonly attentionRequired?: { readonly task: OrchestratorEntitySummary; readonly attempt?: OrchestratorEntitySummary; readonly reason: string; readonly nextAction: "inspect_blocker" };
+  /** Whether a Claude worker process is running now; an in-progress Task alone does not mean one is. */
+  readonly worker: OrchestratorWorkerSummary;
+  /** Where delivery of the active Task's pushed commit stands, and since when. */
+  readonly delivery?: OrchestratorDeliverySummary;
 }
+
+export interface OrchestratorWorkerSummary { readonly state: "running" | "idle"; readonly attemptId?: string; }
+export interface OrchestratorDeliverySummary {
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly headSha: string;
+  /** "worker" for a Claude commit, "pirx-branch-sync" for Pirx's merge of the base branch. */
+  readonly producedBy: string;
+  readonly stage: string;
+  readonly outcome?: string;
+  readonly pullRequestNumber?: number;
+  readonly ciState?: string;
+  readonly since: UtcTimestamp;
+  readonly message: string;
+}
+
+/** Delivery that has waited this long, or stopped, is surfaced as needing a human. */
+export const DELIVERY_ATTENTION_AFTER_MS = 2 * 3_600_000;
 
 export interface OrchestratorDiagnostic { readonly sequence: number; readonly recordedAt: string; readonly event: string; readonly outcome: string; readonly reason?: string; readonly details?: unknown; }
 export interface OrchestratorDiagnosticChunk { readonly sequence: number; readonly offset: number; readonly totalCharacters: number; readonly text: string; readonly nextOffset?: number; }
@@ -165,6 +187,24 @@ export class OrchestratorControlRepository {
     });
   }
 
+  #delivery(taskId: string): OrchestratorDeliverySummary | undefined {
+    const history = this.#store.attempts.listByTask(taskId);
+    const latest = history.outcome === "success" ? history.value.at(-1) : undefined;
+    if (latest?.state !== "terminal" || latest.result !== "CODE_PUSHED" || latest.finalCommit === undefined) return undefined;
+    const cycle = this.#store.shipmentCycles.getByTaskAttempt(taskId, latest.id);
+    const ci = this.#store.ciCorrelations.getByTaskAttempt(taskId, latest.id);
+    const since = ci.outcome === "success" ? ci.value.createdAt : cycle.outcome === "success" ? cycle.value.createdAt : latest.endedAt;
+    const stage = cycle.outcome === "success" ? cycle.value.state : "not_started";
+    const message = cycle.outcome === "success" ? cycle.value.message : "Delivery has not started for the pushed commit.";
+    return Object.freeze({
+      taskId, attemptId: latest.id, headSha: latest.finalCommit, producedBy: latest.provider === "pirx-branch-sync" ? "pirx-branch-sync" : "worker", stage,
+      ...(cycle.outcome === "success" && cycle.value.outcome !== undefined ? { outcome: cycle.value.outcome } : {}),
+      ...(cycle.outcome === "success" && cycle.value.pullRequestNumber !== undefined ? { pullRequestNumber: cycle.value.pullRequestNumber } : {}),
+      ...(ci.outcome === "success" ? { ciState: ci.value.state } : {}),
+      since, message: String(diagnosticContext(message)).slice(0, 256),
+    });
+  }
+
   public status(now: UtcTimestamp, staleAfterMs: number): StorageResult<OrchestratorStatusSnapshot> {
     if (!canonicalTimestamp(now) || !Number.isSafeInteger(staleAfterMs) || staleAfterMs <= 0 || staleAfterMs > 3_600_000) return { outcome: "invalid_record", message: "Orchestrator status bounds are invalid." };
     return this.#store.execute(() => {
@@ -189,7 +229,7 @@ export class OrchestratorControlRepository {
         const nextTaskSummary = summary(next, { issue: true, queue: true });
         const activeReleaseSummary = summary(release);
         const hostShutdown = shutdown.outcome === "success" ? { requestOperationId: shutdown.value.requestOperationId, target: shutdown.value.target, state: shutdown.value.state, requestedAt: shutdown.value.requestedAt, version: shutdown.value.version, ...(shutdown.value.triggeredAt === undefined ? {} : { triggeredAt: shutdown.value.triggeredAt }), ...(shutdown.value.terminalAt === undefined ? {} : { terminalAt: shutdown.value.terminalAt }), ...(shutdown.value.terminalOutcome === undefined ? {} : { terminalOutcome: shutdown.value.terminalOutcome }) } : undefined;
-        const snapshot: OrchestratorStatusSnapshot = { schemaVersion: 1, requestedMode: record?.requestedMode ?? "running", observedState: record?.observedState ?? "stopped", version: record?.version ?? 0, ...(record?.heartbeatAt === undefined ? {} : { heartbeatAt: record.heartbeatAt }), heartbeatStale, lastPersistedObservationIncomplete, ...(record?.lastQueueOutcome === undefined ? {} : { lastQueueOutcome: record.lastQueueOutcome }), ...(record?.lastDeliveryOutcome === undefined ? {} : { lastDeliveryOutcome: record.lastDeliveryOutcome }), ...(record?.lastCycleOutcome === undefined ? {} : { lastCycleOutcome: record.lastCycleOutcome }), ...(activeTaskSummary === undefined ? {} : { activeTask: activeTaskSummary }), ...(activeAttemptSummary === undefined ? {} : { activeAttempt: activeAttemptSummary }), ...(activeLeaseSummary === undefined ? {} : { activeLease: activeLeaseSummary }), ...(nextTaskSummary === undefined ? {} : { nextQueuedTask: nextTaskSummary }), ...(activeReleaseSummary === undefined ? {} : { activeRelease: activeReleaseSummary }), ...(hostShutdown === undefined ? {} : { hostShutdown }) };
+        const snapshot: Omit<OrchestratorStatusSnapshot, "worker"> = { schemaVersion: 1, requestedMode: record?.requestedMode ?? "running", observedState: record?.observedState ?? "stopped", version: record?.version ?? 0, ...(record?.heartbeatAt === undefined ? {} : { heartbeatAt: record.heartbeatAt }), heartbeatStale, lastPersistedObservationIncomplete, ...(record?.lastQueueOutcome === undefined ? {} : { lastQueueOutcome: record.lastQueueOutcome }), ...(record?.lastDeliveryOutcome === undefined ? {} : { lastDeliveryOutcome: record.lastDeliveryOutcome }), ...(record?.lastCycleOutcome === undefined ? {} : { lastCycleOutcome: record.lastCycleOutcome }), ...(activeTaskSummary === undefined ? {} : { activeTask: activeTaskSummary }), ...(activeAttemptSummary === undefined ? {} : { activeAttempt: activeAttemptSummary }), ...(activeLeaseSummary === undefined ? {} : { activeLease: activeLeaseSummary }), ...(nextTaskSummary === undefined ? {} : { nextQueuedTask: nextTaskSummary }), ...(activeReleaseSummary === undefined ? {} : { activeRelease: activeReleaseSummary }), ...(hostShutdown === undefined ? {} : { hostShutdown }) };
         const rows = this.#store.database.prepare("SELECT * FROM runtime_orchestrator_diagnostics WHERE sequence IN (SELECT MAX(sequence) FROM runtime_orchestrator_diagnostics GROUP BY event) OR sequence = (SELECT MAX(sequence) FROM runtime_orchestrator_diagnostics WHERE event = 'cycle' AND outcome <> 'idle') ORDER BY sequence DESC LIMIT 12").all() as Array<{ sequence: number; recorded_at: string; diagnostic_json: string }>;
         const diagnostics = rows.map((row): OrchestratorDiagnostic => {
           const parsed = diagnosticContext(JSON.parse(row.diagnostic_json)) as HeadlessServiceEvent;
@@ -207,8 +247,17 @@ export class OrchestratorControlRepository {
         const attempt = attentionAttempt !== undefined && latestDiagnostic !== undefined
           ? Object.freeze({ ...attentionAttempt, diagnostic: diagnosticContext(latestDiagnostic) })
           : attentionAttempt;
-        const attentionRequired = attentionTask === undefined ? undefined : { task: attentionTask, ...(attempt === undefined ? {} : { attempt }), reason: String(diagnosticContext(attention?.blocking_reason ?? "Task requires reconciliation.")), nextAction: "inspect_blocker" as const };
-        return { outcome: "success", value: Object.freeze({ ...snapshot, diagnostics, ...(attentionRequired === undefined ? {} : { attentionRequired }) }) };
+        const worker: OrchestratorWorkerSummary = activeLeaseSummary !== undefined && activeAttemptSummary?.state === "running" ? { state: "running", attemptId: activeAttemptSummary.id } : { state: "idle" };
+        const delivery = activeTaskSummary === undefined ? undefined : this.#delivery(activeTaskSummary.id);
+        const deliveryStopped = delivery !== undefined && (delivery.stage === "blocked" || delivery.stage === "reconciliation_required");
+        const deliveryStale = delivery !== undefined && Date.parse(now) - Date.parse(delivery.since) > DELIVERY_ATTENTION_AFTER_MS;
+        const deliveryAttention = activeTaskSummary === undefined || delivery === undefined || (!deliveryStopped && !deliveryStale) ? undefined : {
+          task: activeTaskSummary, ...(activeAttemptSummary === undefined ? {} : { attempt: activeAttemptSummary }),
+          reason: String(diagnosticContext(deliveryStopped ? `Delivery stopped: ${delivery.message}` : `Delivery has waited since ${delivery.since}: ${delivery.message}`)),
+          nextAction: "inspect_blocker" as const,
+        };
+        const attentionRequired = attentionTask === undefined ? deliveryAttention : { task: attentionTask, ...(attempt === undefined ? {} : { attempt }), reason: String(diagnosticContext(attention?.blocking_reason ?? "Task requires reconciliation.")), nextAction: "inspect_blocker" as const };
+        return { outcome: "success", value: Object.freeze({ ...snapshot, worker, ...(delivery === undefined ? {} : { delivery }), diagnostics, ...(attentionRequired === undefined ? {} : { attentionRequired }) }) };
       } catch { return { outcome: "storage_error", message: "Orchestrator status snapshot could not be read." }; }
     });
   }

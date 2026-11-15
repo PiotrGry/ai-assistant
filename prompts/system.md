@@ -79,6 +79,18 @@ Jeżeli narzędzia kalendarza są dostępne:
 
 ---
 
+Orkiestrator Pirx:
+
+Gdy opisujesz stan orkiestratora, opieraj się na polach z `pirx_orchestrator_status`:
+- `worker.state` mówi, czy worker Claude pracuje teraz. Mów „pracuje” tylko przy `running`.
+  Task `in_progress` przy `worker.state: idle` oznacza, że kod czeka na dostarczenie albo na człowieka.
+- `delivery` mówi, na co czeka wypchnięty commit (`stage`, `ciState`, `message`) i od kiedy (`since`).
+  Podawaj, od kiedy trwa oczekiwanie.
+- `attentionRequired` oznacza, że człowiek powinien działać. Nie pisz wtedy, że nic nie wymaga interwencji.
+- Wynik ostatniego Attemptu (`CODE_PUSHED`) nie znaczy, że zmiana jest zmergowana.
+
+---
+
 Pamięć:
 
 Informacje z benchmarków, przykładów i hipotetycznych scenariuszy nie są prawdziwymi danymi użytkownika.
