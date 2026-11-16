@@ -96,7 +96,21 @@ export interface SchedulerOptions {
   readonly selectionPort: SchedulerSelectionPort;
   readonly workerPort: SchedulerWorkerPort;
   readonly shutdownTimeoutMs?: number;
+  /** Called for every failed Lease renewal; `stopping` is true when the worker is being stopped for it. */
+  readonly onLeaseRenewalFailure?: (failure: SchedulerLeaseRenewalFailure) => void;
 }
+
+export interface SchedulerLeaseRenewalFailure {
+  readonly taskId: TaskId;
+  readonly attemptId: AttemptId;
+  readonly leaseId: LeaseId;
+  readonly reason: string;
+  readonly consecutiveFailures: number;
+  readonly stopping: boolean;
+}
+
+/** After this many failed renewals in a row the Lease may already be lost, so the worker is stopped. */
+const MAXIMUM_CONSECUTIVE_RENEWAL_FAILURES = 2;
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 
@@ -199,18 +213,42 @@ export class SingleWorkerScheduler {
     if (attached.outcome !== "success") return this.#afterLeaseFailure(candidate.task.id, lease, `attempt_attach:${attached.reason}`, attempt.attemptId);
     let currentLease = attached.value;
     let execution: WorkerExecutionResult;
+    let leaseLost: string | undefined;
     if (controller.signal.aborted || this.#stopping) {
       execution = { outcome: "cancelled", reason: "shutdown_interrupted" };
     } else {
       // A worker has no wall-clock limit (its idle watchdog bounds silence), so
       // keep its Lease alive while it runs instead of letting it expire.
       let renewal: Promise<void> = Promise.resolve();
+      let consecutiveRenewalFailures = 0;
       const renewLease = this.#options.leasePort.renew?.bind(this.#options.leasePort);
+      const renewalFailed = (reason: string): void => {
+        if (leaseLost) return;
+        consecutiveRenewalFailures += 1;
+        const stopping = consecutiveRenewalFailures >= MAXIMUM_CONSECUTIVE_RENEWAL_FAILURES;
+        if (stopping) leaseLost = reason;
+        try {
+          this.#options.onLeaseRenewalFailure?.({ taskId: candidate.task.id, attemptId: attempt.attemptId, leaseId: currentLease.id, reason: reason.slice(0, 256), consecutiveFailures: consecutiveRenewalFailures, stopping });
+        } catch { /* Reporting cannot affect Lease handling. */ }
+        if (stopping) controller.abort();
+      };
       const renewTimer = renewLease === undefined ? undefined : setInterval(() => {
         renewal = renewal.then(async () => {
-          const renewed = await renewLease(currentLease, this.#options.clock.now(), this.#options.leaseDurationMs);
-          if (renewed.outcome === "success") currentLease = renewed.value;
-        }).catch(() => undefined);
+          if (leaseLost) return;
+          let renewed: SchedulerPortResult<LeaseRecord>;
+          try {
+            renewed = await renewLease(currentLease, this.#options.clock.now(), this.#options.leaseDurationMs);
+          } catch {
+            renewalFailed("renew_threw");
+            return;
+          }
+          if (renewed.outcome === "success") {
+            currentLease = renewed.value;
+            consecutiveRenewalFailures = 0;
+          } else {
+            renewalFailed(renewed.reason);
+          }
+        });
       }, Math.max(1_000, Math.floor(this.#options.leaseDurationMs / 3)));
       renewTimer?.unref();
       try {
@@ -222,6 +260,9 @@ export class SingleWorkerScheduler {
         await renewal;
       }
     }
+    // The Lease may already have expired or passed to another holder: do not
+    // persist a result under it or release it; hand it to recovery instead.
+    if (leaseLost !== undefined) return this.#afterLeaseFailure(candidate.task.id, currentLease, `lease_renewal:${leaseLost}`, attempt.attemptId);
     const persisted = await this.#options.persistencePort.persist({ taskId: candidate.task.id, attemptId: attempt.attemptId, leaseId: currentLease.id, execution, interrupted: controller.signal.aborted || this.#stopping, now: this.#options.clock.now() });
     if (persisted.outcome !== "success") return this.#afterLeaseFailure(candidate.task.id, currentLease, `result_persist:${persisted.reason}`, attempt.attemptId);
     const released = await this.#options.leasePort.release(currentLease, this.#options.clock.now());

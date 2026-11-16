@@ -3,12 +3,7 @@
     "pirx-local": {
       "type": "stdio",
       "command": "/usr/bin/node",
-      "args": ["/home/pepus/ai-assistant/Pirx/mcp-server/dist/index.js"],
-      "env": {
-        "PIRX_GITHUB_OWNER": "PiotrGry",
-        "PIRX_GITHUB_REPOSITORY": "ai-assistant",
-        "PIRX_GITHUB_POC_ISSUE": "179"
-      }
+      "args": ["/home/pepus/ai-assistant/Pirx/mcp-server/dist/index.js"]
     }
   }
 }

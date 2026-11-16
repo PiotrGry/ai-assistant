@@ -136,9 +136,16 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   // `configuration` error naming what is missing instead of silently disappearing.
   let githubConfig = options.githubPocConfig;
   let githubConfigurationError: string | undefined;
-  if (githubConfig === undefined) {
+  if (githubConfig === undefined && config.githubTargetError !== undefined) {
+    githubConfigurationError = config.githubTargetError;
+    process.stderr.write(`pirx-mcp-server: ${config.githubTargetError}\n`);
+  } else if (githubConfig === undefined) {
     try {
-      githubConfig = loadGitHubConfig(environment);
+      githubConfig = loadGitHubConfig(config.githubTarget === undefined ? environment : {
+        ...environment,
+        PIRX_GITHUB_OWNER: config.githubTarget.owner,
+        PIRX_GITHUB_REPOSITORY: config.githubTarget.repository,
+      });
     } catch (error: unknown) {
       githubConfigurationError =
         error instanceof GitHubConfigurationError

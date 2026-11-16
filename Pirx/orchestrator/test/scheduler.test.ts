@@ -13,6 +13,8 @@ import {
   type SchedulerCapabilityPort,
   type SchedulerExecutionPort,
   type SchedulerLeasePort,
+  type SchedulerLeaseRenewalFailure,
+  type SchedulerOptions,
   type SchedulerPersistencePort,
   type SchedulerPortResult,
   type SchedulerRecoveryPort,
@@ -81,8 +83,9 @@ class Fakes {
   readonly execution: SchedulerExecutionPort = { invoke: async ({ signal }) => { this.events.push("invoke"); this.invocations += 1; return this.invocation === undefined ? this.executionResult : this.invocation(signal); } };
 }
 
-function scheduler(fakes: Fakes, leaseDurationMs = 60_000): SingleWorkerScheduler {
+function scheduler(fakes: Fakes, leaseDurationMs = 60_000, extra: Partial<SchedulerOptions> = {}): SingleWorkerScheduler {
   return new SingleWorkerScheduler({
+    ...extra,
     workerId: "pirx",
     workerCapabilities: ["tests.run"],
     leaseDurationMs,
@@ -219,4 +222,66 @@ test("renews the Lease while a long worker runs and releases the renewed version
   assert.equal(cycle.outcome, "started");
   assert.deepEqual(renewed, [2, 3]);
   assert.ok(fakes.events.includes("release:4"), fakes.events.join(","));
+});
+
+
+function renewingFakes(renew: NonNullable<SchedulerLeasePort["renew"]>): Fakes {
+  const fakes = new Fakes();
+  const leases = fakes.leases;
+  (fakes as unknown as { leases: SchedulerLeasePort }).leases = {
+    ...leases,
+    renew,
+    release: async (value) => { fakes.events.push(`release:${value.version}`); return fakes.releaseResult; },
+  };
+  return fakes;
+}
+
+test("records a diagnostic for one failed Lease renewal and lets the worker finish", async () => {
+  let calls = 0;
+  const fakes = renewingFakes(async (value) => { calls += 1; return calls === 1 ? { outcome: "conflict", reason: "lease_version_changed" } : result(lease(value.version + 1)); });
+  const failures: SchedulerLeaseRenewalFailure[] = [];
+  fakes.invocation = () => new Promise((resolve) => setTimeout(() => resolve({ outcome: "success", summary: "done" }), 2_300));
+  const cycle = await scheduler(fakes, 3_000, { onLeaseRenewalFailure: (failure) => { failures.push(failure); } }).cycle();
+  assert.equal(cycle.outcome, "started");
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]?.consecutiveFailures, 1);
+  assert.equal(failures[0]?.reason, "lease_version_changed");
+  assert.equal(failures[0]?.taskId, taskId);
+  assert.equal(failures[0]?.attemptId, attemptId);
+  assert.equal(failures[0]?.stopping, false);
+  assert.ok(fakes.events.some((event) => event.startsWith("release")), fakes.events.join(","));
+  assert.ok(!fakes.events.includes("uncertain"));
+});
+
+test("a successful renewal resets the consecutive failure count", async () => {
+  const outcomes = ["fail", "ok", "fail"];
+  let calls = 0;
+  const fakes = renewingFakes(async (value) => (outcomes[calls++] ?? "ok") === "fail" ? { outcome: "unavailable", reason: "database_busy" } : result(lease(value.version + 1)));
+  const failures: SchedulerLeaseRenewalFailure[] = [];
+  fakes.invocation = () => new Promise((resolve) => setTimeout(() => resolve({ outcome: "success", summary: "done" }), 3_300));
+  const cycle = await scheduler(fakes, 3_000, { onLeaseRenewalFailure: (failure) => { failures.push(failure); } }).cycle();
+  assert.equal(cycle.outcome, "started");
+  assert.deepEqual(failures.map((failure) => failure.consecutiveFailures), [1, 1]);
+  assert.ok(!fakes.events.includes("uncertain"));
+});
+
+test("two consecutive failed renewals stop the worker and mark the Lease uncertain", async () => {
+  let calls = 0;
+  const fakes = renewingFakes(async () => { calls += 1; if (calls === 1) throw new Error("sqlite down"); return { outcome: "conflict", reason: "lease_version_changed" }; });
+  const failures: SchedulerLeaseRenewalFailure[] = [];
+  let aborted = false;
+  fakes.invocation = (signal) => new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ outcome: "success", summary: "too late" }), 10_000);
+    signal.addEventListener("abort", () => { aborted = true; clearTimeout(timer); resolve({ outcome: "cancelled", reason: "aborted" }); }, { once: true });
+  });
+  const cycle = await scheduler(fakes, 3_000, { onLeaseRenewalFailure: (failure) => { failures.push(failure); } }).cycle();
+  assert.equal(aborted, true);
+  assert.deepEqual(failures.map((failure) => [failure.consecutiveFailures, failure.stopping]), [[1, false], [2, true]]);
+  assert.equal(failures[0]?.reason, "renew_threw");
+  assert.equal(cycle.outcome, "failed");
+  assert.match(cycle.outcome === "failed" ? cycle.reason : "", /^lease_renewal:lease_version_changed/u);
+  assert.equal(cycle.outcome === "failed" ? cycle.durable : false, true);
+  assert.ok(fakes.events.includes("uncertain"), fakes.events.join(","));
+  assert.ok(!fakes.events.includes("persist"), fakes.events.join(","));
+  assert.ok(!fakes.events.some((event) => event.startsWith("release")), fakes.events.join(","));
 });
