@@ -351,6 +351,24 @@ test("worktree directory names avoid ':' so tools such as uv accept the path (gh
   assert.equal(worktreeDirectoryName("gh-462-5c40", "attempt:gh-462-5c40:12:1794315588056"), "pirx-gh-462-5c40-attempt-gh-462-5c40-12-1794315588056");
 });
 
+test("a worker stopped at its total Attempt limit releases its Lease and keeps the limit diagnostic", async () => {
+  const diagnostic = createWorkerFailureDiagnostic("attempt_time_limit", { stage: "process", providerMessage: "Attempt stopped by attemptTimeLimitMs=10800000 after 10800004 ms; last output 2000 ms ago." });
+  const value = await setup({ execute: async (request) => ({ kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "FAILED", reason: diagnostic.message, diagnostic }) });
+  try {
+    const result = await value.runtime.cycle();
+    assert.equal(result.outcome, "failed");
+    assert.equal(value.store.leases.getActiveByWorker("pirx-worker").outcome, "not_found");
+    const attempts = value.store.attempts.listByTask(taskId);
+    assert.equal(attempts.outcome, "success");
+    const attempt = attempts.outcome === "success" ? attempts.value[0] : undefined;
+    assert.equal(attempt?.state, "terminal");
+    if (attempt?.state === "terminal") {
+      assert.equal(attempt.result, "FAILED");
+      assert.equal(attempt.diagnostic?.code, "attempt_time_limit");
+      assert.match(attempt.diagnostic?.providerMessage ?? "", /attemptTimeLimitMs=10800000/u);
+    }
+  } finally { await dispose(value); }
+});
 
 test("two failed Lease renewals stop the worker, record each failure and leave the Task resumable", async () => {
   const failures: SchedulerLeaseRenewalFailure[] = [];

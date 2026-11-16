@@ -14,6 +14,8 @@ export interface HeadlessRepositoryConfig extends ProductionRepositoryConfig {
   readonly testCommands: readonly string[];
   /** Claude turn bound per Attempt; the worker profile default applies when absent. */
   readonly maxTurns?: number;
+  /** Total time per Attempt; the worker profile default applies when absent. */
+  readonly attemptTimeLimitMs?: number;
   readonly delivery: HeadlessDeliveryPolicyConfig;
 }
 
@@ -62,7 +64,7 @@ export interface HeadlessOrchestratorConfigSelection {
 }
 
 const TOP_LEVEL_KEYS = new Set(["schemaVersion", "databasePath", "workerId", "provider", "workerCapabilities", "repositories", "worktreeParent", "leaseDurationMs", "shutdownTimeoutMs", "workerTimeoutMs", "workerOutputBytes", "workerErrorBytes", "maximumConsecutiveResumeFailures", "cycleIntervalMs", "errorIntervalMs", "githubProjectOwner", "githubProjectNumber", "githubApiUrl", "githubTimeoutMs", "hostPowerOff"]);
-const REPOSITORY_KEYS = new Set(["repository", "repositoryRoot", "baseBranch", "baseRevision", "remoteName", "testCommands", "maxTurns", "delivery"]);
+const REPOSITORY_KEYS = new Set(["repository", "repositoryRoot", "baseBranch", "baseRevision", "remoteName", "testCommands", "maxTurns", "attemptTimeLimitMs", "delivery"]);
 const DELIVERY_KEYS = new Set(["releaseBranch", "featureWorkflowName", "releaseRequiredChecks", "featureRequiredApprovals", "releaseRequiredApprovals", "featureMergeMethod", "releaseMergeMethod", "requireMergeable"]);
 const SENSITIVE_KEY = /^(?:token|secret|password|passwd|api[_-]?key|authorization|cookie|private[_-]?key|credential|connection[_-]?string)$/iu;
 const SENSITIVE_VALUE = /(?:-----BEGIN [^-]*PRIVATE KEY-----|\bbearer\s+[A-Za-z0-9._~+/=-]+|\b(?:ghp_|github_pat_|xox[baprs]-|sk-)[A-Za-z0-9._-]+)/iu;
@@ -96,13 +98,14 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
   if (!Array.isArray(value.repositories) || value.repositories.length === 0 || value.repositories.length > 32) return invalid();
   const repositories: HeadlessRepositoryConfig[] = [];
   for (const item of value.repositories) {
-    if (!record(item) || !exactKeys(item, REPOSITORY_KEYS) || !text(item.repository, 512) || !REPOSITORY.test(item.repository) || !text(item.repositoryRoot) || !isAbsolute(item.repositoryRoot) || UNSAFE_PATH.test(item.repositoryRoot) || !text(item.baseBranch, 512) || !BRANCH.test(item.baseBranch) || item.baseBranch.includes("..") || !text(item.baseRevision, 64) || !REVISION.test(item.baseRevision) || !text(item.remoteName, 128) || !REMOTE.test(item.remoteName) || !Array.isArray(item.testCommands) || item.testCommands.length > 16 || item.testCommands.some((command) => !text(command, 256) || !TEST_COMMAND.test(command)) || (item.maxTurns !== undefined && !integer(item.maxTurns, 2, CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxTurns)) || !record(item.delivery) || !exactKeys(item.delivery, DELIVERY_KEYS)) return invalid();
+    if (!record(item) || !exactKeys(item, REPOSITORY_KEYS) || !text(item.repository, 512) || !REPOSITORY.test(item.repository) || !text(item.repositoryRoot) || !isAbsolute(item.repositoryRoot) || UNSAFE_PATH.test(item.repositoryRoot) || !text(item.baseBranch, 512) || !BRANCH.test(item.baseBranch) || item.baseBranch.includes("..") || !text(item.baseRevision, 64) || !REVISION.test(item.baseRevision) || !text(item.remoteName, 128) || !REMOTE.test(item.remoteName) || !Array.isArray(item.testCommands) || item.testCommands.length > 16 || item.testCommands.some((command) => !text(command, 256) || !TEST_COMMAND.test(command)) || (item.maxTurns !== undefined && !integer(item.maxTurns, 2, CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxTurns)) || (item.attemptTimeLimitMs !== undefined && !integer(item.attemptTimeLimitMs, CLAUDE_CODE_WORKER_PROFILE_LIMITS.minimumAttemptTimeLimitMs, CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxAttemptTimeLimitMs)) || !record(item.delivery) || !exactKeys(item.delivery, DELIVERY_KEYS)) return invalid();
     const delivery = item.delivery;
     if (!text(delivery.releaseBranch, 512) || !BRANCH.test(delivery.releaseBranch) || delivery.releaseBranch.includes("..") || delivery.releaseBranch === item.baseBranch || !text(delivery.featureWorkflowName, 256) || !Array.isArray(delivery.releaseRequiredChecks) || delivery.releaseRequiredChecks.length === 0 || delivery.releaseRequiredChecks.length > 32 || delivery.releaseRequiredChecks.some((check) => !text(check, 256)) || new Set(delivery.releaseRequiredChecks).size !== delivery.releaseRequiredChecks.length || !integer(delivery.featureRequiredApprovals, 0, 100) || !integer(delivery.releaseRequiredApprovals, 0, 100) || delivery.featureMergeMethod !== "merge" || !["squash", "merge", "rebase"].includes(String(delivery.releaseMergeMethod)) || typeof delivery.requireMergeable !== "boolean") return invalid();
     repositories.push(Object.freeze({
       repository: item.repository, repositoryRoot: resolve(item.repositoryRoot), baseBranch: item.baseBranch, baseRevision: item.baseRevision, remoteName: item.remoteName,
       testCommands: Object.freeze([...item.testCommands] as string[]),
       ...(item.maxTurns === undefined ? {} : { maxTurns: item.maxTurns as number }),
+      ...(item.attemptTimeLimitMs === undefined ? {} : { attemptTimeLimitMs: item.attemptTimeLimitMs as number }),
       delivery: Object.freeze({ releaseBranch: delivery.releaseBranch, featureWorkflowName: delivery.featureWorkflowName, releaseRequiredChecks: Object.freeze([...delivery.releaseRequiredChecks] as string[]), featureRequiredApprovals: delivery.featureRequiredApprovals, releaseRequiredApprovals: delivery.releaseRequiredApprovals, featureMergeMethod: "merge", releaseMergeMethod: delivery.releaseMergeMethod as ReleaseMergeMethod, requireMergeable: delivery.requireMergeable }),
     }));
   }

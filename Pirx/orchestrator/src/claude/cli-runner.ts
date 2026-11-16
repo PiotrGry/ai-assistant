@@ -18,6 +18,8 @@ export const CLAUDE_ROUND_TRIP_OUTCOMES = [
   "authentication_required",
   "quota_exhausted",
   "timeout",
+  "turn_limit",
+  "attempt_time_limit",
   "cancelled",
   "invalid_output",
   "process_error",
@@ -139,6 +141,8 @@ const FAILURE_MESSAGES: Record<Exclude<ClaudeRoundTripOutcome, "success">, strin
   authentication_required: "Claude Code authentication is required.",
   quota_exhausted: "Claude Code quota was exhausted.",
   timeout: "Claude Code produced no activity within its bounded idle window.",
+  turn_limit: "Claude Code reached its configured turn limit before finishing.",
+  attempt_time_limit: "Claude Code reached its total time limit per Attempt while still running.",
   cancelled: "Claude Code round-trip was cancelled.",
   invalid_output: "Claude Code returned an invalid or oversized structured response.",
   process_error: "Claude Code process failed.",
@@ -255,6 +259,8 @@ function diagnosticCode(outcome: Exclude<ClaudeRoundTripOutcome, "success">): Wo
   if (outcome === "authentication_required") return "authentication";
   if (outcome === "quota_exhausted") return "quota_exhausted";
   if (outcome === "timeout") return "timeout";
+  if (outcome === "turn_limit") return "turn_limit";
+  if (outcome === "attempt_time_limit") return "attempt_time_limit";
   if (outcome === "cancelled") return "cancellation";
   if (outcome === "invalid_output") return "invalid_structured_output";
   if (outcome === "process_error") return "process_failure";
@@ -275,6 +281,9 @@ export const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 interface ExecuteInput {
   readonly requestId: string; readonly startedAt: number; readonly workingDirectory: string;
   readonly signal: AbortSignal | undefined; readonly timeoutMs: number;
+  /** Code workers only: wall-clock bound that output does not extend, and the turn bound for the diagnostic. */
+  readonly attemptTimeLimitMs?: number;
+  readonly maxTurns?: number;
   readonly maxStdoutBytes: number; readonly maxStderrBytes: number;
   readonly arguments: readonly string[];
   readonly structuredOutput?: boolean;
@@ -387,7 +396,7 @@ export class ClaudeCodeCliRunner {
       const arguments_ = request.workerProfile === undefined
         ? buildClaudeStructuredArguments(request.requestId, request.prompt, request.responseSchema)
         : buildClaudeWorkerArguments(request.requestId, request.prompt, request.responseSchema, request.workerProfile);
-      return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: arguments_, structuredOutput: true, stream: request.workerProfile !== undefined, ...(request.transcriptPath === undefined ? {} : { transcriptPath: request.transcriptPath }) }) as ClaudeStructuredResult;
+      return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: arguments_, structuredOutput: true, stream: request.workerProfile !== undefined, ...(request.transcriptPath === undefined ? {} : { transcriptPath: request.transcriptPath }), ...(request.workerProfile?.attemptTimeLimitMs === undefined ? {} : { attemptTimeLimitMs: request.workerProfile.attemptTimeLimitMs }), ...(request.workerProfile?.maxTurns === undefined ? {} : { maxTurns: request.workerProfile.maxTurns }) }) as ClaudeStructuredResult;
     } catch { return failure("process_error", request.requestId, startedAt, null); }
   }
 
@@ -444,7 +453,9 @@ export class ClaudeCodeCliRunner {
     let outputLimitExceeded = false;
     let terminationStarted = false;
     let terminationTimer: NodeJS.Timeout | undefined;
-    let trigger: "timeout" | "cancelled" | "invalid_output" | "process_error" | undefined;
+    let trigger: "timeout" | "attempt_time_limit" | "cancelled" | "invalid_output" | "process_error" | undefined;
+    let lastOutputAt = Date.now();
+    let attemptTimer: NodeJS.Timeout | undefined;
     let transcriptBytes = 0;
     let transcriptError: string | undefined;
     let child: ChildProcess;
@@ -493,6 +504,7 @@ export class ClaudeCodeCliRunner {
     };
     const append = (target: "stdout" | "stderr", value: unknown): void => {
       const chunk = asBuffer(value);
+      lastOutputAt = Date.now();
       armIdle();
       // ponytail: synchronous append, bounded per Attempt; a WriteStream if worker output ever stalls the loop.
       if (transcript !== undefined && transcriptBytes <= this.maxTranscriptBytes) {
@@ -524,6 +536,11 @@ export class ClaudeCodeCliRunner {
     let exitCode: number | null = null;
     await new Promise<void>((resolve) => {
       armIdle();
+      // Output keeps the idle window open but never extends the total limit.
+      if (input.attemptTimeLimitMs !== undefined) {
+        attemptTimer = setTimeout(() => { if (trigger === undefined) trigger = "attempt_time_limit"; terminate(); }, input.attemptTimeLimitMs);
+        attemptTimer.unref();
+      }
       const onAbort = (): void => { if (trigger === undefined) trigger = "cancelled"; terminate(); };
       input.signal?.addEventListener("abort", onAbort, { once: true });
       let settled = false;
@@ -531,6 +548,7 @@ export class ClaudeCodeCliRunner {
         if (settled) return;
         settled = true;
         clearTimeout(idleTimer);
+        clearTimeout(attemptTimer);
         if (terminationTimer !== undefined) clearTimeout(terminationTimer);
         input.signal?.removeEventListener("abort", onAbort);
         resolve();
@@ -554,11 +572,23 @@ export class ClaudeCodeCliRunner {
       const evidence = [envelope.subtype, envelope.errors, envelope.error, envelope.message, envelope.is_error === true ? envelope.result : undefined, transcriptError === undefined ? undefined : `Worker transcript write failed (${transcriptError}).`, stderr].filter((value) => value !== undefined && value !== "").map((value) => typeof value === "string" ? value : JSON.stringify(diagnosticContext(value))).join("\n");
       return { ...result, diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, { ...result.diagnostic, stage: "process", ...(evidence ? { providerMessage: evidence } : {}), ...(outputLimitExceeded ? { providerMessageTruncated: true } : {}) }) };
     };
+    if (trigger === "attempt_time_limit") {
+      const result = failed(trigger, input.requestId, input.startedAt, exitCode);
+      const limit = `Attempt stopped by attemptTimeLimitMs=${input.attemptTimeLimitMs} after ${result.durationMs} ms; last output ${Math.max(0, Date.now() - lastOutputAt)} ms ago.`;
+      return { ...result, diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, { ...result.diagnostic, providerMessage: [limit, result.diagnostic.providerMessage].filter(Boolean).join("\n") }) };
+    }
     if (trigger !== undefined) return failed(trigger, input.requestId, input.startedAt, exitCode);
     if (spawnError !== undefined) return failure(spawnError.code === "ENOENT" ? "claude_not_installed" : "process_error", input.requestId, input.startedAt, exitCode);
     if (exitCode === null) return failed("unknown", input.requestId, input.startedAt, exitCode);
     try { parsed = JSON.parse(stdout); }
     catch { return failed(explicitFailureCode(undefined, stderr) ?? (exitCode !== 0 ? "process_error" : "invalid_output"), input.requestId, input.startedAt, exitCode, exitCode !== 0 ? undefined : "malformed_cli_envelope"); }
+    // Documented result subtype of the Claude Agent SDK; no real capture exists yet, so the
+    // diagnostic keeps the provider's own subtype and turn count either way.
+    if (isRecord(parsed) && parsed.type === "result" && parsed.subtype === "error_max_turns") {
+      const result = failed("turn_limit", input.requestId, input.startedAt, exitCode);
+      const limit = `Claude stopped at num_turns=${typeof parsed.num_turns === "number" ? parsed.num_turns : "unknown"} (maxTurns=${input.maxTurns ?? "unset"}, subtype ${parsed.subtype}).`;
+      return { ...result, diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, { ...result.diagnostic, providerMessage: [limit, result.diagnostic.providerMessage].filter(Boolean).join("\n") }) };
+    }
     const explicit = explicitFailure(parsed, stderr);
     if (explicit !== undefined) return failed(explicit.outcome, input.requestId, input.startedAt, exitCode, diagnosticCode(explicit.outcome), explicit.providerRecovery);
     if (exitCode !== 0) return failed("process_error", input.requestId, input.startedAt, exitCode);

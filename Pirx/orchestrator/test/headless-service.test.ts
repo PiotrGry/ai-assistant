@@ -253,6 +253,10 @@ test("strict config accepts bounded operational fields and rejects unknown or se
   const withTurns = (maxTurns: unknown) => { const config = structuredClone(validConfig()) as { repositories: Array<Record<string, unknown>> }; config.repositories[0]!.maxTurns = maxTurns; return config; };
   assert.equal(parseHeadlessOrchestratorConfig(withTurns(32)).repositories[0]?.maxTurns, 32);
   for (const maxTurns of [1, 1_001, 2.5, "32"]) assert.throws(() => parseHeadlessOrchestratorConfig(withTurns(maxTurns)), HeadlessConfigurationError);
+  assert.equal(parsed.repositories[0]?.attemptTimeLimitMs, undefined);
+  const withLimit = (attemptTimeLimitMs: unknown) => { const config = structuredClone(validConfig()) as { repositories: Array<Record<string, unknown>> }; config.repositories[0]!.attemptTimeLimitMs = attemptTimeLimitMs; return config; };
+  assert.equal(parseHeadlessOrchestratorConfig(withLimit(7_200_000)).repositories[0]?.attemptTimeLimitMs, 7_200_000);
+  for (const attemptTimeLimitMs of [59_999, 43_200_001, 2.5, "7200000"]) assert.throws(() => parseHeadlessOrchestratorConfig(withLimit(attemptTimeLimitMs)), HeadlessConfigurationError);
   const powered = parseHeadlessOrchestratorConfig({ ...validConfig(), hostPowerOff: { enabled: true, method: "linux-systemctl", acceptanceTimeoutMs: 5_000 } });
   assert.equal(powered.hostPowerOff?.method, "linux-systemctl");
   assert.throws(() => parseHeadlessOrchestratorConfig({ ...validConfig(), hostPowerOff: { enabled: true, method: "shell", acceptanceTimeoutMs: 5_000, command: "shutdown now" } }), HeadlessConfigurationError);

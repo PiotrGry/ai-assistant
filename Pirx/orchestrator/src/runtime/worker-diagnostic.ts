@@ -24,6 +24,8 @@ export const WORKER_FAILURE_CODES = Object.freeze([
   "push_rejected",
   "adapter_failure",
   "operator_input_required",
+  "turn_limit",
+  "attempt_time_limit",
 ] as const);
 
 export type WorkerFailureCode = (typeof WORKER_FAILURE_CODES)[number];
@@ -105,6 +107,8 @@ const MESSAGES: Readonly<Record<WorkerFailureCode, string>> = Object.freeze({
   push_rejected: "The repository rejected the push of the worker's commit.",
   adapter_failure: "Worker adapter failed at its process boundary.",
   operator_input_required: "Worker requires an authorized operator decision before it can continue.",
+  turn_limit: "Worker reached its configured turn limit (maxTurns) before finishing.",
+  attempt_time_limit: "Worker reached its total time limit per Attempt (attemptTimeLimitMs) while still running.",
 });
 
 function safeNumber(value: unknown, maximum: number): number | undefined {

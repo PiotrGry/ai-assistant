@@ -64,6 +64,8 @@ if (mode === "stream-active") {
   }, 40);
 }
 if (mode === "stream-error") { process.stdout.write(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: "Tool loop aborted: worktree index.lock exists" }) + "\\n"); process.exit(1); }
+if (mode === "stream-forever") { let step = 0; setInterval(() => { step += 1; process.stdout.write(JSON.stringify({ type: "assistant", step }) + "\\n"); }, 30); }
+if (mode === "stream-max-turns") { process.stdout.write(JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, num_turns: 201 }) + "\\n"); process.exit(1); }
 if (mode === "stream-silent") { process.stdout.write(JSON.stringify({ type: "system", subtype: "init" }) + "\\n"); setInterval(() => {}, 1000); }
 if (mode === "delay") setTimeout(() => emit(envelope({ requestId, acknowledgement: "hello world acknowledged" })), 1000);
 `;
@@ -409,5 +411,39 @@ test("transcripts stop at their bound with a marker, and an unopenable transcrip
     const unopenable = await runner().runStructured({ requestId: "unopenable", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root), timeoutMs: 1_000, maxStdoutBytes: 1_024, transcriptPath: join(value.root, "blocked", "attempt") });
     assert.equal(unopenable.outcome, "process_error");
     if (unopenable.outcome === "process_error") assert.match(unopenable.diagnostic.providerMessage ?? "", /blocked\/attempt could not be opened \(E[A-Z]+\)/u);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+
+test("a code worker that keeps streaming is stopped at its total Attempt limit with its own diagnostic", async () => {
+  const value = await fixture();
+  try {
+    const runner = new ClaudeCodeCliRunner({ executable: value.executable, environment: { PATH: process.env.PATH, HOME: process.env.HOME }, additionalEnvironment: { PIRX_FAKE_MODE: "stream-forever" }, versionProbe: async () => `${MINIMUM_CLAUDE_CODE_WORKER_VERSION} (Claude Code)` });
+    const started = Date.now();
+    // Output every 30 ms keeps the 100 ms idle window open; only the total limit can end it.
+    const result = await runner.runStructured({ requestId: "stream-forever", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: { ...workerProfile(value.root), attemptTimeLimitMs: 400 }, timeoutMs: 100, maxStdoutBytes: 1_024 });
+    assert.equal(result.outcome, "attempt_time_limit", JSON.stringify(result));
+    assert.ok(Date.now() - started >= 400);
+    if (result.outcome === "attempt_time_limit") {
+      assert.equal(result.diagnostic.code, "attempt_time_limit");
+      assert.match(result.diagnostic.providerMessage ?? "", /attemptTimeLimitMs=400/u);
+      assert.match(result.diagnostic.providerMessage ?? "", /last output \d+ ms ago/u);
+    }
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("a code worker that reaches its turn limit gets the turn_limit diagnostic with the provider subtype", async () => {
+  const value = await fixture();
+  try {
+    const runner = new ClaudeCodeCliRunner({ executable: value.executable, environment: { PATH: process.env.PATH, HOME: process.env.HOME }, additionalEnvironment: { PIRX_FAKE_MODE: "stream-max-turns" }, versionProbe: async () => `${MINIMUM_CLAUDE_CODE_WORKER_VERSION} (Claude Code)` });
+    // The result subtype follows the documented Claude Agent SDK result type; no real capture exists yet.
+    const result = await runner.runStructured({ requestId: "stream-max-turns", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: { ...workerProfile(value.root), maxTurns: 200 }, timeoutMs: 1_000, maxStdoutBytes: 1_024 });
+    assert.equal(result.outcome, "turn_limit", JSON.stringify(result));
+    if (result.outcome === "turn_limit") {
+      assert.equal(result.diagnostic.code, "turn_limit");
+      assert.match(result.diagnostic.providerMessage ?? "", /maxTurns=200/u);
+      assert.match(result.diagnostic.providerMessage ?? "", /num_turns=201/u);
+      assert.match(result.diagnostic.providerMessage ?? "", /error_max_turns/u);
+    }
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
