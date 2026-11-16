@@ -161,3 +161,73 @@ test("Obsidian is opt-in and invalid paths do not disable other MCP tools", asyn
     }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+async function daemonProfile(context: { after(fn: () => Promise<void>): void }): Promise<string> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pirx-github-target-")));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "pirx"));
+  await writeFile(join(root, "pirx", "orchestrator.json"), JSON.stringify(validConfig(root)));
+  return root;
+}
+
+test("chat GitHub target is taken from the daemon profile when the environment sets none", async (context) => {
+  const root = await daemonProfile(context);
+  const config = loadMcpServerConfig({ XDG_CONFIG_HOME: root });
+  assert.deepEqual(config.githubTarget, { owner: "PiotrGry", repository: "ai-assistant" });
+  assert.equal(config.githubTargetError, undefined);
+});
+
+test("chat GitHub target that differs from the daemon is reported with both values", async (context) => {
+  const root = await daemonProfile(context);
+  const config = loadMcpServerConfig({ XDG_CONFIG_HOME: root, PIRX_GITHUB_OWNER: "PiotrGry", PIRX_GITHUB_REPOSITORY: "zdrovena-reconciliation" });
+  assert.equal(config.githubTarget, undefined);
+  assert.match(config.githubTargetError ?? "", /PiotrGry\/zdrovena-reconciliation/u);
+  assert.match(config.githubTargetError ?? "", /PiotrGry\/ai-assistant/u);
+});
+
+test("chat GitHub target that matches the daemon is accepted", async (context) => {
+  const root = await daemonProfile(context);
+  const config = loadMcpServerConfig({ XDG_CONFIG_HOME: root, PIRX_GITHUB_OWNER: "PiotrGry", PIRX_GITHUB_REPOSITORY: "ai-assistant" });
+  assert.deepEqual(config.githubTarget, { owner: "PiotrGry", repository: "ai-assistant" });
+  assert.equal(config.githubTargetError, undefined);
+});
+
+test("without a daemon profile the chat GitHub target is left to the environment", () => {
+  const config = loadMcpServerConfig({ XDG_CONFIG_HOME: "/tmp/pirx-no-profile-fixture" });
+  assert.equal(config.githubTarget, undefined);
+  assert.equal(config.githubTargetError, undefined);
+});
+
+test("GitHub tools refuse a chat target that differs from the daemon and name both", async (context) => {
+  const root = await daemonProfile(context);
+  const { createMcpServer } = await import("../src/server.js");
+  const server = createMcpServer({ environment: { XDG_CONFIG_HOME: root, PIRX_TOOL_PROFILE: "development", PIRX_GITHUB_OWNER: "PiotrGry", PIRX_GITHUB_REPOSITORY: "zdrovena-reconciliation" } });
+  const client = new Client({ name: "github-target", version: "1" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([server.connect(b), client.connect(a)]);
+    const result = await client.callTool({ name: "github_issue_get", arguments: { issueNumber: 1 } });
+    assert.equal(result.isError, true);
+    const content = result.structuredContent as { errorCode: string; message: string };
+    assert.equal(content.errorCode, "configuration");
+    assert.match(content.message, /PiotrGry\/zdrovena-reconciliation/u);
+    assert.match(content.message, /PiotrGry\/ai-assistant/u);
+  } finally { await client.close(); await server.close(); }
+});
+
+test("default profiles register no PoC tool, so pirx_work_submit is the only way to start work", async (context) => {
+  const root = await daemonProfile(context);
+  const { createMcpServer } = await import("../src/server.js");
+  const poc = ["github_issue_round_trip_poc", "github_shipment_round_trip_poc", "github_shipment_cycle", "github_failed_ci_codex_handoff_poc"];
+  for (const profile of ["development", "operations", "all"]) {
+    const server = createMcpServer({ environment: { XDG_CONFIG_HOME: root, PIRX_TOOL_PROFILE: profile, PIRX_GOOGLE_CALENDAR_TIMEZONE: "UTC" } });
+    const client = new Client({ name: `profile-${profile}`, version: "1" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    try {
+      await Promise.all([server.connect(b), client.connect(a)]);
+      const names = (await client.listTools()).tools.map((tool) => tool.name);
+      assert.deepEqual(names.filter((name) => poc.includes(name)), [], profile);
+      if (profile !== "development") assert.ok(names.includes("pirx_work_submit"), profile);
+    } finally { await client.close(); await server.close(); }
+  }
+});
