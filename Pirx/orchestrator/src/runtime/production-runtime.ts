@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import type { LeaseAcquireInput, LeaseId, LeaseRecord } from "./lease.js";
 import { CapabilityEnforcementGate, type CapabilityAuditSink } from "./capability-gate.js";
-import { SingleWorkerScheduler, type SchedulerCycleResult, type SchedulerOptions, type SchedulerPortResult } from "./scheduler.js";
+import { SingleWorkerScheduler, type SchedulerCycleResult, type SchedulerLeaseRenewalFailure, type SchedulerOptions, type SchedulerPortResult } from "./scheduler.js";
 import { createWorkerRequest, resultOutcome, type WorkerPort, type WorkerRequest, type WorkerRequestInput, type WorkerResult } from "./worker-contract.js";
 import { CapabilityAwareWorkerExecutionPort, type WorkerAdapterRegistry } from "./worker-execution.js";
 import { createWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
@@ -60,6 +60,8 @@ export interface ProductionRuntimeOptions {
   readonly clock?: { now(): UtcTimestamp };
   readonly attemptIdFactory?: (taskId: TaskId, ordinal: number, now: UtcTimestamp) => AttemptId;
   readonly branchFactory?: (task: TaskSnapshot) => string;
+  /** Receives every failed Lease renewal, for diagnostics. */
+  readonly onLeaseRenewalFailure?: (failure: SchedulerLeaseRenewalFailure) => void;
 }
 
 export interface ProductionRuntimeStatus {
@@ -166,6 +168,7 @@ export class ProductionRuntime {
       persistencePort: { persist: async (input) => this.#persist(input.taskId, input.attemptId, input.execution) },
       recoveryPort: { reconcile: async (now) => this.#reconcile(now) },
       ...(options.shutdownTimeoutMs === undefined ? {} : { shutdownTimeoutMs: options.shutdownTimeoutMs }),
+      ...(options.onLeaseRenewalFailure === undefined ? {} : { onLeaseRenewalFailure: options.onLeaseRenewalFailure }),
     };
     this.#scheduler = new SingleWorkerScheduler(schedulerOptions);
   }

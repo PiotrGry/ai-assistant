@@ -881,6 +881,8 @@ export {
   type SchedulerCycleResult,
   type SchedulerExecutionPort,
   type SchedulerLeasePort,
+  type SchedulerLeaseRenewalFailure,
+  type SchedulerOptions,
   type SchedulerPersistenceInput,
   type SchedulerPersistencePort,
   type SchedulerPortResult,

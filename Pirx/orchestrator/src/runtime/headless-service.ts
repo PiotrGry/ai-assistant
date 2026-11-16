@@ -50,7 +50,7 @@ export interface HeadlessObservabilityPort {
 
 export interface HeadlessServiceEvent {
   readonly schemaVersion: typeof HEADLESS_SERVICE_SCHEMA_VERSION;
-  readonly event: "starting" | "recovered" | "control" | "queue" | "delivery" | "cycle" | "cycle_error" | "observability" | "host_shutdown" | "stopping" | "stopped";
+  readonly event: "starting" | "recovered" | "control" | "queue" | "delivery" | "cycle" | "cycle_error" | "lease_renewal" | "observability" | "host_shutdown" | "stopping" | "stopped";
   readonly outcome: string;
   readonly reason?: string;
   readonly details?: unknown;

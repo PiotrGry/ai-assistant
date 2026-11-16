@@ -19,6 +19,8 @@ import {
   transitionAttempt,
   transitionTask,
   type AttemptId,
+  type ProductionRuntimeOptions,
+  type SchedulerLeaseRenewalFailure,
   type TaskId,
   type UtcTimestamp,
   type WorkerPort,
@@ -31,7 +33,7 @@ const issue = { owner: "PiotrGry", repository: "ai-assistant", issueNumber: 194,
 const repository = "PiotrGry/ai-assistant";
 const baseRevision = "a".repeat(40);
 
-async function setup(adapter: WorkerPort | null = { execute: async (request) => ({ kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED", branch: request.workspace.branch, finalCommit: "b".repeat(40) }) }): Promise<{ directory: string; store: RuntimeSqliteStore; runtime: ProductionRuntime; adapterCalls: { value: number }; gitTimeouts: Array<number | undefined> }> {
+async function setup(adapter: WorkerPort | null = { execute: async (request) => ({ kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED", branch: request.workspace.branch, finalCommit: "b".repeat(40) }) }, extra: Partial<ProductionRuntimeOptions> = {}): Promise<{ directory: string; store: RuntimeSqliteStore; runtime: ProductionRuntime; adapterCalls: { value: number }; gitTimeouts: Array<number | undefined> }> {
   const directory = await mkdtemp(join(tmpdir(), "pirx-production-runtime-"));
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
   const task = createTask({ id: taskId, githubReference: issue, goal: "Run assigned work", scope: "production composition", acceptanceCriteria: ["durable worker cycle"], priority: 1, risk: "low", requiredCapabilities: ["repository.write", "git.push_assigned_branch"], createdAt: now });
@@ -40,7 +42,7 @@ async function setup(adapter: WorkerPort | null = { execute: async (request) => 
   const adapterCalls = { value: 0 };
   const gitTimeouts: Array<number | undefined> = [];
   const counted = adapter === null ? undefined : { execute: async (request: Parameters<WorkerPort["execute"]>[0], signal: AbortSignal) => { adapterCalls.value += 1; return adapter.execute(request, signal); } };
-  const runtime = new ProductionRuntime(store, { workerId: "pirx-worker", provider: "fake-claude", workerCapabilities: ["repository.write", "git.push_assigned_branch"], repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }], worktreeParent: "/tmp/pirx-worktrees", leaseDurationMs: 60_000, workerTimeoutMs: 960_000, workerAdapters: { get: () => counted }, workspace: { provision: async (request) => (gitTimeouts.push(request.timeoutMs), { outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)) } }) }, clock: { now: () => now } });
+  const runtime = new ProductionRuntime(store, { workerId: "pirx-worker", provider: "fake-claude", workerCapabilities: ["repository.write", "git.push_assigned_branch"], repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision }], worktreeParent: "/tmp/pirx-worktrees", leaseDurationMs: 60_000, workerTimeoutMs: 960_000, workerAdapters: { get: () => counted }, workspace: { provision: async (request) => (gitTimeouts.push(request.timeoutMs), { outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)) } }) }, clock: { now: () => now }, ...extra });
   return { directory, store, runtime, adapterCalls, gitTimeouts };
 }
 
@@ -347,4 +349,40 @@ test("blocks startup when a durable active Lease needs reconciliation and preven
 
 test("worktree directory names avoid ':' so tools such as uv accept the path (gh-462)", () => {
   assert.equal(worktreeDirectoryName("gh-462-5c40", "attempt:gh-462-5c40:12:1794315588056"), "pirx-gh-462-5c40-attempt-gh-462-5c40-12-1794315588056");
+});
+
+
+test("two failed Lease renewals stop the worker, record each failure and leave the Task resumable", async () => {
+  const failures: SchedulerLeaseRenewalFailure[] = [];
+  let clock = now;
+  let calls = 0;
+  let stopped = false;
+  const value = await setup({ execute: async (request, signal) => {
+    calls += 1;
+    if (calls > 1) return { kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED", branch: request.workspace.branch, finalCommit: "b".repeat(40) };
+    // The worker keeps running past the Lease expiry, so every renewal is refused.
+    clock = "2026-09-15T21:10:00.000Z" as UtcTimestamp;
+    await new Promise<void>((resolve) => signal.addEventListener("abort", () => { stopped = true; resolve(); }, { once: true }));
+    return { kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "FAILED", reason: "stopped" };
+  } }, { leaseDurationMs: 3_000, clock: { now: () => clock }, resumeWorkspaceValidator: { validate: async () => ({ outcome: "valid", message: "exact durable workspace verified" }) }, onLeaseRenewalFailure: (failure) => { failures.push(failure); } });
+  try {
+    const first = await value.runtime.cycle();
+    assert.equal(stopped, true);
+    assert.deepEqual(failures.map((failure) => [failure.consecutiveFailures, failure.stopping]), [[1, false], [2, true]]);
+    assert.equal(first.outcome, "failed");
+    assert.match(first.outcome === "failed" ? first.reason : "", /^lease_renewal:/u);
+    // An expired Lease cannot be marked uncertain; recovery takes it over.
+    assert.equal(value.store.leases.getActiveByWorker("pirx-worker").outcome, "success");
+    assert.deepEqual(await value.runtime.recover(), { outcome: "idle", reason: "no_runnable_task" });
+    assert.equal(value.store.leases.getActiveByWorker("pirx-worker").outcome, "not_found");
+    const second = await value.runtime.cycle();
+    assert.equal(second.outcome, "started", JSON.stringify(second));
+    assert.equal(calls, 2);
+    const attempts = value.store.attempts.listByTask(taskId);
+    assert.equal(attempts.outcome, "success");
+    if (attempts.outcome === "success") {
+      assert.deepEqual(attempts.value.map((attempt) => [attempt.ordinal, attempt.state]), [[1, "terminal"], [2, "terminal"]]);
+      assert.equal(attempts.value[1]?.state === "terminal" ? attempts.value[1].result : undefined, "CODE_PUSHED");
+    }
+  } finally { await dispose(value); }
 });

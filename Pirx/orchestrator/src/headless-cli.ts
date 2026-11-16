@@ -59,6 +59,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
     }
     const store = RuntimeSqliteStore.open({ filename: config.databasePath, environment: host.env, mode: "existing" });
     const worker = new ProductionClaudeWorker({ store, repositories: config.repositories, environment: host.env, transcriptDirectory: join(dirname(config.databasePath), "worker-logs") });
+    const control = options.control ?? new SqliteHeadlessControlPort(store, undefined, (failure) => writeEvent(host.stderr, { schemaVersion: 1, event: "observation_persistence_failed", ...failure }));
     runtime = new ProductionRuntime(store, {
       workerId: config.workerId, provider: config.provider, workerCapabilities: config.workerCapabilities,
       repositories: config.repositories.map(({ repository, repositoryRoot, baseBranch, baseRevision }) => ({ repository, repositoryRoot, baseBranch, baseRevision })),
@@ -67,6 +68,12 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
       workerOutputBytes: config.workerOutputBytes, workerErrorBytes: config.workerErrorBytes,
       maximumConsecutiveResumeFailures: config.maximumConsecutiveResumeFailures,
       workerAdapters: { get: (provider) => provider === config.provider ? worker : undefined },
+      // A renewal fails inside a running cycle, where the service records nothing: write it here.
+      onLeaseRenewalFailure: (failure) => {
+        const event: HeadlessServiceEvent = Object.freeze({ schemaVersion: 1, event: "lease_renewal", outcome: failure.stopping ? "lease_lost" : "renewal_failed", reason: failure.reason, details: failure });
+        try { control.observe(event); } catch { /* Diagnostics cannot affect Lease handling. */ }
+        writeEvent(host.stderr, event);
+      },
     });
     const githubConfigLoader = options.githubConfigLoader ?? loadGitHubConfig;
     const deliveryRepositories = config.repositories.map((repository) => {
@@ -102,7 +109,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
     })), { timeoutMs: config.githubTimeoutMs });
     const service = new HeadlessOrchestratorService(runtime, {
       cycleIntervalMs: config.cycleIntervalMs, errorIntervalMs: config.errorIntervalMs,
-      queue, delivery, control: options.control ?? new SqliteHeadlessControlPort(store, undefined, (failure) => writeEvent(host.stderr, { schemaVersion: 1, event: "observation_persistence_failed", ...failure })),
+      queue, delivery, control,
       hostShutdown: new SqliteHeadlessHostShutdownPort(store, config.databasePath, config.hostPowerOff === undefined ? undefined : new LinuxSystemctlPowerOffAdapter({ timeoutMs: config.hostPowerOff.acceptanceTimeoutMs })),
       observability: new ExecutionObservabilityProjector(store),
       emit: (event) => writeEvent(event.event === "cycle_error" || event.outcome.includes("failed") || event.outcome.includes("timeout") ? host.stderr : host.stdout, event),
