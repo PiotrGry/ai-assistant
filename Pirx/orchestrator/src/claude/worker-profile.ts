@@ -6,13 +6,23 @@ import { buildWorkerResultSchema as buildCanonicalWorkerResultSchema } from "../
 
 export const CLAUDE_CODE_WORKER_PROFILE_SCHEMA_VERSION = 1 as const;
 export const CLAUDE_CODE_WORKER_PROFILE_LIMITS = Object.freeze({
-  // Optional backstop only; by default the worker runs until it finishes.
   maxTurns: 1_000,
+  minimumAttemptTimeLimitMs: 60_000,
+  maxAttemptTimeLimitMs: 43_200_000,
   maxTestCommands: 16,
   maxCommandCharacters: 256,
   maxPathCharacters: 2_048,
   maxRemoteCharacters: 128,
   maxCommitMessageCharacters: 256,
+} as const);
+
+/**
+ * Bounds for a repository that sets none. They stop a worker that loops while
+ * still printing events, which the idle watchdog alone would let run for hours.
+ */
+export const CLAUDE_CODE_WORKER_PROFILE_DEFAULTS = Object.freeze({
+  maxTurns: 200,
+  attemptTimeLimitMs: 10_800_000,
 } as const);
 
 export const CODE_WORKER_CAPABILITIES = Object.freeze([
@@ -32,6 +42,7 @@ export interface ClaudeCodeRepositoryPolicy {
   readonly testCommands: readonly string[];
   readonly commitMessage?: string;
   readonly maxTurns?: number;
+  readonly attemptTimeLimitMs?: number;
 }
 
 export interface ClaudeCodeWorkerProfile {
@@ -43,6 +54,8 @@ export interface ClaudeCodeWorkerProfile {
   readonly disallowedTools: readonly string[];
   readonly permissionMode: "dontAsk";
   readonly maxTurns?: number;
+  /** Wall-clock bound for one Attempt, next to the idle window; output does not extend it. */
+  readonly attemptTimeLimitMs?: number;
   readonly remoteName: string;
   readonly assignedBranch: string;
   readonly testCommands: readonly string[];
@@ -87,6 +100,7 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
   if (!REMOTE.test(policy.remoteName)) return failure("Configured Git remote is unsafe.");
   if (!Array.isArray(policy.testCommands) || policy.testCommands.length > CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxTestCommands || policy.testCommands.some((command) => !safeCommand(command))) return failure("Repository test policy contains an unsafe or oversized command.");
   if (policy.maxTurns !== undefined && (!Number.isSafeInteger(policy.maxTurns) || policy.maxTurns <= 1 || policy.maxTurns > CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxTurns)) return failure("Code-worker turn bound is invalid.");
+  if (policy.attemptTimeLimitMs !== undefined && !validAttemptTimeLimit(policy.attemptTimeLimitMs)) return failure("Code-worker total time limit per Attempt is invalid.");
   const commitMessage = policy.commitMessage ?? "Pirx: apply assigned repair";
   if (!safeCommitMessage(commitMessage)) return failure("Configured commit message is unsafe.");
 
@@ -131,11 +145,16 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
     allowedTools: Object.freeze(allowed),
     disallowedTools: Object.freeze([...new Set(denied)]),
     permissionMode: "dontAsk",
-    ...(policy.maxTurns === undefined ? {} : { maxTurns: policy.maxTurns }),
+    maxTurns: policy.maxTurns ?? CLAUDE_CODE_WORKER_PROFILE_DEFAULTS.maxTurns,
+    attemptTimeLimitMs: policy.attemptTimeLimitMs ?? CLAUDE_CODE_WORKER_PROFILE_DEFAULTS.attemptTimeLimitMs,
     remoteName: policy.remoteName,
     assignedBranch: request.workspace.branch,
     testCommands: Object.freeze([...policy.testCommands]),
   }) };
+}
+
+export function validAttemptTimeLimit(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= CLAUDE_CODE_WORKER_PROFILE_LIMITS.minimumAttemptTimeLimitMs && value <= CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxAttemptTimeLimitMs;
 }
 
 export function buildWorkerResultSchema(request: WorkerRequest): unknown {

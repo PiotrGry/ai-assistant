@@ -57,7 +57,9 @@ test("maps the complete code-worker grant to a bounded Claude profile", () => {
   assert.ok(value.value.allowedTools.includes("WebSearch"));
   assert.equal(value.value.disallowedTools.includes("WebFetch"), false);
   assert.equal(value.value.permissionMode, "dontAsk");
-  assert.equal(value.value.maxTurns, undefined);
+  // Defaults bound a worker that sets nothing: 200 turns and 3 hours per Attempt.
+  assert.equal(value.value.maxTurns, 200);
+  assert.equal(value.value.attemptTimeLimitMs, 10_800_000);
   assert.ok(value.value.allowedTools.includes("Bash(pnpm check)"));
   // Pirx pushes; the worker may not.
   assert.equal(value.value.allowedTools.some((item) => item.includes("git push") || item.includes(" push ")), false);
@@ -85,13 +87,14 @@ test("maps the complete code-worker grant to a bounded Claude profile", () => {
   assert.equal(args.includes("--permission-mode"), true);
   assert.equal(args.includes("dontAsk"), true);
   assert.equal(args.includes("bypassPermissions"), false);
-  // No turn bound unless the repository configures a backstop.
-  assert.equal(args.includes("--max-turns"), false);
-  const bounded = buildClaudeCodeWorkerProfile(request(), { ...policy, maxTurns: 200 });
+  assert.equal(args[args.indexOf("--max-turns") + 1], "200");
+  const bounded = buildClaudeCodeWorkerProfile(request(), { ...policy, maxTurns: 50, attemptTimeLimitMs: 3_600_000 });
   assert.equal(bounded.ok, true);
   if (!bounded.ok) return;
   const boundedArgs = buildClaudeWorkerArguments("worker-profile-correlation", "bounded prompt", buildWorkerResultSchema(request()), bounded.value);
-  assert.equal(boundedArgs[boundedArgs.indexOf("--max-turns") + 1], "200");
+  assert.equal(boundedArgs[boundedArgs.indexOf("--max-turns") + 1], "50");
+  assert.equal(bounded.value.attemptTimeLimitMs, 3_600_000);
+  for (const attemptTimeLimitMs of [59_999, 43_200_001, 1.5]) assert.equal(buildClaudeCodeWorkerProfile(request(), { ...policy, attemptTimeLimitMs }).ok, false);
   assert.equal(args.filter((value) => value === "--allowedTools").length, 1);
   assert.equal(args.filter((value) => value === "--disallowedTools").length, 1);
   assert.match(args[args.indexOf("--allowedTools") + 1] ?? "", /Bash\(git status:\*\),Bash\(git diff:\*\)/u);
