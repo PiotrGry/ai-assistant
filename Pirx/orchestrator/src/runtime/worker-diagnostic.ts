@@ -1,3 +1,4 @@
+import { errorCause } from "./error-cause.js";
 import {
   normalizeWorkerProviderRecoveryMetadata,
   type WorkerProviderRecoveryMetadata,
@@ -137,12 +138,18 @@ export function createWorkerFailureDiagnostic(code: WorkerFailureCode, details: 
   const payloadDigest = typeof details.payloadDigest === "string" && /^[0-9a-f]{64}$/u.test(details.payloadDigest) ? details.payloadDigest : undefined;
   const observedCommit = typeof details.observedCommit === "string" && /^[0-9a-f]{40}$/u.test(details.observedCommit) ? details.observedCommit : undefined;
   let providerRecovery: WorkerProviderRecoveryMetadata | undefined;
+  let recoveryRejection: string | undefined;
   try {
     providerRecovery = code !== "quota_exhausted" ? undefined : normalizeWorkerProviderRecoveryMetadata(details.providerRecovery);
-  } catch { providerRecovery = undefined; }
+  } catch (error: unknown) {
+    // Without it the cooldown falls back to the default; say why instead of dropping it silently.
+    providerRecovery = undefined;
+    recoveryRejection = `Provider recovery metadata was rejected: ${errorCause(error).split("\n")[0]}`;
+  }
   const correlationId = safeText(details.correlationId, 128);
-  const providerMessage = details.providerMessage
-    ? String(diagnosticContext(details.providerMessage)).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/gu, "")
+  const combinedMessage = [details.providerMessage, recoveryRejection].filter(Boolean).join("\n");
+  const providerMessage = combinedMessage
+    ? String(diagnosticContext(combinedMessage)).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/gu, "")
     : undefined;
   return Object.freeze({
     schemaVersion: WORKER_DIAGNOSTIC_SCHEMA_VERSION,
@@ -198,7 +205,7 @@ export function validateWorkerFailureDiagnostic(value: unknown): WorkerFailureDi
   if (value.observedCommit !== undefined && observedCommit === undefined) return undefined;
   let providerRecovery: WorkerProviderRecoveryMetadata | undefined;
   try { providerRecovery = normalizeWorkerProviderRecoveryMetadata(value.providerRecovery as WorkerProviderRecoveryMetadata | undefined); }
-  catch { providerRecovery = undefined; }
+  catch { providerRecovery = undefined; } // a stored record keeps its readable fields; recovery metadata is optional history
   if ((value.exitCode !== undefined && exitCode === undefined) || (value.durationMs !== undefined && durationMs === undefined)) return undefined;
   if (value.violationCode !== undefined && violationCode === undefined) return undefined;
   if ((value.stage !== undefined && stage === undefined) || (value.field !== undefined && field === undefined) || (value.receivedType !== undefined && receivedType === undefined) || (value.fieldNames !== undefined && fieldNames === undefined) || (value.payloadLength !== undefined && payloadLength === undefined) || (value.payloadDigest !== undefined && payloadDigest === undefined) || (value.providerRecovery !== undefined && (providerRecovery === undefined || value.code !== "quota_exhausted"))) return undefined;

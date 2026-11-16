@@ -182,6 +182,7 @@ export class WorkerLifecycleCoordinator {
     ];
     let pending = false;
     for (const event of events) {
+      // The terminal result is already durable; a failed publication only leaves the GitHub projection pending.
       try { const published = await this.#projection.publish(event); if (!["published", "already_published", "ignored"].includes(published.outcome)) pending = true; } catch { pending = true; }
     }
     return pending;

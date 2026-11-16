@@ -447,3 +447,25 @@ test("a code worker that reaches its turn limit gets the turn_limit diagnostic w
     }
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
+
+function providerMessageOf(result: { readonly outcome: string }): string {
+  return (result as { readonly diagnostic?: { readonly providerMessage?: string } }).diagnostic?.providerMessage ?? "";
+}
+
+test("runner failures before Claude starts name their concrete cause", async () => {
+  const value = await fixture();
+  try {
+    const missing = join(value.root, "missing");
+    const temp = await new ClaudeCodeCliRunner({ executable: value.executable, tempParentDirectory: missing, environment: { PATH: process.env.PATH, HOME: process.env.HOME } }).run({ timeoutMs: 1_000 });
+    assert.equal(temp.outcome, "process_error");
+    assert.match(providerMessageOf(temp), /ENOENT/u);
+    const cwd = await new ClaudeCodeCliRunner({ executable: value.executable, environment: { PATH: process.env.PATH, HOME: process.env.HOME }, versionProbe: async () => `${MINIMUM_CLAUDE_CODE_WORKER_VERSION} (Claude Code)` })
+      .runStructured({ requestId: "missing-cwd", cwd: missing, prompt: "bounded", responseSchema: {}, timeoutMs: 1_000 });
+    assert.equal(cwd.outcome, "process_error");
+    assert.match(providerMessageOf(cwd), /ENOENT.*missing/u);
+    const binary = await new ClaudeCodeCliRunner({ executable: join(value.root, "no-such-claude"), environment: { PATH: process.env.PATH, HOME: process.env.HOME } })
+      .runStructured({ requestId: "missing-binary", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root), timeoutMs: 1_000 });
+    assert.equal(binary.outcome, "claude_not_installed");
+    assert.match(providerMessageOf(binary), /ENOENT/u);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});

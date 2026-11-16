@@ -143,3 +143,12 @@ test("rejects a result bound to another Attempt or branch and preserves cancella
   const cancelled = await pending;
   assert.equal(cancelled.outcome, "cancelled");
 });
+
+
+test("an adapter that throws an unexpected error keeps its cause in the diagnostic", async () => {
+  const value = request();
+  const thrown = port(new Audit(), new Map([["provider-1", { execute: async () => { throw Object.assign(new Error("spawn git ENOENT"), { code: "ENOENT" }); } }]]));
+  const failed = await thrown.port.execute(value, new AbortController().signal);
+  assert.equal(failed.outcome, "adapter_failure");
+  assert.match("diagnostic" in failed ? failed.diagnostic.providerMessage ?? "" : "", /Error\[ENOENT\]: spawn git ENOENT/u);
+});

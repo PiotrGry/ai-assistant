@@ -134,6 +134,7 @@ export {
   type OrchestratorStatusSnapshot,
 } from "./runtime/orchestrator-control.js";
 export { diagnosticContext } from "./runtime/diagnostic-context.js";
+export { errorCause } from "./runtime/error-cause.js";
 export {
   HOST_SHUTDOWN_SCHEMA_VERSION,
   HostShutdownRepository,

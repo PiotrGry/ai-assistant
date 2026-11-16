@@ -191,3 +191,15 @@ test("requires all composite capabilities and exposes worker/tool enforcement he
   assert.equal(tool.outcome, "allowed");
   assert.equal(tool.decision.action, "repository.write");
 });
+
+
+test("a failed audit or invocation keeps its cause on the gate result", async () => {
+  const failingAudit = new FakeAudit();
+  failingAudit.throwOnRecord = true;
+  const audit = await new CapabilityEnforcementGate(failingAudit).execute(request(), () => undefined);
+  assert.equal(audit.outcome, "denied");
+  assert.match((audit as { readonly cause?: string }).cause ?? "", /audit unavailable/u);
+  const thrown = await new CapabilityEnforcementGate(new FakeAudit()).execute(request(), () => { throw new Error("provider failure"); });
+  assert.equal(thrown.outcome, "failed");
+  assert.match((thrown as { readonly cause?: string }).cause ?? "", /Error: provider failure\n {2}at /u);
+});

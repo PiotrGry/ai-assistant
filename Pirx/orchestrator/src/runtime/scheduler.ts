@@ -1,3 +1,4 @@
+import { errorCause } from "./error-cause.js";
 import type { AttemptId, TaskId, UtcTimestamp } from "./task-domain.js";
 import type { LeaseAcquireInput, LeaseId, LeaseRecord } from "./lease.js";
 import type { RunnableTaskCandidate, TaskSelectionRequest, TaskSelectionResult } from "./task-selection.js";
@@ -98,6 +99,8 @@ export interface SchedulerOptions {
   readonly shutdownTimeoutMs?: number;
   /** Called for every failed Lease renewal; `stopping` is true when the worker is being stopped for it. */
   readonly onLeaseRenewalFailure?: (failure: SchedulerLeaseRenewalFailure) => void;
+  /** Called when the worker invocation throws instead of returning a result; `cause` carries the stack trace. */
+  readonly onWorkerInvocationError?: (error: { readonly taskId: TaskId; readonly attemptId: AttemptId; readonly cause: string }) => void;
 }
 
 export interface SchedulerLeaseRenewalFailure {
@@ -238,8 +241,8 @@ export class SingleWorkerScheduler {
           let renewed: SchedulerPortResult<LeaseRecord>;
           try {
             renewed = await renewLease(currentLease, this.#options.clock.now(), this.#options.leaseDurationMs);
-          } catch {
-            renewalFailed("renew_threw");
+          } catch (error: unknown) {
+            renewalFailed(`renew_threw: ${errorCause(error).split("\n")[0]}`);
             return;
           }
           if (renewed.outcome === "success") {
@@ -254,7 +257,12 @@ export class SingleWorkerScheduler {
       try {
         execution = await this.#options.executionPort.invoke({ candidate, taskId: candidate.task.id, attemptId: attempt.attemptId, leaseId: currentLease.id, signal: controller.signal });
       } catch (error: unknown) {
-        execution = { outcome: controller.signal.aborted ? "cancelled" : "unknown", reason: controller.signal.aborted ? "shutdown_interrupted" : "worker_invocation_threw" };
+        const cause = errorCause(error);
+        if (!controller.signal.aborted) {
+          try { this.#options.onWorkerInvocationError?.({ taskId: candidate.task.id, attemptId: attempt.attemptId, cause }); }
+          catch { /* Reporting cannot change the recorded execution result. */ }
+        }
+        execution = { outcome: controller.signal.aborted ? "cancelled" : "unknown", reason: controller.signal.aborted ? "shutdown_interrupted" : `worker_invocation_threw: ${cause.split("\n")[0]}`.slice(0, 256) };
       } finally {
         if (renewTimer !== undefined) clearInterval(renewTimer);
         await renewal;

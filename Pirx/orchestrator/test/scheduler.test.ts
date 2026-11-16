@@ -277,11 +277,24 @@ test("two consecutive failed renewals stop the worker and mark the Lease uncerta
   const cycle = await scheduler(fakes, 3_000, { onLeaseRenewalFailure: (failure) => { failures.push(failure); } }).cycle();
   assert.equal(aborted, true);
   assert.deepEqual(failures.map((failure) => [failure.consecutiveFailures, failure.stopping]), [[1, false], [2, true]]);
-  assert.equal(failures[0]?.reason, "renew_threw");
+  assert.equal(failures[0]?.reason, "renew_threw: Error: sqlite down");
   assert.equal(cycle.outcome, "failed");
   assert.match(cycle.outcome === "failed" ? cycle.reason : "", /^lease_renewal:lease_version_changed/u);
   assert.equal(cycle.outcome === "failed" ? cycle.durable : false, true);
   assert.ok(fakes.events.includes("uncertain"), fakes.events.join(","));
   assert.ok(!fakes.events.includes("persist"), fakes.events.join(","));
   assert.ok(!fakes.events.some((event) => event.startsWith("release")), fakes.events.join(","));
+});
+
+
+test("a worker invocation that throws reports its cause with a stack trace", async () => {
+  const fakes = new Fakes();
+  fakes.invocation = async () => { throw new TypeError("Cannot read properties of undefined (reading 'branch')"); };
+  const errors: Array<{ taskId: string; attemptId: string; cause: string }> = [];
+  const cycle = await scheduler(fakes, 60_000, { onWorkerInvocationError: (value) => { errors.push(value); } }).cycle();
+  assert.equal(cycle.outcome, "failed");
+  assert.match(cycle.outcome === "failed" ? cycle.reason : "", /^execution:worker_invocation_threw: TypeError: Cannot read properties/u);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0]?.attemptId, attemptId);
+  assert.match(errors[0]?.cause ?? "", /TypeError: Cannot read properties of undefined \(reading 'branch'\)\n {2}at /u);
 });

@@ -14,7 +14,7 @@ import {
   type ClaudeSpawn,
   type WorkerPort,
 } from "../src/index.js";
-import { registerWorkerAdapterContractSuite, validResult, type WorkerAdapterContractFactory, type WorkerAdapterContractScenario } from "./worker-adapter-contract.js";
+import { contractRequest, registerWorkerAdapterContractSuite, validResult, type WorkerAdapterContractFactory, type WorkerAdapterContractScenario } from "./worker-adapter-contract.js";
 
 const fakeClaude = `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -75,4 +75,15 @@ test("runs the same process boundary in the exact assigned worktree with shell d
     assert.equal(captured.args.includes("--no-session-persistence"), true);
     assert.equal(captured.args.includes("mcp__*"), true);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+test("a prompt renderer that throws leaves its cause in the worker diagnostic", async () => {
+  const runner: ClaudeStructuredRunner = { runStructured: async () => { throw new Error("runner must not be reached"); } };
+  const adapter = new ClaudeCodeProcessAdapter({ runner, inputSource: { create: (request) => ({ ok: true, value: envelope(request) }) }, promptRenderer: { render: () => { throw new RangeError("template slot 'scope' is missing"); } } });
+  await assert.rejects(adapter.execute(contractRequest(), new AbortController().signal), (error: unknown) => {
+    const message = (error as { readonly diagnostic?: { readonly providerMessage?: string } }).diagnostic?.providerMessage ?? "";
+    assert.match(message, /^Claude prompt rendering failed before process invocation\. RangeError: template slot 'scope' is missing\n {2}at /u);
+    return true;
+  });
 });

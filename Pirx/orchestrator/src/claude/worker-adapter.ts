@@ -1,3 +1,4 @@
+import { errorCause } from "../runtime/error-cause.js";
 import {
   ClaudeCodeCliRunner,
   type ClaudeRoundTripFailure,
@@ -68,6 +69,7 @@ function contractDiagnostic(value: unknown, field: string | undefined, code: "wo
   let serialized = "";
   let fieldNames: readonly string[] | undefined;
   if (value !== null && typeof value === "object" && !Array.isArray(value)) fieldNames = Object.keys(value as Record<string, unknown>).sort();
+  // A value JSON cannot encode has no length or digest; fieldNames and receivedType still describe it.
   try { serialized = JSON.stringify(value) ?? ""; } catch { serialized = ""; }
   return createWorkerFailureDiagnostic(code, {
     stage: "worker_contract",
@@ -79,8 +81,8 @@ function contractDiagnostic(value: unknown, field: string | undefined, code: "wo
   });
 }
 
-function failure(outcome: "invalid_request" | "invalid_input", requestId: string, text: string, code: "binding_mismatch" | "permission_denied" | "adapter_failure" = "binding_mismatch") {
-  return { outcome, requestId, message: text.slice(0, 256), exitCode: null, durationMs: 0, diagnostic: createWorkerFailureDiagnostic(code) } as const;
+function failure(outcome: "invalid_request" | "invalid_input", requestId: string, text: string, code: "binding_mismatch" | "permission_denied" | "adapter_failure" = "binding_mismatch", cause?: string) {
+  return { outcome, requestId, message: text.slice(0, 256), exitCode: null, durationMs: 0, diagnostic: createWorkerFailureDiagnostic(code, cause === undefined ? {} : { providerMessage: `${text} ${cause}` }) } as const;
 }
 export class ClaudeCodeProcessAdapter implements WorkerPort {
   readonly #runner: ClaudeStructuredRunner;
@@ -109,7 +111,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     let workerProfile;
     if (this.#repositoryPolicy !== undefined) {
       let canonicalWorktree: string;
-      try { canonicalWorktree = await realpath(value.workspace.worktree); } catch { return failure("invalid_input", value.correlationId, "Assigned worker worktree is not accessible."); }
+      try { canonicalWorktree = await realpath(value.workspace.worktree); } catch (error: unknown) { return failure("invalid_input", value.correlationId, "Assigned worker worktree is not accessible.", "binding_mismatch", errorCause(error)); }
       if (canonicalWorktree !== this.#repositoryPolicy.assignedWorktree) return failure("invalid_input", value.correlationId, "Assigned worker worktree is not the configured canonical worktree.");
       const profile = buildClaudeCodeWorkerProfile(value, this.#repositoryPolicy);
       if (!profile.ok) return failure("invalid_input", value.correlationId, "Worker capability or repository policy is invalid.", "permission_denied");
@@ -119,7 +121,7 @@ export class ClaudeCodeProcessAdapter implements WorkerPort {
     if (!input.ok) return { ...failure("invalid_input", value.correlationId, "Claude input could not be built from durable state.", "binding_mismatch"), diagnostic: createWorkerFailureDiagnostic("binding_mismatch", { stage: "worker_contract", ...(input.violations[0] === undefined ? {} : { field: input.violations[0].field, violationCode: input.violations[0].code }) }) };
     if (input.value.taskId !== value.taskId || input.value.attemptId !== value.attemptId || input.value.correlationId !== value.correlationId || input.value.workspace.worktree !== value.workspace.worktree || input.value.workspace.branch !== value.workspace.branch) return failure("invalid_input", value.correlationId, "Claude input is not bound to the assigned worker request.");
     let prompt: string;
-    try { prompt = this.#promptRenderer.render(input.value); } catch { return failure("invalid_input", value.correlationId, "Claude prompt rendering failed before process invocation."); }
+    try { prompt = this.#promptRenderer.render(input.value); } catch (error: unknown) { return failure("invalid_input", value.correlationId, "Claude prompt rendering failed before process invocation.", "binding_mismatch", errorCause(error)); }
     const contractPrompt = `${prompt}\n\n${workerResultContractInstruction()}`;
     if (contractPrompt.length === 0 || Buffer.byteLength(contractPrompt, "utf8") > 64 * 1024 || containsSecretShapedValue(contractPrompt)) return failure("invalid_input", value.correlationId, "Claude prompt is invalid or contains forbidden sensitive material.", "permission_denied");
     const result = await this.#runner.runStructured({ requestId: value.correlationId, cwd: value.workspace.worktree, prompt: contractPrompt, responseSchema: this.#repositoryPolicy === undefined ? this.#responseSchema : buildWorkerResultSchema(value), ...(workerProfile === undefined ? {} : { workerProfile }), ...(this.#transcriptPath === undefined ? {} : { transcriptPath: this.#transcriptPath }), signal, timeoutMs: value.limits.timeoutMs, maxStdoutBytes: value.limits.maxOutputBytes, maxStderrBytes: value.limits.maxErrorBytes });
