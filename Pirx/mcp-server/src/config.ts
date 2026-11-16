@@ -23,6 +23,35 @@ export interface McpServerConfig {
   readonly googleCalendarConfigurationError?: string;
   readonly githubPocIssue: number | undefined;
   readonly githubPocConfigurationError: string | undefined;
+  /** GitHub repository the chat tools use, taken from or checked against the daemon profile. */
+  readonly githubTarget?: { readonly owner: string; readonly repository: string };
+  readonly githubTargetError?: string;
+}
+
+/**
+ * Chat GitHub tools must target a repository the daemon reads, or an Issue
+ * created in chat lands where no worker will ever pick it up. With a daemon
+ * profile, an unset target is taken from it and a differing one is an error.
+ */
+function chatGitHubTarget(
+  environment: NodeJS.ProcessEnv,
+  daemonRepositories: readonly string[] | undefined,
+): Pick<McpServerConfig, "githubTarget" | "githubTargetError"> {
+  if (daemonRepositories === undefined) return {};
+  const owner = environment.PIRX_GITHUB_OWNER?.trim();
+  const repository = environment.PIRX_GITHUB_REPOSITORY?.trim();
+  const daemon = daemonRepositories.join(", ");
+  if (owner && repository) {
+    const chat = `${owner}/${repository}`;
+    return daemonRepositories.includes(chat)
+      ? { githubTarget: { owner, repository } }
+      : { githubTargetError: `Chat GitHub target ${chat} (PIRX_GITHUB_OWNER/PIRX_GITHUB_REPOSITORY) differs from the daemon repositories ${daemon}. Remove both variables or set them to a daemon repository.` };
+  }
+  if (daemonRepositories.length !== 1) {
+    return { githubTargetError: `The daemon reads several repositories (${daemon}). Set PIRX_GITHUB_OWNER and PIRX_GITHUB_REPOSITORY to one of them.` };
+  }
+  const [daemonOwner, daemonRepository] = daemonRepositories[0]!.split("/");
+  return { githubTarget: { owner: daemonOwner!, repository: daemonRepository! } };
 }
 
 function positiveInteger(name: string, value: string): number {
@@ -85,10 +114,12 @@ export function loadMcpServerConfig(
   let orchestratorConfigurationSource: McpServerConfig["orchestratorConfigurationSource"];
   let orchestratorConfigurationCode: string | undefined;
   let orchestratorConfigurationError: string | undefined;
+  let daemonRepositories: readonly string[] | undefined;
   try {
     const selection = resolveHeadlessOrchestratorConfigSelection(environment);
     const runtime = readHeadlessOrchestratorConfig(environment);
     if (runtime !== undefined) {
+      daemonRepositories = runtime.repositories.map((item) => item.repository);
       orchestratorDatabasePath = resolveRuntimeStoragePath(environment, runtime?.databasePath);
       orchestratorProfilePath = selection.filename;
       orchestratorConfigurationSource = selection.source;
@@ -119,6 +150,7 @@ export function loadMcpServerConfig(
     ...(googleCalendarConfigurationError === undefined ? {} : { googleCalendarConfigurationError }),
     githubPocIssue: githubPocIssue.value,
     githubPocConfigurationError: githubPocIssue.error,
+    ...chatGitHubTarget(environment, daemonRepositories),
   };
 }
 
