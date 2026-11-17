@@ -278,3 +278,14 @@ test("status says a worker is idle while a pushed Task waits on delivery, and as
     assert.equal(stopped.outcome === "success" ? stopped.value.attentionRequired?.reason : "missing", "Delivery stopped: Merging develop conflicts in 1 file(s).");
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });
+
+test("control storage failures name the SQLite cause", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-control-cause-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  try {
+    store.database.exec("DROP TABLE runtime_orchestrator_control");
+    const read = new OrchestratorControlRepository(store).get();
+    assert.equal(read.outcome, "storage_error");
+    assert.match(read.outcome === "storage_error" ? read.message : "", /^Orchestrator control state could not be read: Error(\[\w+\])?: no such table: runtime_orchestrator_control/u);
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});

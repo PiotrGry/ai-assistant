@@ -172,3 +172,9 @@ test("requires a reason exactly for blocked, failed, and cancelled Tasks and rou
     if (moved.ok) assert.deepEqual(deserializeTask(serializeTask(moved.value)), { ok: true, value: moved.value }, transition.type);
   }
 });
+
+test("an unreadable Task or Attempt snapshot names the JSON error", () => {
+  const task = deserializeTask("{");
+  assert.equal(task.ok, false);
+  if (!task.ok) assert.match(task.error.message, /^Task snapshot is not valid JSON: SyntaxError: /u);
+});

@@ -50,7 +50,7 @@ export interface HeadlessObservabilityPort {
 
 export interface HeadlessServiceEvent {
   readonly schemaVersion: typeof HEADLESS_SERVICE_SCHEMA_VERSION;
-  readonly event: "starting" | "recovered" | "control" | "queue" | "delivery" | "cycle" | "cycle_error" | "lease_renewal" | "worker_invocation" | "observability" | "host_shutdown" | "stopping" | "stopped";
+  readonly event: "starting" | "recovered" | "control" | "queue" | "delivery" | "cycle" | "cycle_error" | "lease_renewal" | "worker_invocation" | "observation_failed" | "observability" | "host_shutdown" | "stopping" | "stopped";
   readonly outcome: string;
   readonly reason?: string;
   readonly details?: unknown;
@@ -286,7 +286,7 @@ export class HeadlessOrchestratorService {
     try {
       const value = await this.#observability.reconcile();
       this.#event("observability", value.outcome, value.message, value);
-    } catch { this.#event("observability", "storage_error", "projection_threw"); }
+    } catch (error) { this.#event("observability", "storage_error", "projection_threw", thrown(error)); }
   }
 
   #closeOnce(): void {
@@ -297,7 +297,8 @@ export class HeadlessOrchestratorService {
 
   #event(event: HeadlessServiceEvent["event"], outcome: string, reason?: unknown, details?: unknown): void {
     const value = Object.freeze({ schemaVersion: HEADLESS_SERVICE_SCHEMA_VERSION, event, outcome: boundedReason(outcome), ...(reason === undefined ? {} : { reason: String(diagnosticContext(reason)) }), ...(details === undefined ? {} : { details: diagnosticContext(details) }) });
-    try { this.#control?.observe(value); } catch { /* status publication cannot crash orchestration */ }
+    // Status publication cannot crash orchestration, but its failure is reported (location only, like cycle_threw).
+    try { this.#control?.observe(value); } catch (error) { this.#emit(Object.freeze({ schemaVersion: HEADLESS_SERVICE_SCHEMA_VERSION, event: "observation_failed", outcome: "storage_error", reason: "observe_threw", details: { ...thrown(error), failedEvent: value.event } })); }
     this.#emit(value);
   }
 }
