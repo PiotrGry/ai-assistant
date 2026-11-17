@@ -43,7 +43,12 @@ export interface ClaudeCodeRepositoryPolicy {
   readonly commitMessage?: string;
   readonly maxTurns?: number;
   readonly attemptTimeLimitMs?: number;
+  /** Claude model for the worker; without it the account's Claude Code default applies. */
+  readonly model?: string;
 }
+
+/** A Claude model ID or alias, e.g. claude-opus-5-5 or opus; never an option. */
+export const CLAUDE_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
 
 export interface ClaudeCodeWorkerProfile {
   readonly advisorConfig?: string;
@@ -56,6 +61,7 @@ export interface ClaudeCodeWorkerProfile {
   readonly maxTurns?: number;
   /** Wall-clock bound for one Attempt, next to the idle window; output does not extend it. */
   readonly attemptTimeLimitMs?: number;
+  readonly model?: string;
   readonly remoteName: string;
   readonly assignedBranch: string;
   readonly testCommands: readonly string[];
@@ -101,6 +107,7 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
   if (!Array.isArray(policy.testCommands) || policy.testCommands.length > CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxTestCommands || policy.testCommands.some((command) => !safeCommand(command))) return failure("Repository test policy contains an unsafe or oversized command.");
   if (policy.maxTurns !== undefined && (!Number.isSafeInteger(policy.maxTurns) || policy.maxTurns <= 1 || policy.maxTurns > CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxTurns)) return failure("Code-worker turn bound is invalid.");
   if (policy.attemptTimeLimitMs !== undefined && !validAttemptTimeLimit(policy.attemptTimeLimitMs)) return failure("Code-worker total time limit per Attempt is invalid.");
+  if (policy.model !== undefined && !CLAUDE_MODEL_PATTERN.test(policy.model)) return failure("Code-worker model is not a Claude model ID.");
   const commitMessage = policy.commitMessage ?? "Pirx: apply assigned repair";
   if (!safeCommitMessage(commitMessage)) return failure("Configured commit message is unsafe.");
 
@@ -147,6 +154,7 @@ export function buildClaudeCodeWorkerProfile(request: WorkerRequest, policy: Cla
     permissionMode: "dontAsk",
     maxTurns: policy.maxTurns ?? CLAUDE_CODE_WORKER_PROFILE_DEFAULTS.maxTurns,
     attemptTimeLimitMs: policy.attemptTimeLimitMs ?? CLAUDE_CODE_WORKER_PROFILE_DEFAULTS.attemptTimeLimitMs,
+    ...(policy.model === undefined ? {} : { model: policy.model }),
     remoteName: policy.remoteName,
     assignedBranch: request.workspace.branch,
     testCommands: Object.freeze([...policy.testCommands]),
