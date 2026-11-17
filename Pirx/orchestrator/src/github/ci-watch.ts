@@ -61,6 +61,7 @@ export interface GitHubActionsReadGateway {
   listWorkflowRunsForPullRequest(
     pullRequestNumber: number,
     context: GitHubRequestContext,
+    headSha?: string,
   ): Promise<GitHubOperationResult<readonly GitHubActionsWorkflowRun[]>>;
   listWorkflowRunJobs(
     runId: number,
@@ -243,17 +244,20 @@ export class GitHubActionsGateway implements GitHubActionsReadGateway {
   async listWorkflowRunsForPullRequest(
     pullRequestNumber: number,
     context: GitHubRequestContext,
+    headSha?: string,
   ): Promise<GitHubOperationResult<readonly GitHubActionsWorkflowRun[]>> {
     const result = await this.#read<RestWorkflowRunsPayload>({
       method: "GET",
       path: `${repositoryPath(this.#config)}/actions/runs`,
-      query: { event: "pull_request", per_page: 100 },
+      query: { event: "pull_request", per_page: 100, ...(headSha === undefined ? {} : { head_sha: headSha }) },
     }, context);
     if (result.outcome !== "success") return result;
     if (!isRecord(result.value) || !Array.isArray(result.value.workflow_runs)) return malformed(result.correlationId, result.response);
     const runs = result.value.workflow_runs.map(mapRun);
     if (runs.some((run): run is undefined => run === undefined)) return malformed(result.correlationId, result.response);
-    return { ...result, value: (runs as GitHubActionsWorkflowRun[]).filter((run) => run.pullRequestNumbers.includes(pullRequestNumber)) };
+    // GitHub empties pull_requests on a run once its pull request is merged; such a run
+    // still counts when it tests the requested head. A run naming another PR never does.
+    return { ...result, value: (runs as GitHubActionsWorkflowRun[]).filter((run) => run.pullRequestNumbers.includes(pullRequestNumber) || (headSha !== undefined && run.headSha === headSha && run.pullRequestNumbers.length === 0)) };
   }
 
   async listWorkflowRunJobs(
@@ -591,7 +595,7 @@ export class GitHubActionsWatcher {
     if (request.workflowRunId !== undefined) {
       return { result: await this.#gateway.getWorkflowRun(request.workflowRunId, context), attempts: 1 };
     }
-    const result = await this.#gateway.listWorkflowRunsForPullRequest(request.pullRequestNumber!, context);
+    const result = await this.#gateway.listWorkflowRunsForPullRequest(request.pullRequestNumber!, context, request.expectedHeadSha);
     if (result.outcome !== "success") return { result, attempts: 1 };
     const matches = result.value.filter((run) => run.headSha === request.expectedHeadSha && (request.requiredWorkflowName === undefined || run.name === request.requiredWorkflowName));
     if (matches.length === 0) {
