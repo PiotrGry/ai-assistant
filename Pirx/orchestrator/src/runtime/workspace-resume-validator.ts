@@ -1,7 +1,8 @@
 import { realpath, stat } from "node:fs/promises";
 
 import type { AttemptId, TaskId, UtcTimestamp } from "./task-domain.js";
-import { GitWorkspaceCommandRunner } from "./workspace.js";
+import { GitWorkspaceCommandRunner, gitCause } from "./workspace.js";
+import { errorCause } from "./error-cause.js";
 import {
   normalizeWorkspaceOwnershipInput,
   workspaceOwnershipId,
@@ -63,11 +64,11 @@ function observed(value: Partial<WorkspaceResumeValidationObserved>): WorkspaceR
   const entries = Object.entries(value).filter(([, item]) => typeof item === "string" && item.length <= WORKSPACE_RESUME_VALIDATION_LIMITS.maxObservedText) as Array<[keyof WorkspaceResumeValidationObserved, string]>;
   return entries.length === 0 ? undefined : Object.freeze(Object.fromEntries(entries) as WorkspaceResumeValidationObserved);
 }
-function commandFailure(command: { readonly outcome: "success" | "git_failure" | "cancelled" | "timeout" | "unknown" }, text: string, details: Partial<WorkspaceResumeValidationObserved> = {}): WorkspaceResumeValidationResult | undefined {
+function commandFailure(command: { readonly outcome: "success" | "git_failure" | "cancelled" | "timeout" | "unknown"; readonly stderr?: string; readonly exitCode?: number | null; readonly cause?: string }, text: string, details: Partial<WorkspaceResumeValidationObserved> = {}): WorkspaceResumeValidationResult | undefined {
   if (command.outcome === "cancelled") return result("cancelled", "Workspace validation was cancelled.", observed(details));
   if (command.outcome === "timeout") return result("timeout", `${text} timed out.`, observed(details));
-  if (command.outcome === "unknown") return result("unknown", `${text} returned an unknown result.`, observed(details));
-  if (command.outcome === "git_failure") return result("git_failure", `${text} failed.`, observed(details));
+  if (command.outcome === "unknown") return result("unknown", `${text} returned an unknown result. ${gitCause(command)}`, observed(details));
+  if (command.outcome === "git_failure") return result("git_failure", `${text} failed. ${gitCause(command)}`, observed(details));
   return undefined;
 }
 
@@ -108,11 +109,11 @@ export class WorkspaceResumeValidator {
     if (record.repository !== normalized.repository || record.repositoryRoot !== normalized.repositoryRoot || record.worktreePath !== normalized.worktreePath || record.assignedBranch !== normalized.assignedBranch || record.currentRevision !== expectedCommit) return result("ownership_mismatch", "Requested workspace does not match durable ownership.");
     let repositoryRoot: string;
     try { repositoryRoot = await realpath(normalized.repositoryRoot); const info = await stat(repositoryRoot); if (!info.isDirectory()) return result("missing_repository", "The recorded repository is not a directory."); }
-    catch { return result("missing_repository", "The recorded repository is missing or inaccessible."); }
+    catch (error: unknown) { return result("missing_repository", `The recorded repository is missing or inaccessible. ${errorCause(error)}`); }
     if (repositoryRoot !== normalized.repositoryRoot) return result("ownership_mismatch", "The repository path is not the canonical path recorded for the workspace.");
     let worktreePath: string;
     try { worktreePath = await realpath(normalized.worktreePath); const info = await stat(worktreePath); if (!info.isDirectory()) return result("missing_worktree", "The recorded worktree is not a directory."); }
-    catch { return result("missing_worktree", "The recorded worktree is missing or inaccessible."); }
+    catch (error: unknown) { return result("missing_worktree", `The recorded worktree is missing or inaccessible. ${errorCause(error)}`); }
     if (worktreePath !== normalized.worktreePath) return result("ownership_mismatch", "The worktree path is not the canonical path recorded for the workspace.");
     const commonObserved = { repositoryRoot, worktreePath };
     const top = await this.#git.run(["rev-parse", "--show-toplevel"], worktreePath, validTimeout(request.timeoutMs)!, request.signal);

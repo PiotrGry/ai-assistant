@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   RuntimeSqliteStore,
   WorkspaceCleanupCoordinator,
+  GitWorkspaceCommandRunner,
   WorkspaceProvisioner,
   createTask,
   transitionAttempt,
@@ -136,4 +137,14 @@ test("serializes concurrent cleanup and never removes twice", async () => {
   const value = await fixture(); await complete(value);
   try { const coordinator = new WorkspaceCleanupCoordinator(value.store); const results = await Promise.all([coordinator.cleanup(cleanupRequest()), coordinator.cleanup(cleanupRequest())]); assert.deepEqual(results.map((item) => item.outcome), ["removed", "already_removed"]); }
   finally { await close(value); }
+});
+
+test("a failed cleanup step names git's own error and keeps secrets out", async () => {
+  const value = await fixture(); await complete(value);
+  try {
+    const failing = { run: async () => ({ outcome: "git_failure" as const, stdout: "", stderr: "fatal: unable to read .git/worktrees (token=ghp_hidden)", exitCode: 128 }) } as unknown as GitWorkspaceCommandRunner;
+    const result = await new WorkspaceCleanupCoordinator(value.store, failing).cleanup(cleanupRequest());
+    assert.match(result.message, /^Registered worktrees could not be inspected\. git: fatal: unable to read \.git\/worktrees/u);
+    assert.doesNotMatch(result.message, /ghp_hidden/u);
+  } finally { await close(value); }
 });

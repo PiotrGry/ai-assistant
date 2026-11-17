@@ -149,3 +149,9 @@ test("rejects cyclic data instead of accepting a non-JSON checkpoint", () => {
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.violations[0]?.code, "invalid_input");
 });
+
+test("an unreadable Checkpoint names the JSON error", () => {
+  const result = deserializeCheckpoint("not-json");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.violations[0]?.message ?? "", /^Checkpoint is not valid JSON: SyntaxError: /u);
+});

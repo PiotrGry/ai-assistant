@@ -137,3 +137,9 @@ test("keeps secret-shaped fields and raw provider/history data out of the envelo
   assert.equal(leaked.ok, false);
   if (!leaked.ok) assert.equal(leaked.violations[0]?.code, "forbidden_field");
 });
+
+test("an input envelope that JSON cannot encode names the error", () => {
+  const result = validateClaudeCodeInput({ kind: "claude_code_input", schemaVersion: CLAUDE_INPUT_SCHEMA_VERSION, size: 1n });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.violations[0]?.message ?? "", /^Claude input envelope is not JSON-safe: TypeError: .*BigInt/u);
+});
