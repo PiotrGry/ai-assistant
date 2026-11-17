@@ -116,10 +116,12 @@ test("a branch that already contains develop is not merged again", async () => {
 test("a pre-push gate that refuses the merge is a rejection, and nothing is recorded", async () => {
   const value = await fixture();
   try {
-    await writeFile(join(value.worktree, ".git", "hooks", "pre-push"), "#!/bin/sh\necho 'pip-audit: vulnerabilities found'\nexit 1\n", { mode: 0o755 });
+    // Real gates print pages of noise first and the decisive line last; delivery keeps only 256 characters.
+    const noise = "WARNING:cachecontrol.controller:Cache entry deserialization failed, entry ignored\\n".repeat(40);
+    await writeFile(join(value.worktree, ".git", "hooks", "pre-push"), `#!/bin/sh\nprintf '${noise}'\nprintf '\\033[0;31m✗\\033[0m pip-audit: vulnerabilities found\\n'\nexit 1\n`, { mode: 0o755 });
     const synced = await new FeatureBranchSyncService(value.store).sync(request(attempt1, 5));
     assert.equal(synced.outcome, "rejected", JSON.stringify(synced));
-    assert.match(synced.message, /pip-audit: vulnerabilities found/u);
+    assert.match(synced.message.slice(0, 256), /✗ pip-audit: vulnerabilities found/u);
     assert.equal(git(value.remote, "rev-parse", `refs/heads/${branch}`), value.workerCommit);
     const history = value.store.attempts.listByTask(taskId);
     assert.equal(history.outcome === "success" ? history.value.length : 0, 1);

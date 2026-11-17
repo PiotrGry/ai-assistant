@@ -35,7 +35,10 @@ type GitOutput = Awaited<ReturnType<GitRunner["run"]>>;
 function result(outcome: FeatureBranchSyncOutcome, message: string, extra: Omit<FeatureBranchSyncResult, "outcome" | "message"> = {}): FeatureBranchSyncResult {
   return Object.freeze({ outcome, message: message.slice(0, 1_000), ...extra });
 }
-function output(value: GitOutput): string { return `${value.stdout}\n${value.stderr}`.trim().slice(-1_500) || "no output"; }
+const ANSI = /\u001b\[[0-9;]*[A-Za-z]/gu;
+function fullOutput(value: GitOutput): string { return `${value.stdout}\n${value.stderr}`.replace(ANSI, "").trim(); }
+/** Hooks print the decisive line last and delivery logs keep 256 characters, so the message carries only the tail. */
+function output(value: GitOutput): string { return fullOutput(value).slice(-180) || "no output"; }
 const SHA = /^[0-9a-f]{40}$/u;
 
 /**
@@ -99,7 +102,7 @@ export class FeatureBranchSyncService {
     const pushed = await git(["push", request.remoteName, `${merged}:refs/heads/${latest.branch}`], PUSH_TIMEOUT_MS);
     if (pushed.outcome !== "success") {
       const text = output(pushed);
-      return isRepositoryRejection(pushed.outcome, pushed.exitCode, text)
+      return isRepositoryRejection(pushed.outcome, pushed.exitCode, fullOutput(pushed))
         ? result("rejected", `The repository rejected the pushed merge of ${request.baseBranch}: ${text}`, { commit: merged })
         : result("retryable", `Pushing the merge of ${request.baseBranch} failed (${pushed.outcome}): ${text}`, { commit: merged });
     }
