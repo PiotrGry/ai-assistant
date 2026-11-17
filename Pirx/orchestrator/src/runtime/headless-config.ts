@@ -4,7 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 
 import { PRODUCTION_RUNTIME_LIMITS, type ProductionRepositoryConfig } from "./production-runtime.js";
 import { HEADLESS_SERVICE_LIMITS } from "./headless-service.js";
-import { CLAUDE_CODE_WORKER_PROFILE_LIMITS, CODE_WORKER_CAPABILITIES } from "../claude/worker-profile.js";
+import { CLAUDE_CODE_WORKER_PROFILE_LIMITS, CLAUDE_MODEL_PATTERN, CODE_WORKER_CAPABILITIES } from "../claude/worker-profile.js";
 import type { ReleaseMergeMethod } from "./release-merge.js";
 
 export const HEADLESS_CONFIG_SCHEMA_VERSION = 1 as const;
@@ -16,6 +16,8 @@ export interface HeadlessRepositoryConfig extends ProductionRepositoryConfig {
   readonly maxTurns?: number;
   /** Total time per Attempt; the worker profile default applies when absent. */
   readonly attemptTimeLimitMs?: number;
+  /** Claude model for the worker; the account's Claude Code default applies when absent. */
+  readonly model?: string;
   readonly delivery: HeadlessDeliveryPolicyConfig;
 }
 
@@ -64,7 +66,7 @@ export interface HeadlessOrchestratorConfigSelection {
 }
 
 const TOP_LEVEL_KEYS = new Set(["schemaVersion", "databasePath", "workerId", "provider", "workerCapabilities", "repositories", "worktreeParent", "leaseDurationMs", "shutdownTimeoutMs", "workerTimeoutMs", "workerOutputBytes", "workerErrorBytes", "maximumConsecutiveResumeFailures", "cycleIntervalMs", "errorIntervalMs", "githubProjectOwner", "githubProjectNumber", "githubApiUrl", "githubTimeoutMs", "hostPowerOff"]);
-const REPOSITORY_KEYS = new Set(["repository", "repositoryRoot", "baseBranch", "baseRevision", "remoteName", "testCommands", "maxTurns", "attemptTimeLimitMs", "delivery"]);
+const REPOSITORY_KEYS = new Set(["repository", "repositoryRoot", "baseBranch", "baseRevision", "remoteName", "testCommands", "maxTurns", "attemptTimeLimitMs", "model", "delivery"]);
 const DELIVERY_KEYS = new Set(["releaseBranch", "featureWorkflowName", "releaseRequiredChecks", "featureRequiredApprovals", "releaseRequiredApprovals", "featureMergeMethod", "releaseMergeMethod", "requireMergeable"]);
 const SENSITIVE_KEY = /^(?:token|secret|password|passwd|api[_-]?key|authorization|cookie|private[_-]?key|credential|connection[_-]?string)$/iu;
 const SENSITIVE_VALUE = /(?:-----BEGIN [^-]*PRIVATE KEY-----|\bbearer\s+[A-Za-z0-9._~+/=-]+|\b(?:ghp_|github_pat_|xox[baprs]-|sk-)[A-Za-z0-9._-]+)/iu;
@@ -132,6 +134,7 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
     for (const [commandIndex, command] of item.testCommands.entries()) need(text(command, 256) && TEST_COMMAND.test(command), `${at}.testCommands[${commandIndex}]`, "must start with pnpm, npm, yarn, bun, node, npx, python, python3, pytest, uv, cargo, go or make and use plain arguments without quotes or shell operators");
     need(item.maxTurns === undefined || integer(item.maxTurns, 2, CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxTurns), `${at}.maxTurns`, between(2, CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxTurns));
     need(item.attemptTimeLimitMs === undefined || integer(item.attemptTimeLimitMs, CLAUDE_CODE_WORKER_PROFILE_LIMITS.minimumAttemptTimeLimitMs, CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxAttemptTimeLimitMs), `${at}.attemptTimeLimitMs`, between(CLAUDE_CODE_WORKER_PROFILE_LIMITS.minimumAttemptTimeLimitMs, CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxAttemptTimeLimitMs));
+    need(item.model === undefined || (typeof item.model === "string" && CLAUDE_MODEL_PATTERN.test(item.model)), `${at}.model`, 'must be a Claude model ID such as "claude-opus-5-5"');
     const delivery = item.delivery;
     need(record(delivery), `${at}.delivery`, "must be a JSON object");
     needKnownKeys(delivery, DELIVERY_KEYS, `${at}.delivery`);
@@ -150,6 +153,7 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
       testCommands: Object.freeze([...item.testCommands] as string[]),
       ...(item.maxTurns === undefined ? {} : { maxTurns: item.maxTurns as number }),
       ...(item.attemptTimeLimitMs === undefined ? {} : { attemptTimeLimitMs: item.attemptTimeLimitMs as number }),
+      ...(item.model === undefined ? {} : { model: item.model as string }),
       delivery: Object.freeze({ releaseBranch: delivery.releaseBranch, featureWorkflowName: delivery.featureWorkflowName, releaseRequiredChecks: Object.freeze([...checks] as string[]), featureRequiredApprovals: delivery.featureRequiredApprovals, releaseRequiredApprovals: delivery.releaseRequiredApprovals, featureMergeMethod: "merge", releaseMergeMethod: delivery.releaseMergeMethod as ReleaseMergeMethod, requireMergeable: delivery.requireMergeable }),
     }));
   }

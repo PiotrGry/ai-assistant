@@ -15,6 +15,7 @@ export interface ProductionClaudeRepositoryPolicy {
   readonly testCommands: readonly string[];
   readonly maxTurns?: number;
   readonly attemptTimeLimitMs?: number;
+  readonly model?: string;
 }
 
 export interface ProductionClaudeWorkerOptions {
@@ -71,6 +72,7 @@ export class ProductionClaudeWorker implements WorkerPort {
         testCommands: repository.testCommands,
         ...(repository.maxTurns === undefined ? {} : { maxTurns: repository.maxTurns }),
         ...(repository.attemptTimeLimitMs === undefined ? {} : { attemptTimeLimitMs: repository.attemptTimeLimitMs }),
+        ...(repository.model === undefined ? {} : { model: repository.model }),
       },
     });
     return adapter.execute(request, signal);

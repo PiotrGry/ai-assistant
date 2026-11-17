@@ -253,6 +253,10 @@ test("strict config accepts bounded operational fields and rejects unknown or se
   const withTurns = (maxTurns: unknown) => { const config = structuredClone(validConfig()) as { repositories: Array<Record<string, unknown>> }; config.repositories[0]!.maxTurns = maxTurns; return config; };
   assert.equal(parseHeadlessOrchestratorConfig(withTurns(32)).repositories[0]?.maxTurns, 32);
   for (const maxTurns of [1, 1_001, 2.5, "32"]) assert.throws(() => parseHeadlessOrchestratorConfig(withTurns(maxTurns)), HeadlessConfigurationError);
+  const withModel = (model: unknown) => { const config = structuredClone(validConfig()) as { repositories: Array<Record<string, unknown>> }; config.repositories[0]!.model = model; return config; };
+  assert.equal(parsed.repositories[0]?.model, undefined);
+  assert.equal(parseHeadlessOrchestratorConfig(withModel("claude-opus-5-5")).repositories[0]?.model, "claude-opus-5-5");
+  for (const model of ["", "claude opus", 5]) assert.throws(() => parseHeadlessOrchestratorConfig(withModel(model)), /repositories\[0\]\.model/u);
   assert.equal(parsed.repositories[0]?.attemptTimeLimitMs, undefined);
   const withLimit = (attemptTimeLimitMs: unknown) => { const config = structuredClone(validConfig()) as { repositories: Array<Record<string, unknown>> }; config.repositories[0]!.attemptTimeLimitMs = attemptTimeLimitMs; return config; };
   assert.equal(parseHeadlessOrchestratorConfig(withLimit(7_200_000)).repositories[0]?.attemptTimeLimitMs, 7_200_000);

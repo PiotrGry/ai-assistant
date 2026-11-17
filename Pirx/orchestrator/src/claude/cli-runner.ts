@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 
-import { CLAUDE_CODE_WORKER_PROFILE_LIMITS, type ClaudeCodeWorkerProfile } from "./worker-profile.js";
+import { CLAUDE_CODE_WORKER_PROFILE_LIMITS, CLAUDE_MODEL_PATTERN, type ClaudeCodeWorkerProfile } from "./worker-profile.js";
 import { createWorkerFailureDiagnostic, type WorkerFailureCode } from "../runtime/worker-diagnostic.js";
 import { extractProviderRecoveryMetadata, hasRejectedRateLimit, resetAtFromLimitText } from "../runtime/worker-recovery.js";
 import type { WorkerProviderRecoveryMetadata } from "../runtime/worker-availability.js";
@@ -208,7 +208,7 @@ export function buildClaudeStructuredArguments(requestId: string, prompt: string
 }
 export function buildClaudeWorkerArguments(requestId: string, prompt: string, responseSchema: unknown, profile: ClaudeCodeWorkerProfile): readonly string[] {
   const schema = JSON.stringify(responseSchema);
-  if (schema === undefined || Buffer.byteLength(schema, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || profile.permissionMode !== "dontAsk" || (profile.maxTurns !== undefined && (!Number.isSafeInteger(profile.maxTurns) || profile.maxTurns <= 1 || profile.maxTurns > CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxTurns)) || profile.allowedTools.some((value) => /[\u0000-\u001f\u007f;&|<>`$\\]/u.test(value)) || profile.disallowedTools.some((value) => /[\u0000-\u001f\u007f]/u.test(value)) || JSON.stringify(profile).includes("bypassPermissions")) throw new RangeError("Claude code-worker profile is unsafe or invalid.");
+  if (schema === undefined || Buffer.byteLength(schema, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > MAX_CLAUDE_OUTPUT_BYTES || profile.permissionMode !== "dontAsk" || (profile.maxTurns !== undefined && (!Number.isSafeInteger(profile.maxTurns) || profile.maxTurns <= 1 || profile.maxTurns > CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxTurns)) || (profile.model !== undefined && !CLAUDE_MODEL_PATTERN.test(profile.model)) || profile.allowedTools.some((value) => /[\u0000-\u001f\u007f;&|<>`$\\]/u.test(value)) || profile.disallowedTools.some((value) => /[\u0000-\u001f\u007f]/u.test(value)) || JSON.stringify(profile).includes("bypassPermissions")) throw new RangeError("Claude code-worker profile is unsafe or invalid.");
   // Restricted mode ignores user/project customizations and confines file
   // tools. The inline strict settings add fail-closed file and process-level
   // isolation for the exact invocation without mutating operator config.
@@ -222,7 +222,7 @@ export function buildClaudeWorkerArguments(requestId: string, prompt: string, re
   if (profile.disallowedTools.length > 0) arguments_.push("--disallowedTools", profile.disallowedTools.join(","));
   // stream-json emits one event per agent step, so the idle watchdog sees
   // progress; the final "result" event has the same envelope as json mode.
-  arguments_.push("--permission-mode", profile.permissionMode, "--disable-slash-commands", "--no-session-persistence", ...(profile.maxTurns === undefined ? [] : ["--max-turns", String(profile.maxTurns)]), "--output-format", "stream-json", "--verbose", "--json-schema", schema, prompt);
+  arguments_.push("--permission-mode", profile.permissionMode, "--disable-slash-commands", "--no-session-persistence", ...(profile.maxTurns === undefined ? [] : ["--max-turns", String(profile.maxTurns)]), ...(profile.model === undefined ? [] : ["--model", profile.model]), "--output-format", "stream-json", "--verbose", "--json-schema", schema, prompt);
   return Object.freeze(arguments_);
 }
 function buildEnvironment(source: NodeJS.ProcessEnv, additional: Readonly<Record<string, string | undefined>> | undefined): NodeJS.ProcessEnv {

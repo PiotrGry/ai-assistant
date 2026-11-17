@@ -95,6 +95,13 @@ test("maps the complete code-worker grant to a bounded Claude profile", () => {
   assert.equal(boundedArgs[boundedArgs.indexOf("--max-turns") + 1], "50");
   assert.equal(bounded.value.attemptTimeLimitMs, 3_600_000);
   for (const attemptTimeLimitMs of [59_999, 43_200_001, 1.5]) assert.equal(buildClaudeCodeWorkerProfile(request(), { ...policy, attemptTimeLimitMs }).ok, false);
+  assert.equal(args.includes("--model"), false, "no model configured: Claude Code's default applies");
+  const pinned = buildClaudeCodeWorkerProfile(request(), { ...policy, model: "claude-opus-5-5" });
+  assert.equal(pinned.ok, true);
+  if (!pinned.ok) return;
+  const pinnedArgs = buildClaudeWorkerArguments("worker-profile-correlation", "bounded prompt", buildWorkerResultSchema(request()), pinned.value);
+  assert.equal(pinnedArgs[pinnedArgs.indexOf("--model") + 1], "claude-opus-5-5");
+  for (const model of ["", "claude opus", "--dangerously-skip-permissions", "x".repeat(101)]) assert.equal(buildClaudeCodeWorkerProfile(request(), { ...policy, model }).ok, false);
   assert.equal(args.filter((value) => value === "--allowedTools").length, 1);
   assert.equal(args.filter((value) => value === "--disallowedTools").length, 1);
   assert.match(args[args.indexOf("--allowedTools") + 1] ?? "", /Bash\(git status:\*\),Bash\(git diff:\*\)/u);
