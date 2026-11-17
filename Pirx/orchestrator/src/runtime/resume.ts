@@ -1,3 +1,4 @@
+import { errorCause } from "./error-cause.js";
 import {
   retryTask,
   type AttemptId,
@@ -209,8 +210,8 @@ export function buildResumeContext(store: RuntimeSqliteStore, taskId: string, wo
       const checked = workspace.check({ repository: checkpoint.value.repository, branch: checkpoint.value.branch as string, worktree: checkpoint.value.worktree as string, currentCommit: checkpoint.value.currentCommit as string });
       const blocked = workspaceFailure(checked);
       if (blocked !== undefined) return blocked;
-    } catch {
-      return failure("human_action_required", "WORKSPACE_CHECK_FAILED", "Workspace reference checking failed before resume.");
+    } catch (error: unknown) {
+      return failure("human_action_required", "WORKSPACE_CHECK_FAILED", `Workspace reference checking failed before resume: ${errorCause(error).split("\n")[0]}`.slice(0, 256));
     }
   }
   return buildContext(task.value, checkpoint.value);

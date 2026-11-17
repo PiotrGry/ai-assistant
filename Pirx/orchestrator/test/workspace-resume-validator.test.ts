@@ -178,3 +178,17 @@ test("maps cancellation, timeout, Git failure, unknown results, and invalid inpu
     assert.equal((await new WorkspaceResumeValidator(value.store).validate({ ...request(value), expectedOwnershipVersion: 0 })).outcome, "invalid_input");
   } finally { await close(value); }
 });
+
+test("a failed validation step names git's error, and a missing worktree names ENOENT", async () => {
+  const value = await fixture();
+  try {
+    const failing = { run: async () => ({ outcome: "git_failure" as const, stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git", exitCode: 128 }) } as unknown as GitWorkspaceCommandRunner;
+    const failed = await new WorkspaceResumeValidator(value.store, failing).validate(request(value));
+    assert.equal(failed.outcome, "git_failure");
+    assert.match(failed.message, /failed\. git: fatal: not a git repository/u);
+    await rm(value.worktreePath, { recursive: true, force: true });
+    const missing = await new WorkspaceResumeValidator(value.store).validate(request(value));
+    assert.equal(missing.outcome, "missing_worktree");
+    assert.match(missing.message, /Error\[ENOENT\]/u);
+  } finally { await close(value); }
+});

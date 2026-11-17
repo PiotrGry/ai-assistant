@@ -107,3 +107,19 @@ test("normalizes cancellation and timeout without leaving a running child", asyn
     assert.equal((await new GitWorkspaceCommandRunner({ executable: loud }).run(["rev-parse", "--show-toplevel"], value.repository, 5_000)).outcome, "git_failure");
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
+
+test("workspace failures name their cause: missing git, missing revision, missing repository", async () => {
+  const value = await fixture();
+  try {
+    const missingGit = await new WorkspaceProvisioner(new GitWorkspaceCommandRunner({ executable: join(value.root, "no-such-git") })).provision(request(value));
+    assert.equal(missingGit.outcome, "invalid_repository");
+    assert.match(missingGit.message, /git could not be started: Error\[ENOENT\]/u);
+    const revision = "f".repeat(40);
+    const missingRevision = await new WorkspaceProvisioner().provision(request(value, { expectedBaseRevision: revision }));
+    assert.equal(missingRevision.outcome, "invalid_revision");
+    assert.match(missingRevision.message, new RegExp(`Expected base revision ${revision} was not found in the repository\\. git exited 1`, "u"));
+    const missingRoot = await new WorkspaceProvisioner().provision(request(value, { repositoryRoot: join(value.root, "gone") }));
+    assert.equal(missingRoot.outcome, "invalid_repository");
+    assert.match(missingRoot.message, /Error\[ENOENT\]/u);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});

@@ -220,3 +220,16 @@ test("rolls back Task and Attempt creation when workspace ownership cannot trans
     await rm(value.directory, { recursive: true, force: true });
   }
 });
+
+test("a workspace check that throws keeps its cause in the resume result", async () => {
+  const value = await fixture();
+  const setupValue = await prepare(value.filename);
+  try {
+    const result = buildResumeContext(setupValue.store, setupValue.task.id, { check: () => { throw Object.assign(new Error("stat /tmp/pirx-resume EACCES"), { code: "EACCES" }); } });
+    assert.equal(result.outcome, "human_action_required");
+    if (result.outcome === "human_action_required") assert.match(result.message, /^Workspace reference checking failed before resume: Error\[EACCES\]: stat \/tmp\/pirx-resume EACCES$/u);
+  } finally {
+    setupValue.store.close();
+    await rm(value.directory, { recursive: true, force: true });
+  }
+});

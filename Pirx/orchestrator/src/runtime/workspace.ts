@@ -1,3 +1,4 @@
+import { errorCause } from "./error-cause.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
@@ -46,7 +47,10 @@ export interface WorkspaceProvisionResult {
   readonly errorCode?: "invalid_input" | "not_a_repository" | "invalid_revision" | "conflict" | "git_failure" | "cancelled" | "timeout" | "unknown";
 }
 
-interface GitResult { readonly outcome: "success" | "git_failure" | "cancelled" | "timeout" | "unknown"; readonly stdout: string; readonly stderr: string; readonly exitCode: number | null; }
+interface GitResult { readonly outcome: "success" | "git_failure" | "cancelled" | "timeout" | "unknown"; readonly stdout: string; readonly stderr: string; readonly exitCode: number | null; readonly cause?: string; }
+/** Why a git step failed: the spawn error, else git's own stderr (redacted), else its exit code. */
+export function gitCause(value: { readonly outcome: string; readonly stderr?: string; readonly exitCode?: number | null; readonly cause?: string }): string { const stderr = value.stderr?.trim() ?? ""; return value.cause ?? (stderr ? `git: ${sanitized(stderr)}` : value.exitCode !== null && value.exitCode !== undefined ? `git exited ${value.exitCode}` : `git ${value.outcome}`); }
+function because(message: string, cause: string): string { return `${message} ${cause}`; }
 interface GitRunnerOptions { readonly executable?: string; readonly environment?: NodeJS.ProcessEnv; }
 
 function text(value: unknown, max: number): value is string { return typeof value === "string" && value.trim().length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value); }
@@ -84,14 +88,14 @@ export class GitWorkspaceCommandRunner {
       if (signal?.aborted === true) { resolveResult({ outcome: "cancelled", stdout: "", stderr: "", exitCode: null }); return; }
       let child: ChildProcess;
       try { child = spawn(this.#executable, [...args], { cwd, env: env(this.#environment), shell: false, stdio: ["ignore", "pipe", "pipe"] }); }
-      catch { resolveResult({ outcome: "unknown", stdout: "", stderr: "", exitCode: null }); return; }
-      let stdout = ""; let stderr = ""; let trigger: "cancelled" | "timeout" | "output" | undefined; let exitCode: number | null = null; let settled = false; let timer: NodeJS.Timeout | undefined;
-      const finish = (outcome: GitResult["outcome"]) => { if (settled) return; settled = true; if (timer !== undefined) clearTimeout(timer); signal?.removeEventListener("abort", abort); resolveResult({ outcome, stdout, stderr, exitCode }); };
+      catch (error: unknown) { resolveResult({ outcome: "unknown", stdout: "", stderr: "", exitCode: null, cause: `git could not be started: ${errorCause(error)}` }); return; }
+      let stdout = ""; let stderr = ""; let cause: string | undefined; let trigger: "cancelled" | "timeout" | "output" | undefined; let exitCode: number | null = null; let settled = false; let timer: NodeJS.Timeout | undefined;
+      const finish = (outcome: GitResult["outcome"]) => { if (settled) return; settled = true; if (timer !== undefined) clearTimeout(timer); signal?.removeEventListener("abort", abort); resolveResult({ outcome, stdout, stderr, exitCode, ...(cause === undefined ? {} : { cause }) }); };
       const kill = () => { try { child.kill("SIGTERM"); } catch { /* child already exited */ } };
       const abort = () => { trigger = "cancelled"; kill(); };
       const append = (target: "stdout" | "stderr", value: unknown) => { const next = target === "stdout" ? stdout + String(value) : stderr + String(value); if (Buffer.byteLength(next, "utf8") > (target === "stdout" ? WORKSPACE_PROVISION_LIMITS.stdoutBytes : WORKSPACE_PROVISION_LIMITS.stderrBytes)) { trigger = "output"; kill(); return; } if (target === "stdout") stdout = next; else stderr = next; };
       child.stdout?.on("data", (value: unknown) => append("stdout", value)); child.stderr?.on("data", (value: unknown) => append("stderr", value));
-      child.once("error", () => finish("unknown")); child.once("close", (code) => { exitCode = code; finish(trigger === "output" ? "git_failure" : trigger ?? (code === 0 ? "success" : "git_failure")); });
+      child.once("error", (error) => { cause = `git could not be started: ${errorCause(error)}`; finish("unknown"); }); child.once("close", (code) => { exitCode = code; finish(trigger === "output" ? "git_failure" : trigger ?? (code === 0 ? "success" : "git_failure")); });
       timer = setTimeout(() => { trigger = "timeout"; kill(); }, timeoutMs); timer.unref(); signal?.addEventListener("abort", abort, { once: true });
     });
   }
@@ -120,7 +124,7 @@ export class WorkspaceProvisioner {
   provision(request: WorkspaceProvisionRequest): Promise<WorkspaceProvisionResult> {
     const invalid = validateRequest(request); if (invalid !== undefined) return Promise.resolve(invalid);
     const repositoryRoot = resolve(request.repositoryRoot); const worktreePath = resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)); const key = `${repositoryRoot}\u0000${request.taskId}\u0000${request.attemptId}\u0000${request.assignedBranch}\u0000${request.expectedBaseRevision}`; const previous = this.#locks.get(worktreePath) ?? Promise.resolve<WorkspaceProvisionResult>(result("unknown", "unused"));
-    const current = previous.catch(() => result("unknown", "Previous workspace claim failed.", "unknown")).then(() => this.#provision(request, repositoryRoot, worktreePath, key));
+    const current = previous.catch((error: unknown) => result("unknown", because("Previous workspace claim failed.", errorCause(error)), "unknown")).then(() => this.#provision(request, repositoryRoot, worktreePath, key));
     this.#locks.set(worktreePath, current);
     void current.finally(() => { if (this.#locks.get(worktreePath) === current) this.#locks.delete(worktreePath); });
     return current;
@@ -131,21 +135,21 @@ export class WorkspaceProvisioner {
     const pathOwner = this.#pathBindings.get(worktreePath); if (pathOwner !== undefined && pathOwner !== key) return result("conflict", "The deterministic worktree path is owned by another Task or Attempt.", "conflict");
     let root: string;
     try { root = await realpath(repositoryRoot); const info = await stat(root); if (!info.isDirectory()) return result("invalid_repository", "Repository root is not a directory.", "not_a_repository"); }
-    catch { return result("invalid_repository", "Repository root does not exist or is not accessible.", "not_a_repository"); }
+    catch (error: unknown) { return result("invalid_repository", because("Repository root does not exist or is not accessible.", errorCause(error)), "not_a_repository"); }
     const timeoutMs = boundedTimeout(request.timeoutMs)!; const repositoryCheck = await this.#git.run(["rev-parse", "--show-toplevel"], root, timeoutMs, request.signal);
-    if (repositoryCheck.outcome === "cancelled") return result("cancelled", "Workspace provisioning was cancelled.", "cancelled"); if (repositoryCheck.outcome === "timeout") return result("timeout", "Repository validation timed out.", "timeout"); if (repositoryCheck.outcome !== "success" || resolve(repositoryCheck.stdout.trim()) !== root) return result("invalid_repository", "The path is not a valid Git repository root.", "not_a_repository");
+    if (repositoryCheck.outcome === "cancelled") return result("cancelled", "Workspace provisioning was cancelled.", "cancelled"); if (repositoryCheck.outcome === "timeout") return result("timeout", "Repository validation timed out.", "timeout"); if (repositoryCheck.outcome !== "success" || resolve(repositoryCheck.stdout.trim()) !== root) return result("invalid_repository", because("The path is not a valid Git repository root.", repositoryCheck.outcome === "success" ? `git reports top level ${repositoryCheck.stdout.trim()}` : gitCause(repositoryCheck)), "not_a_repository");
     const baseCheck = await this.#git.run(["rev-parse", "--verify", "--quiet", `${request.expectedBaseRevision}^{commit}`], root, timeoutMs, request.signal);
-    if (baseCheck.outcome === "cancelled") return result("cancelled", "Workspace provisioning was cancelled.", "cancelled"); if (baseCheck.outcome === "timeout") return result("timeout", "Base revision validation timed out.", "timeout"); if (baseCheck.outcome !== "success" || baseCheck.stdout.trim() === "") return result("invalid_revision", "Expected base revision was not found in the repository.", "invalid_revision");
+    if (baseCheck.outcome === "cancelled") return result("cancelled", "Workspace provisioning was cancelled.", "cancelled"); if (baseCheck.outcome === "timeout") return result("timeout", "Base revision validation timed out.", "timeout"); if (baseCheck.outcome !== "success" || baseCheck.stdout.trim() === "") return result("invalid_revision", because(`Expected base revision ${request.expectedBaseRevision} was not found in the repository.`, gitCause(baseCheck)), "invalid_revision");
     try { await stat(worktreePath); return result("conflict", "A worktree already exists at the deterministic destination without a matching in-memory claim.", "conflict"); }
-    catch (error: unknown) { if (!existingPathError(error)) return result("conflict", "The worktree destination cannot be inspected.", "conflict"); }
+    catch (error: unknown) { if (!existingPathError(error)) return result("conflict", because("The worktree destination cannot be inspected.", errorCause(error)), "conflict"); }
     const branchCheck = await this.#git.run(["show-ref", "--verify", "--quiet", `refs/heads/${request.assignedBranch}`], root, timeoutMs, request.signal);
-    if (branchCheck.outcome === "cancelled") return result("cancelled", "Workspace provisioning was cancelled.", "cancelled"); if (branchCheck.outcome === "timeout") return result("timeout", "Assigned branch validation timed out.", "timeout"); if (branchCheck.outcome === "success") return result("conflict", "Assigned branch already exists without a matching workspace claim.", "conflict"); if (branchCheck.outcome === "unknown") return result("unknown", "Assigned branch validation returned an unknown result.", "unknown");
+    if (branchCheck.outcome === "cancelled") return result("cancelled", "Workspace provisioning was cancelled.", "cancelled"); if (branchCheck.outcome === "timeout") return result("timeout", "Assigned branch validation timed out.", "timeout"); if (branchCheck.outcome === "success") return result("conflict", "Assigned branch already exists without a matching workspace claim.", "conflict"); if (branchCheck.outcome === "unknown") return result("unknown", because("Assigned branch validation returned an unknown result.", gitCause(branchCheck)), "unknown");
     const createdBranch = await this.#git.run(["branch", request.assignedBranch, request.expectedBaseRevision], root, timeoutMs, request.signal);
-    if (createdBranch.outcome !== "success") return result(createdBranch.outcome, "Assigned branch could not be created.", createdBranch.outcome === "git_failure" ? "git_failure" : createdBranch.outcome);
+    if (createdBranch.outcome !== "success") return result(createdBranch.outcome, because("Assigned branch could not be created.", gitCause(createdBranch)), createdBranch.outcome === "git_failure" ? "git_failure" : createdBranch.outcome);
     const worktree = await this.#git.run(["worktree", "add", worktreePath, request.assignedBranch], root, timeoutMs, request.signal);
-    if (worktree.outcome !== "success") return result(worktree.outcome, "Assigned worktree could not be created.", worktree.outcome === "git_failure" ? "git_failure" : worktree.outcome);
+    if (worktree.outcome !== "success") return result(worktree.outcome, because("Assigned worktree could not be created.", gitCause(worktree)), worktree.outcome === "git_failure" ? "git_failure" : worktree.outcome);
     const head = await this.#git.run(["-C", worktreePath, "rev-parse", "HEAD"], root, timeoutMs, request.signal); const branch = await this.#git.run(["-C", worktreePath, "symbolic-ref", "--short", "HEAD"], root, timeoutMs, request.signal);
-    if (head.outcome !== "success" || branch.outcome !== "success" || head.stdout.trim() !== baseCheck.stdout.trim() || branch.stdout.trim() !== request.assignedBranch) return result("unknown", "Created worktree identity could not be verified.", "unknown");
+    if (head.outcome !== "success" || branch.outcome !== "success" || head.stdout.trim() !== baseCheck.stdout.trim() || branch.stdout.trim() !== request.assignedBranch) return result("unknown", because("Created worktree identity could not be verified.", head.outcome !== "success" ? gitCause(head) : branch.outcome !== "success" ? gitCause(branch) : `HEAD ${head.stdout.trim()} on ${branch.stdout.trim()}, expected ${baseCheck.stdout.trim()} on ${request.assignedBranch}`), "unknown");
     const binding: WorkspaceBinding = Object.freeze({ schemaVersion: WORKSPACE_PROVISION_SCHEMA_VERSION, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: root, assignedBranch: request.assignedBranch, expectedBaseRevision: baseCheck.stdout.trim(), worktreePath });
     this.#bindings.set(key, binding); this.#pathBindings.set(worktreePath, key);
     return result("created", "Assigned branch and dedicated worktree were provisioned.", undefined, binding);

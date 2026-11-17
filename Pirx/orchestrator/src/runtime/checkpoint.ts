@@ -1,3 +1,4 @@
+import { errorCause } from "./error-cause.js";
 import type { AttemptId, TaskId, UtcTimestamp } from "./task-domain.js";
 import { validateWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
 
@@ -310,8 +311,8 @@ export function validateCheckpoint(value: unknown): CheckpointResult<Checkpoint>
   try {
     const serialized = JSON.stringify(checkpoint);
     if (new TextEncoder().encode(serialized).byteLength > CHECKPOINT_LIMITS.serializedBytes) return failure(violation("limit_exceeded", "checkpoint", `Serialized Checkpoint is limited to ${CHECKPOINT_LIMITS.serializedBytes} bytes.`));
-  } catch {
-    return failure(violation("serialization_error", "checkpoint", "Checkpoint must be JSON-serializable."));
+  } catch (error: unknown) {
+    return failure(violation("serialization_error", "checkpoint", `Checkpoint must be JSON-serializable: ${errorCause(error).split("\n")[0]}`.slice(0, 256)));
   }
   return ok(freezeCheckpoint(checkpoint));
 }
@@ -327,7 +328,7 @@ export function serializeCheckpoint(checkpoint: Checkpoint): string {
 export function deserializeCheckpoint(serialized: string): CheckpointResult<Checkpoint> {
   try {
     return validateCheckpoint(JSON.parse(serialized) as unknown);
-  } catch {
-    return failure(violation("serialization_error", "checkpoint", "Checkpoint is not valid JSON."));
+  } catch (error: unknown) {
+    return failure(violation("serialization_error", "checkpoint", `Checkpoint is not valid JSON: ${errorCause(error).split("\n")[0]}`.slice(0, 256)));
   }
 }

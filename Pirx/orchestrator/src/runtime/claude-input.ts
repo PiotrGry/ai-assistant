@@ -1,3 +1,4 @@
+import { errorCause } from "./error-cause.js";
 import {
   createWorkerRequest,
   type WorkerCapabilityGrant,
@@ -230,7 +231,7 @@ export function createClaudeCodeInput(input: ClaudeInputRequest): ClaudeInputRes
     }
     if (new TextEncoder().encode(JSON.stringify(output)).byteLength > CLAUDE_INPUT_LIMITS.serializedBytes) return fail(violation("limit_exceeded", "input", `Claude input exceeds ${CLAUDE_INPUT_LIMITS.serializedBytes} bytes.`));
     return { ok: true, value: output };
-  } catch { return fail(violation("serialization_error", "input", "Claude input could not be serialized.")); }
+  } catch (error: unknown) { return fail(violation("serialization_error", "input", `Claude input could not be serialized: ${errorCause(error).split("\n")[0]}`.slice(0, 256))); }
 }
 
 export function serializeClaudeCodeInput(input: ClaudeCodeInput): string { return JSON.stringify(input); }
@@ -243,5 +244,5 @@ export function validateClaudeCodeInput(value: unknown): ClaudeInputResult<Claud
     const serialized = JSON.stringify(value);
     if (new TextEncoder().encode(serialized).byteLength > CLAUDE_INPUT_LIMITS.serializedBytes) return fail(violation("limit_exceeded", "input", "Claude input envelope is oversized."));
     return { ok: true, value: value as unknown as ClaudeCodeInput };
-  } catch { return fail(violation("serialization_error", "input", "Claude input envelope is not JSON-safe.")); }
+  } catch (error: unknown) { return fail(violation("serialization_error", "input", `Claude input envelope is not JSON-safe: ${errorCause(error).split("\n")[0]}`.slice(0, 256))); }
 }
