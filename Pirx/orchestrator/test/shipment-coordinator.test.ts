@@ -352,6 +352,26 @@ test("a PR that is behind its base after green CI asks for a branch sync instead
   } finally { await dispose(value); }
 });
 
+test("a merge GitHub refuses because the PR fell behind waits for a branch sync instead of blocking", async () => {
+  const value = await fixture();
+  try {
+    const github = new LateBehindGithub();
+    const behind = await new ShipmentCycleCoordinator(value.store, github, new ScriptedCi()).run(request());
+    assert.equal(behind.outcome, "base_behind", JSON.stringify(behind));
+    assert.equal(github.mergeCalls, 1);
+    const stored = value.store.shipmentCycles.getByEvent("shipment-event-1");
+    assert.equal(stored.outcome === "success" ? stored.value.state : "missing", "ci_succeeded");
+  } finally { await dispose(value); }
+});
+
+/** GitHub has not recomputed mergeability yet: the PR reads clean, the merge is refused, and only then does it read behind. */
+class LateBehindGithub extends FakeGithub {
+  override async mergePullRequest(): Promise<GitHubOperationResult<GitHubPullRequestMergeResult>> {
+    this.mergeCalls += 1; this.pull = { ...this.pull!, mergeableState: "behind" };
+    return { outcome: "permanent_error", error: { code: "invalid_request", message: "GitHub rejected the request with HTTP 405." }, correlationId: "merge", remoteOutcome: "not_accepted" };
+  }
+}
+
 /** GitHub reports every PR as behind its base, as for a base branch that requires up-to-date PRs. */
 class BehindGithub extends FakeGithub {
   override async createPullRequest(input: { readonly headBranch: string; readonly baseBranch: string; readonly body: string }): Promise<GitHubOperationResult<GitHubPullRequest>> {
