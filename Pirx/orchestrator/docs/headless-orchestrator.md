@@ -128,6 +128,36 @@ The process writes one bounded JSON event per line. Exit codes are:
 `SIGTERM` and `SIGINT` both stop new cycles, interrupt/drain the active cycle
 through `ProductionRuntime`, and close storage after a successful drain.
 
+### Check the setup before the first run
+
+```sh
+PIRX_ORCHESTRATOR_CONFIG=/etc/pirx/orchestrator.json pnpm orchestrator:run --check
+```
+
+`--check` changes nothing and starts no worker. It prints one `preflight` line
+per check and exits `0` when all pass, `1` otherwise. The daemon itself starts
+without several of these and fails only when an Attempt reaches them, so run
+the check after every change to the profile or the machine:
+
+- the profile, the runtime database and the worktree directory;
+- for each repository: the checkout, the base revision and the git remote;
+- `git`, the `claude` executable and its minimum version;
+- on Linux, `bwrap` and `socat`, which the Claude worker sandbox requires;
+- the built worker advisor (`mcp-server/dist/advisor-cli.js`);
+- GitHub CLI authentication and one read of the Project Queue.
+
+### Reading the journal
+
+A daemon that cannot start writes one `startup_failed` line whose `reason`
+names the cause. A rejected profile names the field and the rule, for example
+`cycleIntervalMs must be a whole number from 30000 to 300000`.
+
+A `cycle` line carries a `context` object when the runtime knows more than the
+fixed reason text: the Issue (`owner/name#number`), the Attempt result and
+diagnostic code, what the worker process itself reported (`providerMessage`,
+`exitCode`), and for a cooldown `cooldownUntil`. The context is added to the
+journal line only; stored events are unchanged.
+
 ## External supervision
 
 For systemd use `Type=simple`, an unprivileged user, `Restart=on-failure`, an
