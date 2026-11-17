@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 
 import { ProductionClaudeWorker } from "./claude/production-worker.js";
 import { FeatureBranchSyncService } from "./runtime/feature-branch-sync.js";
-import { loadGitHubConfig, type GitHubConfig } from "./github/config.js";
+import { GitHubConfigurationError, loadGitHubConfig, type GitHubConfig } from "./github/config.js";
 import { GitHubActionsGateway } from "./github/ci-watch.js";
 import { GitHubCiGatewayAdapter } from "./github/ci-adapter.js";
 import { GitHubIssueReader } from "./github/issue-read.js";
@@ -11,6 +11,7 @@ import { GitHubProjectSynchronizer } from "./github/project-sync.js";
 import { GitHubPullRequestGateway } from "./github/pull-request.js";
 import { GitHubQueueSnapshotReader } from "./github/queue-snapshot.js";
 import { GitHubTransport } from "./github/transport.js";
+import { diagnosticContext } from "./runtime/diagnostic-context.js";
 import { HeadlessConfigurationError, loadHeadlessOrchestratorConfig } from "./runtime/headless-config.js";
 import { HeadlessDeliveryCoordinator } from "./runtime/headless-delivery.js";
 import { GitHubQueueReconciler, GitHubQueueSynchronizer } from "./runtime/github-queue-sync.js";
@@ -18,6 +19,8 @@ import { HeadlessOrchestratorService, type HeadlessControlPort, type HeadlessDel
 import { SqliteHeadlessControlPort } from "./runtime/orchestrator-control.js";
 import { LinuxSystemctlPowerOffAdapter, SqliteHeadlessHostShutdownPort } from "./runtime/host-shutdown.js";
 import { ExecutionObservabilityProjector } from "./runtime/execution-observability-persistence.js";
+import { withJournalContext } from "./runtime/journal-context.js";
+import { runPreflight, type PreflightOptions } from "./runtime/preflight.js";
 import { ProductionRuntime } from "./runtime/production-runtime.js";
 import { ReleaseMergeCoordinator } from "./runtime/release-merge.js";
 import { ShipmentCycleCoordinator } from "./runtime/shipment-coordinator.js";
@@ -37,11 +40,20 @@ function writeEvent(target: { write(value: string): unknown }, event: HeadlessSe
   target.write(`${JSON.stringify(event)}\n`);
 }
 
+/** Why the daemon did not start, for the journal: bounded, redacted, and never empty. */
+function startupFailureReason(error: unknown): string {
+  const typed = error instanceof HeadlessConfigurationError || error instanceof RuntimeStorageError || error instanceof GitHubConfigurationError;
+  const text = error instanceof Error ? (typed ? error.message : `${error.name}: ${error.message}`) : `A non-error value was thrown: ${String(error)}`;
+  return String(diagnosticContext(text.trim() === "" ? "The error carried no message." : text)).slice(0, 512);
+}
+
 export interface HeadlessCliOptions {
   readonly queue?: HeadlessQueueReconciliationPort;
   readonly delivery?: HeadlessDeliveryReconciliationPort;
   readonly control?: HeadlessControlPort;
   readonly githubConfigLoader?: (environment: NodeJS.ProcessEnv) => GitHubConfig;
+  /** Overrides for `--check`, for deterministic tests. */
+  readonly preflight?: Partial<PreflightOptions>;
 }
 
 export async function runHeadlessCli(host: HeadlessCliProcess = process, options: HeadlessCliOptions = {}): Promise<number> {
@@ -56,6 +68,34 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
       writeEvent(host.stdout, { schemaVersion: 1, event: "runtime_migrated", outcome: "success" });
       host.exitCode = 0;
       return 0;
+    }
+    if (host.argv.slice(2).includes("--check")) {
+      // Read-only: reports every missing piece at once, where a normal start would stop at the first.
+      const githubEnvironment = (repository: string): NodeJS.ProcessEnv => ({
+        ...host.env,
+        PIRX_GITHUB_OWNER: repository.split("/")[0], PIRX_GITHUB_REPOSITORY: repository.split("/")[1],
+        PIRX_GITHUB_PROJECT_OWNER: config.githubProjectOwner, PIRX_GITHUB_PROJECT_NUMBER: String(config.githubProjectNumber),
+        PIRX_GITHUB_API_URL: config.githubApiUrl, PIRX_GITHUB_TIMEOUT_MS: String(config.githubTimeoutMs),
+      });
+      const loadGitHub = (): GitHubConfig => (options.githubConfigLoader ?? loadGitHubConfig)(githubEnvironment(config.repositories[0]!.repository));
+      const findings = await runPreflight(config, {
+        environment: host.env,
+        openDatabase: () => { RuntimeSqliteStore.open({ filename: config.databasePath, environment: host.env, mode: "existing" }).close(); },
+        githubCredentials: () => { loadGitHub(); },
+        readQueue: async () => {
+          const githubConfig = loadGitHub();
+          const snapshot = await new GitHubQueueSnapshotReader(new GitHubTransport(githubConfig), githubConfig).read();
+          return snapshot.outcome === "success"
+            ? { ok: true, detail: `Project ${config.githubProjectOwner}/${config.githubProjectNumber} was read: ${snapshot.snapshot.items.length} item(s)` }
+            : { ok: false, detail: `Project ${config.githubProjectOwner}/${config.githubProjectNumber} could not be read (${snapshot.outcome}): ${snapshot.message}` };
+        },
+        ...options.preflight,
+      });
+      const problems = findings.filter((finding) => finding.outcome === "problem").length;
+      for (const finding of findings) writeEvent(finding.outcome === "problem" ? host.stderr : host.stdout, { schemaVersion: 1, event: "preflight", outcome: finding.outcome, check: finding.check, reason: finding.detail });
+      writeEvent(problems === 0 ? host.stdout : host.stderr, { schemaVersion: 1, event: "preflight_finished", outcome: problems === 0 ? "ok" : "problems", problems, checks: findings.length });
+      host.exitCode = problems === 0 ? 0 : 1;
+      return host.exitCode;
     }
     const store = RuntimeSqliteStore.open({ filename: config.databasePath, environment: host.env, mode: "existing" });
     const worker = new ProductionClaudeWorker({ store, repositories: config.repositories, environment: host.env, transcriptDirectory: join(dirname(config.databasePath), "worker-logs") });
@@ -112,7 +152,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
       queue, delivery, control,
       hostShutdown: new SqliteHeadlessHostShutdownPort(store, config.databasePath, config.hostPowerOff === undefined ? undefined : new LinuxSystemctlPowerOffAdapter({ timeoutMs: config.hostPowerOff.acceptanceTimeoutMs })),
       observability: new ExecutionObservabilityProjector(store),
-      emit: (event) => writeEvent(event.event === "cycle_error" || event.outcome.includes("failed") || event.outcome.includes("timeout") ? host.stderr : host.stdout, event),
+      emit: (event) => writeEvent(event.event === "cycle_error" || event.outcome.includes("failed") || event.outcome.includes("timeout") ? host.stderr : host.stdout, withJournalContext(store, event, { workerId: config.workerId, provider: config.provider })),
     });
     const stop = (signal: NodeJS.Signals): void => { void service.stop(signal); };
     host.once("SIGTERM", stop);
@@ -123,7 +163,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
   } catch (error: unknown) {
     try { runtime?.close(); } catch { /* preserve the original bounded failure */ }
     const code = error instanceof HeadlessConfigurationError || error instanceof RuntimeStorageError ? error.code : "startup_failure";
-    writeEvent(host.stderr, { schemaVersion: 1, event: "startup_failed", outcome: code, ...(error instanceof RuntimeStorageError ? { reason: error.message } : {}) });
+    writeEvent(host.stderr, { schemaVersion: 1, event: "startup_failed", outcome: code, reason: startupFailureReason(error) });
     host.exitCode = 1;
     return 1;
   }

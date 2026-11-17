@@ -227,6 +227,15 @@ async function responseTextWithinDeadline(response: Response, signal: AbortSigna
   } finally { if (abort !== undefined) signal.removeEventListener("abort", abort); }
 }
 
+/** The system error code behind a failed fetch, such as ENOTFOUND or ECONNREFUSED. A code only: never a URL, header or message. */
+function networkErrorCode(error: unknown): string {
+  for (const candidate of [error, (error as { cause?: unknown } | null)?.cause]) {
+    const code = (candidate as { code?: unknown } | null | undefined)?.code;
+    if (typeof code === "string" && /^[A-Z][A-Z0-9_]{1,39}$/u.test(code)) return ` (${code})`;
+  }
+  return "";
+}
+
 export class GitHubTransport {
   readonly #config: GitHubConfig;
   readonly #fetch: GitHubFetch;
@@ -347,7 +356,7 @@ export class GitHubTransport {
       if (timedOut || isAbortError(error)) {
         return failure(mutation ? "unknown" : "retryable_error", "timeout", "GitHub request timed out.", context.correlationId, mutation ? "unknown" : "not_accepted");
       }
-      return failure(mutation ? "unknown" : "retryable_error", "network", "GitHub network request failed.", context.correlationId, mutation ? "unknown" : "not_accepted");
+      return failure(mutation ? "unknown" : "retryable_error", "network", `GitHub network request failed${networkErrorCode(error)}.`, context.correlationId, mutation ? "unknown" : "not_accepted");
     } finally {
       clearTimeout(timeout);
       context.signal?.removeEventListener("abort", abort);
