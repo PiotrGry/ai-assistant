@@ -322,3 +322,27 @@ test("a recovery exception is recorded with its location before startup fails", 
   assert.match(String(details?.stack), /^at .*headless-service\.test/u);
   assert.equal(JSON.stringify(events).includes("payload must not escape"), false);
 });
+
+test("a projection or status write that throws is reported with its location, not its message", async () => {
+  const port = runtime();
+  const events: HeadlessServiceEvent[] = [];
+  let service: HeadlessOrchestratorService;
+  service = new HeadlessOrchestratorService(port, {
+    cycleIntervalMs: 100,
+    observability: { reconcile: () => { throw Object.assign(new Error("raw storage detail"), { code: "SQLITE_FULL" }); } },
+    control: { read: () => ({ outcome: "success", mode: "running" }), observe: () => { throw new TypeError("raw status detail"); }, paused: () => undefined },
+    emit: (event) => events.push(event),
+    sleep: async () => { await service.stop("fixture"); },
+  });
+  assert.equal((await service.run()).outcome, "stopped");
+  const projection = events.find((event) => event.event === "observability");
+  const details = projection?.details as { name?: string; errorCode?: string; stack?: string } | undefined;
+  assert.equal(details?.name, "Error");
+  assert.equal(details?.errorCode, "SQLITE_FULL");
+  assert.match(details?.stack ?? "", /^at /u);
+  const failed = events.find((event) => event.event === "observation_failed");
+  assert.equal((failed?.details as { name?: string } | undefined)?.name, "TypeError");
+  assert.match((failed?.details as { stack?: string } | undefined)?.stack ?? "", /^at /u);
+  assert.equal(JSON.stringify(events).includes("raw storage detail"), false);
+  assert.equal(JSON.stringify(events).includes("raw status detail"), false);
+});

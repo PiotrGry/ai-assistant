@@ -288,3 +288,13 @@ test("pre-migration backup rejects a corrupt source without replacing it", async
     assert.equal(await readFile(fixture.filename, "utf8"), "invalid SQLite");
   } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });
+
+test("a nested transaction that throws keeps its cause", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-nested-cause-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  try {
+    const result = store.transaction(() => store.transaction(() => { throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" }); }));
+    assert.equal(result.outcome, "storage_error");
+    assert.match(result.outcome === "storage_error" ? result.message : "", /disk I\/O error/u);
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});

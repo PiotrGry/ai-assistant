@@ -1,3 +1,4 @@
+import { errorCause } from "./error-cause.js";
 import { validateWorkerFailureDiagnostic, type WorkerFailureDiagnostic } from "./worker-diagnostic.js";
 
 export const TASK_DOMAIN_SCHEMA_VERSION = 1 as const;
@@ -269,7 +270,7 @@ function validateGitHubReference(value: unknown): DomainResult<GitHubTaskReferen
     try {
       const parsed = new URL(url.value);
       if (parsed.protocol !== "https:" || parsed.hostname !== "github.com" || parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "" || parsed.pathname !== `/${owner}/${repository}/issues/${String(value.issueNumber)}`) return error("invalid_input", "githubReference.url must be the canonical HTTPS GitHub Issue URL.", "githubReference.url");
-    } catch {
+    } catch { // an unparsable URL is invalid input; the message names the field
       return error("invalid_input", "githubReference.url must be a valid canonical URL.", "githubReference.url");
     }
   }
@@ -550,9 +551,9 @@ export function serializeAttempt(attempt: AttemptSnapshot): string {
 }
 export function deserializeTask(serialized: string): DomainResult<TaskSnapshot> {
   try { return validateTaskSnapshot(JSON.parse(serialized) as unknown); }
-  catch { return error("serialization_error", "Task snapshot is not valid JSON."); }
+  catch (thrown: unknown) { return error("serialization_error", `Task snapshot is not valid JSON: ${errorCause(thrown).split("\n")[0]}`.slice(0, 256)); }
 }
 export function deserializeAttempt(serialized: string): DomainResult<AttemptSnapshot> {
   try { return validateAttemptSnapshot(JSON.parse(serialized) as unknown); }
-  catch { return error("serialization_error", "Attempt snapshot is not valid JSON."); }
+  catch (thrown: unknown) { return error("serialization_error", `Attempt snapshot is not valid JSON: ${errorCause(thrown).split("\n")[0]}`.slice(0, 256)); }
 }

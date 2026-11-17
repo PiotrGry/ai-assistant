@@ -1,3 +1,4 @@
+import { errorCause } from "./error-cause.js";
 import type { HeadlessControlPort, HeadlessServiceEvent } from "./headless-service.js";
 import type { RuntimeSqliteStore, StorageResult } from "./sqlite.js";
 import type { UtcTimestamp } from "./task-domain.js";
@@ -144,7 +145,7 @@ export class OrchestratorControlRepository {
       try {
         const row = this.#store.database.prepare("SELECT * FROM runtime_orchestrator_control WHERE singleton = 1").get() as Record<string, unknown> | undefined;
         return row === undefined ? { outcome: "not_found", message: "Orchestrator control state has not been initialized." } : parseRecord(row);
-      } catch { return { outcome: "storage_error", message: "Orchestrator control state could not be read." }; }
+      } catch (error: unknown) { return { outcome: "storage_error", message: `Orchestrator control state could not be read: ${errorCause(error).split("\n")[0]}` }; }
     });
   }
 
@@ -168,7 +169,7 @@ export class OrchestratorControlRepository {
         this.#store.database.prepare("INSERT INTO runtime_orchestrator_control_commands (operation_id, action, reason, requested_by, requested_at, resulting_version) VALUES (?, ?, ?, ?, ?, ?)").run(input.operationId, input.action, input.reason, input.requestedBy, input.requestedAt, version);
         const saved = this.get();
         return { outcome: "success", value: saved.outcome === "success" ? { outcome: "applied", record: saved.value, operationId: input.operationId, message: "Durable orchestrator control request applied." } : { outcome: "storage_error", operationId: input.operationId, message: saved.message } };
-      } catch { return { outcome: "storage_error", message: "Orchestrator control request could not be stored." }; }
+      } catch (error: unknown) { return { outcome: "storage_error", message: `Orchestrator control request could not be stored: ${errorCause(error).split("\n")[0]}` }; }
     });
     return transaction.outcome === "success" ? transaction.value : { outcome: "storage_error", operationId: input.operationId, message: transaction.message };
   }
@@ -183,7 +184,7 @@ export class OrchestratorControlRepository {
         else return current;
         if (diagnostic !== undefined) this.#store.database.prepare("UPDATE runtime_orchestrator_control SET diagnostic_sequence = COALESCE(?, diagnostic_sequence), diagnostic_incomplete = ? WHERE singleton = 1").run(diagnostic.sequence ?? null, diagnostic.sequence === undefined ? 1 : 0);
         return this.get();
-      } catch { return { outcome: "storage_error", message: "Orchestrator heartbeat could not be stored." }; }
+      } catch (error: unknown) { return { outcome: "storage_error", message: `Orchestrator heartbeat could not be stored: ${errorCause(error).split("\n")[0]}` }; }
     });
   }
 
@@ -258,7 +259,7 @@ export class OrchestratorControlRepository {
         };
         const attentionRequired = attentionTask === undefined ? deliveryAttention : { task: attentionTask, ...(attempt === undefined ? {} : { attempt }), reason: String(diagnosticContext(attention?.blocking_reason ?? "Task requires reconciliation.")), nextAction: "inspect_blocker" as const };
         return { outcome: "success", value: Object.freeze({ ...snapshot, worker, ...(delivery === undefined ? {} : { delivery }), diagnostics, ...(attentionRequired === undefined ? {} : { attentionRequired }) }) };
-      } catch { return { outcome: "storage_error", message: "Orchestrator status snapshot could not be read." }; }
+      } catch (error: unknown) { return { outcome: "storage_error", message: `Orchestrator status snapshot could not be read: ${errorCause(error).split("\n")[0]}` }; }
     });
   }
 }

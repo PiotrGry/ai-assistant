@@ -1,3 +1,4 @@
+import { errorCause } from "./error-cause.js";
 import { backup, DatabaseSync } from "node:sqlite";
 import { isOperatorUnblockCheckpoint, isOperatorRetryableBlock } from "./resume-escalation.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -303,8 +304,8 @@ function conflict<T>(message: string): StorageResult<T> {
 function invalidRecord<T>(): StorageResult<T> {
   return { outcome: "invalid_record", message: "Stored runtime record failed domain validation." };
 }
-function storageFailure<T>(): StorageResult<T> {
-  return { outcome: "storage_error", message: "SQLite runtime storage operation failed." };
+function storageFailure<T>(cause?: string): StorageResult<T> {
+  return { outcome: "storage_error", message: cause === undefined ? "SQLite runtime storage operation failed." : `SQLite runtime storage operation failed: ${cause}` };
 }
 function validCanonicalIdentity(value: CanonicalIssueIdentity): boolean {
   if (typeof value.owner !== "string" || typeof value.repository !== "string" || typeof value.nodeId !== "string" || typeof value.url !== "string" || value.owner.trim().length === 0 || value.repository.trim().length === 0 || value.nodeId.trim().length === 0 || !Number.isSafeInteger(value.issueNumber) || value.issueNumber <= 0) return false;
@@ -3276,7 +3277,7 @@ export class RuntimeSqliteStore {
   public transaction<T>(operation: (transaction: RuntimeTransaction) => StorageResult<T>): StorageResult<T> {
     if (this.#inTransaction) {
       try { return operation({ tasks: this.tasks, attempts: this.attempts, checkpoints: this.checkpoints, leases: this.leases, selection: this.selection, releases: this.releases, releaseCorrelations: this.releaseCorrelations, projections: this.projections, webhooks: this.webhooks, workspaces: this.workspaces, pullRequests: this.pullRequests, ciCorrelations: this.ciCorrelations, ciEvidence: this.ciEvidence, featureMerges: this.featureMerges, shipmentCycles: this.shipmentCycles, retryDecisions: this.retryDecisions, workerAvailability: this.workerAvailability, operatorDecisions: this.operatorDecisions, workIntakes: this.workIntakes }); }
-      catch { return storageFailure(); }
+      catch (error: unknown) { return storageFailure(errorCause(error).split("\n")[0]); }
     }
     try {
       this.assertOpen();
