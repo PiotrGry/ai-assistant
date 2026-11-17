@@ -8,7 +8,7 @@ import { dirname, isAbsolute, join } from "node:path";
 
 import { CLAUDE_CODE_WORKER_PROFILE_LIMITS, type ClaudeCodeWorkerProfile } from "./worker-profile.js";
 import { createWorkerFailureDiagnostic, type WorkerFailureCode } from "../runtime/worker-diagnostic.js";
-import { extractProviderRecoveryMetadata } from "../runtime/worker-recovery.js";
+import { extractProviderRecoveryMetadata, hasRejectedRateLimit, resetAtFromLimitText } from "../runtime/worker-recovery.js";
 import type { WorkerProviderRecoveryMetadata } from "../runtime/worker-availability.js";
 import { errorCause } from "../runtime/error-cause.js";
 
@@ -236,23 +236,36 @@ function buildEnvironment(source: NodeJS.ProcessEnv, additional: Readonly<Record
   }
   return environment;
 }
-function explicitFailureCode(parsed: unknown, stderr: string): "authentication_required" | "quota_exhausted" | undefined {
-  if (isRecord(parsed) && typeof parsed.error_code === "string" && EXPLICIT_FAILURE_CODES.has(parsed.error_code)) {
-    return parsed.error_code as "authentication_required" | "quota_exhausted";
-  }
-  const marker = stderr.match(/\b(CLAUDE_AUTH_REQUIRED|CLAUDE_QUOTA_EXHAUSTED)\b/u)?.[1];
-  if (marker === "CLAUDE_AUTH_REQUIRED") return "authentication_required";
-  if (marker === "CLAUDE_QUOTA_EXHAUSTED") return "quota_exhausted";
-  const providerText = [stderr, ...(isRecord(parsed) ? [parsed.message, parsed.error, parsed.result].filter((value): value is string => typeof value === "string") : [])].join("\n");
-  if (/\b(?:not authenticated|authentication required|login required|unauthorized)\b|\b401\b/iu.test(providerText)) return "authentication_required";
-  if (/\b(?:hit your session limit|quota exhausted|usage limit|rate limit|limit exceeded)\b|\b429\b/iu.test(providerText)) return "quota_exhausted";
-  return undefined;
+/** Limit evidence a stream-json run emits before, or instead of, its result event. */
+interface StreamLimitEvidence {
+  /** Last event carrying a rejected rate_limit_info. */
+  readonly rejectedLimit?: Record<string, unknown>;
+  /** Provider words of the last assistant API error, bounded. */
+  readonly apiError?: string;
 }
-function explicitFailure(parsed: unknown, stderr: string): { readonly outcome: "authentication_required" | "quota_exhausted"; readonly providerRecovery?: WorkerProviderRecoveryMetadata } | undefined {
-  const outcome = explicitFailureCode(parsed, stderr);
-  if (outcome === undefined) return undefined;
-  const providerRecovery = outcome === "quota_exhausted" ? extractProviderRecoveryMetadata(parsed) : undefined;
-  return { outcome, ...(providerRecovery === undefined ? {} : { providerRecovery }) };
+const USAGE_LIMIT_TEXT = /\b(?:hit your [\w-]+ limit|usage limit|usage_limit_reached|quota exhausted)\b/iu;
+const TRANSIENT_RATE_LIMIT_TEXT = /\b(?:rate[ _]limit|limit exceeded)\b|\b429\b/iu;
+// ponytail: fixed one-minute wait for a 429 that names no usage limit; read retry-after once Claude Code exposes it.
+const TRANSIENT_RATE_LIMIT_RETRY: WorkerProviderRecoveryMetadata = Object.freeze({ source: "provider_retry_after", retryAfterMs: 60_000 });
+const MAXIMUM_API_ERROR_CHARACTERS = 1_024;
+
+function assistantApiError(event: Record<string, unknown>): string | undefined {
+  if (event.type !== "assistant" || (event.isApiErrorMessage !== true && typeof event.error !== "string")) return undefined;
+  const content = isRecord(event.message) && Array.isArray(event.message.content) ? event.message.content : [];
+  const text = content.map((part) => isRecord(part) && typeof part.text === "string" ? part.text : undefined);
+  return [event.apiError, event.error, ...text].filter((value): value is string => typeof value === "string" && value !== "").join(" ").slice(0, MAXIMUM_API_ERROR_CHARACTERS);
+}
+function explicitFailure(parsed: unknown, stderr: string, stream: StreamLimitEvidence = {}): { readonly outcome: "authentication_required" | "quota_exhausted"; readonly providerRecovery?: WorkerProviderRecoveryMetadata } | undefined {
+  const declared = isRecord(parsed) && typeof parsed.error_code === "string" && EXPLICIT_FAILURE_CODES.has(parsed.error_code) ? parsed.error_code : stderr.match(/\b(CLAUDE_AUTH_REQUIRED|CLAUDE_QUOTA_EXHAUSTED)\b/u)?.[1];
+  const providerText = [stderr, stream.apiError, ...(isRecord(parsed) ? [parsed.message, parsed.error, parsed.result].filter((value): value is string => typeof value === "string") : [])].filter((value): value is string => value !== undefined).join("\n");
+  if (declared === "authentication_required" || declared === "CLAUDE_AUTH_REQUIRED") return { outcome: "authentication_required" };
+  if (declared === undefined && /\b(?:not authenticated|authentication required|login required|unauthorized)\b|\b401\b/iu.test(providerText)) return { outcome: "authentication_required" };
+  const usageLimit = declared !== undefined || stream.rejectedLimit !== undefined || USAGE_LIMIT_TEXT.test(providerText);
+  if (!usageLimit && !TRANSIENT_RATE_LIMIT_TEXT.test(providerText)) return undefined;
+  // A usage limit waits for its reset; a bare 429 is a short rate limit and only waits a minute.
+  const providerRecovery = extractProviderRecoveryMetadata(stream.rejectedLimit) ?? extractProviderRecoveryMetadata(parsed)
+    ?? (usageLimit ? resetAtFromLimitText(providerText, Date.now()) : TRANSIENT_RATE_LIMIT_RETRY);
+  return { outcome: "quota_exhausted", ...(providerRecovery === undefined ? {} : { providerRecovery }) };
 }
 function diagnosticCode(outcome: Exclude<ClaudeRoundTripOutcome, "success">): WorkerFailureCode {
   if (outcome === "claude_not_installed") return "spawn_failure";
@@ -490,12 +503,19 @@ export class ClaudeCodeCliRunner {
     let streamLine = Buffer.alloc(0);
     let streamLineOverflow = false;
     let streamResult: string | undefined;
+    let streamLimit: StreamLimitEvidence = {};
     const appendStream = (chunk: Buffer): void => {
       let rest = chunk;
       for (let newline = rest.indexOf(10); newline !== -1; newline = rest.indexOf(10)) {
         const line = streamLineOverflow ? undefined : Buffer.concat([streamLine, rest.subarray(0, newline)]).toString("utf8");
-        if (line !== undefined && line.includes('"result"')) {
-          try { if ((JSON.parse(line) as { type?: unknown }).type === "result") streamResult = line; } catch { /* not a complete event */ }
+        if (line !== undefined && (line.includes('"result"') || line.includes('"rate_limit_info"') || line.includes('"isApiErrorMessage"'))) {
+          try {
+            const event: unknown = JSON.parse(line);
+            if (isRecord(event) && event.type === "result") streamResult = line;
+            if (hasRejectedRateLimit(event)) streamLimit = { ...streamLimit, rejectedLimit: event as Record<string, unknown> };
+            const apiError = isRecord(event) ? assistantApiError(event) : undefined;
+            if (apiError !== undefined) streamLimit = { ...streamLimit, apiError };
+          } catch { /* not a complete event */ }
         }
         streamLine = Buffer.alloc(0);
         streamLineOverflow = false;
@@ -572,7 +592,7 @@ export class ClaudeCodeCliRunner {
     const failed = (...args: Parameters<typeof failure>): ClaudeRoundTripFailure => {
       const result = failure(...args);
       const envelope = isRecord(parsed) ? parsed : {};
-      const evidence = [envelope.subtype, envelope.errors, envelope.error, envelope.message, envelope.is_error === true ? envelope.result : undefined, transcriptError === undefined ? undefined : `Worker transcript write failed (${transcriptError}).`, stderr].filter((value) => value !== undefined && value !== "").map((value) => typeof value === "string" ? value : JSON.stringify(diagnosticContext(value))).join("\n");
+      const evidence = [envelope.subtype, envelope.errors, envelope.error, envelope.message, envelope.is_error === true ? envelope.result : undefined, streamLimit.apiError, transcriptError === undefined ? undefined : `Worker transcript write failed (${transcriptError}).`, stderr].filter((value) => value !== undefined && value !== "").map((value) => typeof value === "string" ? value : JSON.stringify(diagnosticContext(value))).join("\n");
       return { ...result, diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, { ...result.diagnostic, stage: "process", ...([result.diagnostic.providerMessage, evidence].some(Boolean) ? { providerMessage: [result.diagnostic.providerMessage, evidence].filter(Boolean).join("\n") } : {}), ...(outputLimitExceeded ? { providerMessageTruncated: true } : {}) }) };
     };
     if (trigger === "attempt_time_limit") {
@@ -584,7 +604,11 @@ export class ClaudeCodeCliRunner {
     if (spawnError !== undefined) return failure(spawnError.code === "ENOENT" ? "claude_not_installed" : "process_error", input.requestId, input.startedAt, exitCode, undefined, undefined, `Claude Code ${this.executable} could not be started: ${errorCause(spawnError)}`);
     if (exitCode === null) return failed("unknown", input.requestId, input.startedAt, exitCode);
     try { parsed = JSON.parse(stdout); }
-    catch (error: unknown) { return failed(explicitFailureCode(undefined, stderr) ?? (exitCode !== 0 ? "process_error" : "invalid_output"), input.requestId, input.startedAt, exitCode, exitCode !== 0 ? undefined : "malformed_cli_envelope", undefined, exitCode !== 0 ? undefined : `Claude stdout (${stdout.length} characters) is not one JSON result: ${errorCause(error).split("\n")[0]}`); }
+    catch (error: unknown) {
+      const explicit = explicitFailure(undefined, stderr, streamLimit);
+      if (explicit !== undefined) return failed(explicit.outcome, input.requestId, input.startedAt, exitCode, diagnosticCode(explicit.outcome), explicit.providerRecovery);
+      return failed(exitCode !== 0 ? "process_error" : "invalid_output", input.requestId, input.startedAt, exitCode, exitCode !== 0 ? undefined : "malformed_cli_envelope", undefined, exitCode !== 0 ? undefined : `Claude stdout (${stdout.length} characters) is not one JSON result: ${errorCause(error).split("\n")[0]}`);
+    }
     // Documented result subtype of the Claude Agent SDK; no real capture exists yet, so the
     // diagnostic keeps the provider's own subtype and turn count either way.
     if (isRecord(parsed) && parsed.type === "result" && parsed.subtype === "error_max_turns") {
@@ -592,7 +616,7 @@ export class ClaudeCodeCliRunner {
       const limit = `Claude stopped at num_turns=${typeof parsed.num_turns === "number" ? parsed.num_turns : "unknown"} (maxTurns=${input.maxTurns ?? "unset"}, subtype ${parsed.subtype}).`;
       return { ...result, diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, { ...result.diagnostic, providerMessage: [limit, result.diagnostic.providerMessage].filter(Boolean).join("\n") }) };
     }
-    const explicit = explicitFailure(parsed, stderr);
+    const explicit = explicitFailure(parsed, stderr, streamLimit);
     if (explicit !== undefined) return failed(explicit.outcome, input.requestId, input.startedAt, exitCode, diagnosticCode(explicit.outcome), explicit.providerRecovery);
     if (exitCode !== 0) return failed("process_error", input.requestId, input.startedAt, exitCode);
     if (!isRecord(parsed) || parsed.type !== "result" || parsed.subtype !== "success" || parsed.is_error !== false) return failed("invalid_output", input.requestId, input.startedAt, exitCode, "malformed_cli_envelope");

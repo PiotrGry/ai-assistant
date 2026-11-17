@@ -751,6 +751,7 @@ export {
   WORKER_RECOVERY_POLICY_LIMITS,
   extractProviderRecoveryMetadata,
   quotaCooldownFromDiagnostic,
+  resetAtFromLimitText,
   type WorkerQuotaRecoveryInput,
   type WorkerRecoveryPolicy,
 } from "./runtime/worker-recovery.js";

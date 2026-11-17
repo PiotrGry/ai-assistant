@@ -66,6 +66,15 @@ if (mode === "stream-active") {
 if (mode === "stream-error") { process.stdout.write(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: "Tool loop aborted: worktree index.lock exists" }) + "\\n"); process.exit(1); }
 if (mode === "stream-forever") { let step = 0; setInterval(() => { step += 1; process.stdout.write(JSON.stringify({ type: "assistant", step }) + "\\n"); }, 30); }
 if (mode === "stream-max-turns") { process.stdout.write(JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, num_turns: 201 }) + "\\n"); process.exit(1); }
+if (mode === "stream-usage-limit") {
+  // Shape of a rejected limit: the stream rate_limit_event and the synthetic assistant error a real sdk-cli run records.
+  const info = { status: "rejected", resetsAt: 1794323400, rateLimitType: "five_hour", overageStatus: "rejected", overageDisabledReason: "org_level_disabled", isUsingOverage: false };
+  process.stdout.write(JSON.stringify({ type: "rate_limit_event", rate_limit_info: info }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "assistant", message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text: "You've hit your 5-hour limit · resets 4:10pm (Europe/Warsaw)" }] }, error: "rate_limit", isApiErrorMessage: true }) + "\\n");
+  process.exit(1);
+}
+if (mode === "stream-usage-limit-text") { process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "You've hit your 5-hour limit · resets 4:10pm (Europe/Warsaw)" }) + "\\n"); process.exit(1); }
+if (mode === "stream-rate-limit") { process.stdout.write(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: "API Error: 429 rate limit, please retry" }) + "\\n"); process.exit(1); }
 if (mode === "stream-silent") { process.stdout.write(JSON.stringify({ type: "system", subtype: "init" }) + "\\n"); setInterval(() => {}, 1000); }
 if (mode === "delay") setTimeout(() => emit(envelope({ requestId, acknowledgement: "hello world acknowledged" })), 1000);
 `;
@@ -216,7 +225,7 @@ test("normalizes authentication, quota, process, and missing executable failures
   }
 });
 
-test("preserves trustworthy structured quota recovery metadata without parsing prose", async () => {
+test("preserves trustworthy structured quota recovery metadata", async () => {
   const value = await fixture();
   try {
     const result = await runner(value, "quota-structured").run();
@@ -224,7 +233,9 @@ test("preserves trustworthy structured quota recovery metadata without parsing p
     if (result.outcome === "quota_exhausted") assert.deepEqual(result.diagnostic.providerRecovery, { source: "provider_retry_after", retryAfterMs: 120_000, quotaBucket: "five-hour", providerStatusCode: "quota_exhausted" });
     const prose = await runner(value, "quota-prose").run();
     assert.equal(prose.outcome, "quota_exhausted");
-    if (prose.outcome === "quota_exhausted") assert.equal(prose.diagnostic.providerRecovery, undefined);
+    // Real limit text is read; the reset is never placed more than 5 hours ahead.
+    const proseReset = prose.diagnostic.providerRecovery?.resetAt;
+    if (proseReset !== undefined) assert.ok(Date.parse(proseReset) - Date.now() <= 5 * 60 * 60 * 1_000 + 60_000);
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
 
@@ -467,5 +478,26 @@ test("runner failures before Claude starts name their concrete cause", async () 
       .runStructured({ requestId: "missing-binary", cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root), timeoutMs: 1_000 });
     assert.equal(binary.outcome, "claude_not_installed");
     assert.match(providerMessageOf(binary), /ENOENT/u);
+  } finally { await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("a code worker that hits the 5-hour limit reports the provider reset time", async () => {
+  const value = await fixture();
+  try {
+    const instance = (mode: string) => new ClaudeCodeCliRunner({ executable: value.executable, environment: { PATH: process.env.PATH, HOME: process.env.HOME }, additionalEnvironment: { PIRX_FAKE_MODE: mode }, versionProbe: async () => `${MINIMUM_CLAUDE_CODE_WORKER_VERSION} (Claude Code)` });
+    const run = (mode: string) => instance(mode).runStructured({ requestId: mode, cwd: value.root, prompt: "bounded", responseSchema: {}, workerProfile: workerProfile(value.root), timeoutMs: 1_000, maxStdoutBytes: 4_096 });
+    const limited = await run("stream-usage-limit");
+    assert.equal(limited.outcome, "quota_exhausted");
+    assert.deepEqual(limited.diagnostic.providerRecovery, { source: "provider_reset", resetAt: "2026-11-10T15:10:00.000Z", quotaBucket: "five_hour" });
+    assert.match(limited.diagnostic.providerMessage ?? "", /hit your 5-hour limit/u, "the operator sees the provider's own words");
+
+    const text = await run("stream-usage-limit-text");
+    assert.equal(text.outcome, "quota_exhausted");
+    const textReset = text.diagnostic.providerRecovery?.resetAt;
+    if (textReset !== undefined) assert.ok(Date.parse(textReset) - Date.now() <= 5 * 60 * 60 * 1_000 + 60_000);
+
+    const transient = await run("stream-rate-limit");
+    assert.equal(transient.outcome, "quota_exhausted");
+    assert.deepEqual(transient.diagnostic.providerRecovery, { source: "provider_retry_after", retryAfterMs: 60_000 }, "a plain 429 waits one minute, not hours");
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });
