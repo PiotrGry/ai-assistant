@@ -173,6 +173,19 @@ test("a merge refused because the PR fell behind its base is base_behind, not a 
     const output = await new FeatureMergeCoordinator(value.store, value.github, value.ci).merge(request());
     assert.equal(output.outcome, "base_behind", JSON.stringify(output));
     assert.equal(value.github.mergeCalls, 1);
+    // gh-505: the refused claim stayed pending and blocked the synced successor with
+    // "Feature merge ledger already owns this pull request."
+    assert.equal(value.store.featureMerges.getByTaskAttempt(taskId, attemptId).outcome, "not_found");
+  } finally { await close(value); }
+});
+
+test("an uncertain merge keeps its ledger claim", async () => {
+  const value = await fixture();
+  try {
+    value.github.mergeResult = failure("unknown", "unknown", "uncertain", "merge", "unknown");
+    await new FeatureMergeCoordinator(value.store, value.github, value.ci).merge(request());
+    const claim = value.store.featureMerges.getByTaskAttempt(taskId, attemptId);
+    assert.equal(claim.outcome === "success" ? claim.value.state : claim.outcome, "pending");
   } finally { await close(value); }
 });
 

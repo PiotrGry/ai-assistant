@@ -2916,6 +2916,15 @@ export class FeatureMergeRepository {
       } catch (error: unknown) { return classifyStorageError(error); }
     });
   }
+  /** A merge GitHub refused never happened, so its claim must not hold the pull request against a successor Attempt. */
+  public discardRefused(taskId: string, attemptId: string): StorageResult<void> {
+    return this.#store.execute(() => {
+      try {
+        const removed = this.#store.database.prepare("DELETE FROM runtime_feature_merges WHERE task_id = ? AND attempt_id = ? AND state = 'pending'").run(taskId, attemptId);
+        return removed.changes === 1 ? { outcome: "success" as const, value: undefined } : conflict("Only a pending feature merge can be discarded.");
+      } catch (error: unknown) { return classifyStorageError(error); }
+    });
+  }
   public markMerged(taskId: string, attemptId: string, mergeSha: string, updatedAt: UtcTimestamp): StorageResult<FeatureMergeRecord> {
     if (mergeSha.trim().length === 0 || !utcTimestamp(updatedAt).ok) return invalidRecord();
     return this.#store.execute(() => {

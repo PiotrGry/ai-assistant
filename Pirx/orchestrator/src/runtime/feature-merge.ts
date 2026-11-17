@@ -154,6 +154,10 @@ export class FeatureMergeCoordinator {
         const reconciledSha = mergedSha(reconciled.value);
         return saved.outcome === "success" ? output(request, "replayed", "Uncertain merge was reconciled to the exact merged PR.", { repository, pullRequest: reconciled.value, checked, ...(reconciledSha === undefined ? {} : { mergeSha: reconciledSha }) }) : remoteStorage(request, saved, repository);
       }
+      if (merged.remoteOutcome === "not_accepted") {
+        const discarded = this.#store.featureMerges.discardRefused(request.taskId, request.attemptId);
+        if (discarded.outcome !== "success") return remoteStorage(request, discarded, repository);
+      }
       // GitHub may still read a just-pushed PR as mergeable; a base that requires up-to-date PRs then refuses the merge.
       if (reconciled.outcome === "success" && reconciled.value.state === "open" && !reconciled.value.merged && reconciled.value.mergeableState === "behind") return output(request, "base_behind", `GitHub refused the merge because PR #${reconciled.value.number} is behind ${request.policy.baseBranch}: ${merged.error.message}`, { repository, pullRequest: reconciled.value, checked });
       return remoteOutcome(request, merged, repository);
