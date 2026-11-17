@@ -260,3 +260,22 @@ test("Actions gateway uses the centralized read transport and sanitizes response
   assert.deepEqual((jobsResult as { value: { failedJobs: readonly unknown[] } }).value.failedJobs, [{ id: 77, name: "unit", url: "https://github.com/PiotrGry/ai-assistant/actions/runs/901/job/77", failedSteps: [{ name: "Run tests", number: 1 }] }]);
   assert.equal(calls.length, 2);
 });
+
+test("a pull-request watch finds the run of a merged pull request by its head", async () => {
+  // GitHub empties pull_requests on a run once its pull request is merged (seen on run 43310208392 for PR #473).
+  const queries: Array<Readonly<Record<string, string | number | boolean | undefined>> | undefined> = [];
+  const runOn = (id: number, pullRequests: readonly { number: number }[]) => ({ id, name: "Develop — Fast Gate", workflow_id: 7, status: "completed", conclusion: "success", head_sha: "sha-merged", head_branch: "pirx/task-gh-462", html_url: `https://github.com/PiotrGry/ai-assistant/actions/runs/${id}`, pull_requests: pullRequests });
+  const transport = {
+    async restRead<T>(request: { path: string; query?: Readonly<Record<string, string | number | boolean | undefined>> }, context: GitHubRequestContext) {
+      queries.push(request.query);
+      const all = [runOn(902, []), runOn(903, [{ number: 999 }])];
+      const matching = request.query?.head_sha === undefined ? all : all.filter((run) => run.head_sha === request.query?.head_sha);
+      return success({ workflow_runs: matching }, context.correlationId) as GitHubOperationResult<T>;
+    },
+  };
+  const gateway = new GitHubActionsGateway(transport, config, { retryPolicy: { maxAttempts: 1 } });
+  const result = await new GitHubActionsWatcher(gateway, config, { clock: new FakeClock() }).watch({ pullRequestNumber: 473, expectedHeadSha: "sha-merged", requiredWorkflowName: "Develop — Fast Gate", timeoutMs: 10 });
+  assert.equal(result.outcome, "success");
+  assert.equal((result as { workflowRunId?: number }).workflowRunId, 902, "the run that names another pull request is not taken");
+  assert.equal(queries[0]?.head_sha, "sha-merged", "runs are looked up by head, not only the newest page");
+});
