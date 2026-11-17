@@ -1,3 +1,4 @@
+import { errorCause } from "./error-cause.js";
 import {
   CapabilityEnforcementGate,
   type CapabilityGateDecision,
@@ -81,15 +82,14 @@ export class CapabilityAwareWorkerExecutionPort {
       signal,
     }, () => undefined);
     if (gateResult.outcome === "cancelled") return { outcome: "cancelled", decision: gateResult.decision, diagnostic: createWorkerFailureDiagnostic("cancellation") };
-    if (gateResult.outcome === "failed") return { outcome: "denied", decision: gateResult.decision, diagnostic: createWorkerFailureDiagnostic("capability_denied") };
-    if (gateResult.outcome !== "allowed") return { outcome: "denied", decision: gateResult.decision, diagnostic: createWorkerFailureDiagnostic("capability_denied") };
+    if (gateResult.outcome !== "allowed") return { outcome: "denied", decision: gateResult.decision, diagnostic: createWorkerFailureDiagnostic("capability_denied", gateResult.cause === undefined ? {} : { providerMessage: gateResult.cause }) };
     if (signal.aborted) return { outcome: "cancelled", decision: gateResult.decision, diagnostic: createWorkerFailureDiagnostic("cancellation") };
     const adapter = this.#adapters.get(value.provider);
     if (adapter === undefined) return { outcome: "unsupported_provider", message: "No adapter is registered for the assigned provider.", decision: gateResult.decision, diagnostic: createWorkerFailureDiagnostic("adapter_failure") };
     let raw: WorkerResult;
     try { raw = await adapter.execute(value, signal); }
     catch (error: unknown) {
-      const diagnostic = signal.aborted ? createWorkerFailureDiagnostic("cancellation") : isWorkerFailureError(error) ? error.diagnostic : createWorkerFailureDiagnostic("adapter_failure");
+      const diagnostic = signal.aborted ? createWorkerFailureDiagnostic("cancellation") : isWorkerFailureError(error) ? error.diagnostic : createWorkerFailureDiagnostic("adapter_failure", { providerMessage: `Worker adapter threw: ${errorCause(error)}` });
       return signal.aborted ? { outcome: "cancelled", decision: gateResult.decision, diagnostic } : { outcome: "adapter_failure", message: diagnostic.message, decision: gateResult.decision, diagnostic };
     }
     const result = validateWorkerResult(raw, value);

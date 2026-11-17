@@ -1,3 +1,4 @@
+import { errorCause } from "./error-cause.js";
 import {
   deserializeAttempt,
   deserializeTask,
@@ -198,7 +199,7 @@ export function createWorkerRequest(input: WorkerRequestInput): WorkerValidation
     const parsedTask = deserializeTask(JSON.stringify(input.task)); const parsedAttempt = deserializeAttempt(JSON.stringify(input.attempt));
     if (!parsedTask.ok || !parsedAttempt.ok) return failure(violation("invalid_input", !parsedTask.ok ? "task" : "attempt", "Task or Attempt snapshot is malformed."));
     task = parsedTask.value; attempt = parsedAttempt.value;
-  } catch { return failure(violation("invalid_input", "task", "Task or Attempt snapshot is not JSON-safe.")); }
+  } catch (error: unknown) { return failure(violation("invalid_input", "task", `Task or Attempt snapshot is not JSON-safe: ${errorCause(error).split("\n")[0]}`.slice(0, 256))); }
   const workerId = boundedText(input.workerId, "workerId", WORKER_CONTRACT_LIMITS.workerId); const provider = boundedText(input.provider, "provider", WORKER_CONTRACT_LIMITS.provider); const correlationId = boundedText(input.correlationId, "correlationId", WORKER_CONTRACT_LIMITS.correlationId);
   if (typeof workerId !== "string") return failure(workerId); if (typeof provider !== "string") return failure(provider); if (typeof correlationId !== "string") return failure(correlationId);
   if (task.state !== "in_progress" || attempt.state !== "running") return failure(violation("binding_mismatch", "task/attempt", "Worker execution requires an in-progress Task and running Attempt."));

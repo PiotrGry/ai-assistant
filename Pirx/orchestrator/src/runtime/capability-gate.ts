@@ -1,3 +1,4 @@
+import { errorCause } from "./error-cause.js";
 import {
   CAPABILITY_VOCABULARY,
   evaluateCapabilities,
@@ -55,7 +56,7 @@ export interface CapabilityGateRequest {
 export interface CapabilityGateDecision extends CapabilityAuditDecision {}
 export type CapabilityGateResult<T> =
   | { readonly outcome: "allowed"; readonly decision: CapabilityGateDecision; readonly value: T }
-  | { readonly outcome: "denied" | "cancelled" | "failed"; readonly decision: CapabilityGateDecision };
+  | { readonly outcome: "denied" | "cancelled" | "failed"; readonly decision: CapabilityGateDecision; readonly cause?: string };
 
 function knownCapabilities(value: readonly unknown[] | undefined): readonly Capability[] {
   return Object.freeze([...new Set(value?.filter((item): item is Capability => typeof item === "string" && CAPABILITY_VOCABULARY.includes(item as Capability)))].sort());
@@ -108,14 +109,14 @@ export class CapabilityEnforcementGate {
   }
 
   public async execute<T>(request: CapabilityGateRequest, invoke: () => Promise<T> | T): Promise<CapabilityGateResult<T>> {
-    const deny = async (result: CapabilityEvaluation, reasonCode: CapabilityGateReasonCode, outcome: "denied" | "cancelled" = "denied"): Promise<CapabilityGateResult<T>> => {
+    const deny = async (result: CapabilityEvaluation, reasonCode: CapabilityGateReasonCode, outcome: "denied" | "cancelled" = "denied", cause?: string): Promise<CapabilityGateResult<T>> => {
       const record = decision(request, result, "denied", reasonCode);
       try {
         await this.#audit.record(record);
-        return { outcome, decision: record };
-      } catch {
+        return { outcome, decision: record, ...(cause === undefined ? {} : { cause }) };
+      } catch (error: unknown) {
         const auditFailure = decision(request, result, "denied", "AUDIT_FAILURE");
-        return { outcome: "denied", decision: auditFailure };
+        return { outcome: "denied", decision: auditFailure, cause: `Capability audit record failed: ${errorCause(error)}` };
       }
     };
     if (request.signal?.aborted) return deny(emptyEvaluation(request), "CANCELLED", "cancelled");
@@ -138,22 +139,23 @@ export class CapabilityEnforcementGate {
         now: request.evaluatedAt,
       };
       evaluated = evaluateCapabilities(input);
-    } catch {
-      return deny(emptyEvaluation(request), "EVALUATOR_ERROR");
+    } catch (error: unknown) {
+      return deny(emptyEvaluation(request), "EVALUATOR_ERROR", "denied", `Capability evaluation threw: ${errorCause(error)}`);
     }
     if (evaluated.outcome !== "allowed") return deny(evaluated, evaluated.reasonCode);
     const allowedDecision = decision(request, evaluated, "allowed", "ALLOWED");
     try {
       await this.#audit.record(allowedDecision);
-    } catch {
-      return { outcome: "denied", decision: decision(request, evaluated, "denied", "AUDIT_FAILURE") };
+    } catch (error: unknown) {
+      return { outcome: "denied", decision: decision(request, evaluated, "denied", "AUDIT_FAILURE"), cause: `Capability audit record failed: ${errorCause(error)}` };
     }
     if (request.signal?.aborted) return { outcome: "cancelled", decision: allowedDecision };
     try {
       return { outcome: "allowed", decision: allowedDecision, value: await invoke() };
-    } catch {
+    } catch (error: unknown) {
       return {
         outcome: request.signal?.aborted ? "cancelled" : "failed",
+        cause: errorCause(error),
         decision: request.signal?.aborted ? allowedDecision : decision(request, evaluated, "allowed", "INVOCATION_ERROR"),
       };
     }

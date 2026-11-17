@@ -74,6 +74,11 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
         try { control.observe(event); } catch { /* Diagnostics cannot affect Lease handling. */ }
         writeEvent(host.stderr, event);
       },
+      onWorkerInvocationError: (error) => {
+        const event: HeadlessServiceEvent = Object.freeze({ schemaVersion: 1, event: "worker_invocation", outcome: "threw", reason: error.cause, details: error });
+        try { control.observe(event); } catch { /* Diagnostics cannot change the recorded execution result. */ }
+        writeEvent(host.stderr, event);
+      },
     });
     const githubConfigLoader = options.githubConfigLoader ?? loadGitHubConfig;
     const deliveryRepositories = config.repositories.map((repository) => {

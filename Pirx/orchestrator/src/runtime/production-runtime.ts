@@ -62,6 +62,7 @@ export interface ProductionRuntimeOptions {
   readonly branchFactory?: (task: TaskSnapshot) => string;
   /** Receives every failed Lease renewal, for diagnostics. */
   readonly onLeaseRenewalFailure?: (failure: SchedulerLeaseRenewalFailure) => void;
+  readonly onWorkerInvocationError?: SchedulerOptions["onWorkerInvocationError"];
 }
 
 export interface ProductionRuntimeStatus {
@@ -169,6 +170,7 @@ export class ProductionRuntime {
       recoveryPort: { reconcile: async (now) => this.#reconcile(now) },
       ...(options.shutdownTimeoutMs === undefined ? {} : { shutdownTimeoutMs: options.shutdownTimeoutMs }),
       ...(options.onLeaseRenewalFailure === undefined ? {} : { onLeaseRenewalFailure: options.onLeaseRenewalFailure }),
+      ...(options.onWorkerInvocationError === undefined ? {} : { onWorkerInvocationError: options.onWorkerInvocationError }),
     };
     this.#scheduler = new SingleWorkerScheduler(schedulerOptions);
   }

@@ -10,6 +10,7 @@ import { CLAUDE_CODE_WORKER_PROFILE_LIMITS, type ClaudeCodeWorkerProfile } from 
 import { createWorkerFailureDiagnostic, type WorkerFailureCode } from "../runtime/worker-diagnostic.js";
 import { extractProviderRecoveryMetadata } from "../runtime/worker-recovery.js";
 import type { WorkerProviderRecoveryMetadata } from "../runtime/worker-availability.js";
+import { errorCause } from "../runtime/error-cause.js";
 
 export const CLAUDE_ROUND_TRIP_OUTCOMES = [
   "success",
@@ -266,9 +267,9 @@ function diagnosticCode(outcome: Exclude<ClaudeRoundTripOutcome, "success">): Wo
   if (outcome === "process_error") return "process_failure";
   return "adapter_failure";
 }
-function failure(outcome: Exclude<ClaudeRoundTripOutcome, "success">, requestId: string, startedAt: number, exitCode: number | null, code = diagnosticCode(outcome), providerRecovery?: WorkerProviderRecoveryMetadata): ClaudeRoundTripFailure {
+function failure(outcome: Exclude<ClaudeRoundTripOutcome, "success">, requestId: string, startedAt: number, exitCode: number | null, code = diagnosticCode(outcome), providerRecovery?: WorkerProviderRecoveryMetadata, cause?: string): ClaudeRoundTripFailure {
   const durationMs = Math.max(0, Date.now() - startedAt);
-  return { outcome, requestId, durationMs, exitCode, message: FAILURE_MESSAGES[outcome], diagnostic: createWorkerFailureDiagnostic(code, { exitCode, durationMs, ...(providerRecovery === undefined ? {} : { providerRecovery }) }) };
+  return { outcome, requestId, durationMs, exitCode, message: FAILURE_MESSAGES[outcome], diagnostic: createWorkerFailureDiagnostic(code, { exitCode, durationMs, ...(cause === undefined ? {} : { stage: "process", providerMessage: cause }), ...(providerRecovery === undefined ? {} : { providerRecovery }) }) };
 }
 function validateStructuredOutput(value: unknown, requestId: string): value is { requestId: string; acknowledgement: string } {
   if (!isRecord(value) || Object.keys(value).length !== 2 || !Object.keys(value).every((key) => key === "requestId" || key === "acknowledgement")) return false;
@@ -329,12 +330,13 @@ export class ClaudeCodeCliRunner {
     let workingDirectory: string;
     try {
       workingDirectory = await mkdtemp(join(this.tempParentDirectory, "pirx-claude-round-trip-"));
-    } catch {
-      return failure("process_error", requestId, startedAt, null);
+    } catch (error: unknown) {
+      return failure("process_error", requestId, startedAt, null, undefined, undefined, `Temporary directory under ${this.tempParentDirectory} could not be created: ${errorCause(error)}`);
     }
     try {
       return await this.execute({ requestId, startedAt, workingDirectory, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: buildClaudeArguments(requestId) });
     } finally {
+      // Best-effort cleanup of an empty temp directory; the run result is already decided.
       await rm(workingDirectory, { recursive: true, force: true }).catch(() => undefined);
     }
   }
@@ -350,18 +352,19 @@ export class ClaudeCodeCliRunner {
     let arguments_: readonly string[];
     try {
       arguments_ = buildClaudeHandoffArguments(requestId, request.envelope);
-    } catch {
-      return failure("invalid_output", requestId, startedAt, null);
+    } catch (error: unknown) {
+      return failure("invalid_output", requestId, startedAt, null, undefined, undefined, `Handoff arguments were rejected: ${errorCause(error)}`);
     }
     let workingDirectory: string;
     try {
       workingDirectory = await mkdtemp(join(this.tempParentDirectory, "pirx-claude-handoff-"));
-    } catch {
-      return failure("process_error", requestId, startedAt, null);
+    } catch (error: unknown) {
+      return failure("process_error", requestId, startedAt, null, undefined, undefined, `Temporary directory under ${this.tempParentDirectory} could not be created: ${errorCause(error)}`);
     }
     try {
       return await this.execute({ requestId, startedAt, workingDirectory, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: arguments_ });
     } finally {
+      // Best-effort cleanup of an empty temp directory; the run result is already decided.
       await rm(workingDirectory, { recursive: true, force: true }).catch(() => undefined);
     }
   }
@@ -375,7 +378,7 @@ export class ClaudeCodeCliRunner {
     if (request.signal?.aborted) return failure("cancelled", request.requestId, startedAt, null);
     let cwd: string;
     try { cwd = await realpath(request.cwd); const info = await stat(cwd); if (!info.isDirectory()) return failure("process_error", request.requestId, startedAt, null); }
-    catch { return failure("process_error", request.requestId, startedAt, null); }
+    catch (error: unknown) { return failure("process_error", request.requestId, startedAt, null, undefined, undefined, `Worker directory ${request.cwd} is not accessible: ${errorCause(error)}`); }
     if (request.signal?.aborted === true) return failure("cancelled", request.requestId, startedAt, null);
     if (request.workerProfile !== undefined) {
       if (request.workerProfile.cwd !== cwd) return failure("process_error", request.requestId, startedAt, null, "permission_denied");
@@ -397,7 +400,7 @@ export class ClaudeCodeCliRunner {
         ? buildClaudeStructuredArguments(request.requestId, request.prompt, request.responseSchema)
         : buildClaudeWorkerArguments(request.requestId, request.prompt, request.responseSchema, request.workerProfile);
       return await this.execute({ requestId: request.requestId, startedAt, workingDirectory: cwd, signal: request.signal, timeoutMs, maxStdoutBytes, maxStderrBytes, arguments: arguments_, structuredOutput: true, stream: request.workerProfile !== undefined, ...(request.transcriptPath === undefined ? {} : { transcriptPath: request.transcriptPath }), ...(request.workerProfile?.attemptTimeLimitMs === undefined ? {} : { attemptTimeLimitMs: request.workerProfile.attemptTimeLimitMs }), ...(request.workerProfile?.maxTurns === undefined ? {} : { maxTurns: request.workerProfile.maxTurns }) }) as ClaudeStructuredResult;
-    } catch { return failure("process_error", request.requestId, startedAt, null); }
+    } catch (error: unknown) { return failure("process_error", request.requestId, startedAt, null, undefined, undefined, `Claude invocation failed before a result: ${errorCause(error)}`); }
   }
 
   private checkWorkerVersion(cwd: string): Promise<{ readonly ok: true; readonly version: string } | { readonly ok: false; readonly outcome: "claude_not_installed" | "unsupported_version" | "process_error"; readonly evidence: string }> {
@@ -407,7 +410,7 @@ export class ClaudeCodeCliRunner {
         raw = await this.versionProbe({ executable: this.executable, cwd, env: buildEnvironment(this.environment, this.additionalEnvironment) });
       } catch (error: unknown) {
         const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined;
-        return { ok: false, outcome: code === "ENOENT" ? "claude_not_installed" : "process_error", evidence: code === "ENOENT" ? "Claude Code executable was not found during the compatibility probe." : "Claude Code compatibility probe failed." } as const;
+        return { ok: false, outcome: code === "ENOENT" ? "claude_not_installed" : "process_error", evidence: `${code === "ENOENT" ? `Claude Code executable ${this.executable} was not found during the compatibility probe.` : "Claude Code compatibility probe failed."} ${errorCause(error)}` } as const;
       }
       const parsed = parseClaudeVersion(raw);
       if (parsed === undefined) return { ok: false, outcome: "unsupported_version", evidence: "Claude Code returned an unrecognized version during the compatibility probe." } as const;
@@ -430,7 +433,7 @@ export class ClaudeCodeCliRunner {
       } catch (error: unknown) {
         const base = failure("process_error", input.requestId, input.startedAt, null);
         const code = isRecord(error) && typeof error.code === "string" ? error.code : "unknown";
-        return { ...base, diagnostic: createWorkerFailureDiagnostic(base.diagnostic.code, { ...base.diagnostic, stage: "process", providerMessage: `Worker transcript ${input.transcriptPath} could not be opened (${code}); the worker was not started.` }) };
+        return { ...base, diagnostic: createWorkerFailureDiagnostic(base.diagnostic.code, { ...base.diagnostic, stage: "process", providerMessage: `Worker transcript ${input.transcriptPath} could not be opened (${code}); the worker was not started. ${errorCause(error)}` }) };
       }
     }
     try { return await this.executeProcess(input, transcript); }
@@ -482,7 +485,7 @@ export class ClaudeCodeCliRunner {
       });
     } catch (error: unknown) {
       const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined;
-      return failure(code === "ENOENT" ? "claude_not_installed" : "process_error", input.requestId, input.startedAt, null);
+      return failure(code === "ENOENT" ? "claude_not_installed" : "process_error", input.requestId, input.startedAt, null, undefined, undefined, `Claude Code ${this.executable} could not be started: ${errorCause(error)}`);
     }
     let streamLine = Buffer.alloc(0);
     let streamLineOverflow = false;
@@ -570,7 +573,7 @@ export class ClaudeCodeCliRunner {
       const result = failure(...args);
       const envelope = isRecord(parsed) ? parsed : {};
       const evidence = [envelope.subtype, envelope.errors, envelope.error, envelope.message, envelope.is_error === true ? envelope.result : undefined, transcriptError === undefined ? undefined : `Worker transcript write failed (${transcriptError}).`, stderr].filter((value) => value !== undefined && value !== "").map((value) => typeof value === "string" ? value : JSON.stringify(diagnosticContext(value))).join("\n");
-      return { ...result, diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, { ...result.diagnostic, stage: "process", ...(evidence ? { providerMessage: evidence } : {}), ...(outputLimitExceeded ? { providerMessageTruncated: true } : {}) }) };
+      return { ...result, diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, { ...result.diagnostic, stage: "process", ...([result.diagnostic.providerMessage, evidence].some(Boolean) ? { providerMessage: [result.diagnostic.providerMessage, evidence].filter(Boolean).join("\n") } : {}), ...(outputLimitExceeded ? { providerMessageTruncated: true } : {}) }) };
     };
     if (trigger === "attempt_time_limit") {
       const result = failed(trigger, input.requestId, input.startedAt, exitCode);
@@ -578,10 +581,10 @@ export class ClaudeCodeCliRunner {
       return { ...result, diagnostic: createWorkerFailureDiagnostic(result.diagnostic.code, { ...result.diagnostic, providerMessage: [limit, result.diagnostic.providerMessage].filter(Boolean).join("\n") }) };
     }
     if (trigger !== undefined) return failed(trigger, input.requestId, input.startedAt, exitCode);
-    if (spawnError !== undefined) return failure(spawnError.code === "ENOENT" ? "claude_not_installed" : "process_error", input.requestId, input.startedAt, exitCode);
+    if (spawnError !== undefined) return failure(spawnError.code === "ENOENT" ? "claude_not_installed" : "process_error", input.requestId, input.startedAt, exitCode, undefined, undefined, `Claude Code ${this.executable} could not be started: ${errorCause(spawnError)}`);
     if (exitCode === null) return failed("unknown", input.requestId, input.startedAt, exitCode);
     try { parsed = JSON.parse(stdout); }
-    catch { return failed(explicitFailureCode(undefined, stderr) ?? (exitCode !== 0 ? "process_error" : "invalid_output"), input.requestId, input.startedAt, exitCode, exitCode !== 0 ? undefined : "malformed_cli_envelope"); }
+    catch (error: unknown) { return failed(explicitFailureCode(undefined, stderr) ?? (exitCode !== 0 ? "process_error" : "invalid_output"), input.requestId, input.startedAt, exitCode, exitCode !== 0 ? undefined : "malformed_cli_envelope", undefined, exitCode !== 0 ? undefined : `Claude stdout (${stdout.length} characters) is not one JSON result: ${errorCause(error).split("\n")[0]}`); }
     // Documented result subtype of the Claude Agent SDK; no real capture exists yet, so the
     // diagnostic keeps the provider's own subtype and turn count either way.
     if (isRecord(parsed) && parsed.type === "result" && parsed.subtype === "error_max_turns") {

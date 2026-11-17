@@ -46,3 +46,9 @@ test("observedCommit survives persistence only as a full SHA", () => {
   assert.equal(createWorkerFailureDiagnostic("push_rejected", { observedCommit: "abc" }).observedCommit, undefined);
   assert.equal(validateWorkerFailureDiagnostic({ ...pirx, observedCommit: "abc" }), undefined);
 });
+
+test("rejected provider recovery metadata is named in the diagnostic instead of dropped silently", () => {
+  const diagnostic = createWorkerFailureDiagnostic("quota_exhausted", { providerMessage: "You've hit your 5-hour limit", providerRecovery: { source: "provider_retry_after", retryAfterMs: -1 } as never });
+  assert.equal(diagnostic.providerRecovery, undefined);
+  assert.match(diagnostic.providerMessage ?? "", /^You've hit your 5-hour limit\nProvider recovery metadata was rejected: /u);
+});

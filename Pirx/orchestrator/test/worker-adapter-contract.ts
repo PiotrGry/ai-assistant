@@ -34,7 +34,7 @@ const taskId = "adapter-contract-task" as TaskId;
 const attemptId = "adapter-contract-attempt" as AttemptId;
 const now = "2026-09-15T12:00:00.000Z" as UtcTimestamp;
 
-function request(): WorkerRequest {
+export function contractRequest(): WorkerRequest {
   const task = createTask({ id: taskId, goal: "Run adapter conformance", scope: "generic worker", acceptanceCriteria: ["contract"], priority: 1, risk: "low", requiredCapabilities: ["repository.read", "tests.run"], createdAt: now });
   if (!task.ok) throw new Error(task.error.message);
   const started = startInitialAttempt(task.value, [], { id: attemptId, worker: "contract-worker", provider: "contract-provider", branch: "pirx/adapter-contract", worktree: "/tmp/pirx-adapter-contract" }, now);
@@ -71,7 +71,7 @@ class Audit {
 
 export function registerWorkerAdapterContractSuite(options: WorkerAdapterContractSuiteOptions): void {
   test(`${options.name}: preserves every normalized terminal result`, async () => {
-    const value = request();
+    const value = contractRequest();
     const factory = options.factory();
     for (const scenario of ["CODE_PUSHED", "BLOCKED", "FAILED", "QUOTA_EXHAUSTED", "CANCELLED", "UNKNOWN"] as const) {
       const adapter = factory.create(scenario);
@@ -82,7 +82,7 @@ export function registerWorkerAdapterContractSuite(options: WorkerAdapterContrac
   });
 
   test(`${options.name}: rejects binding conflicts, malformed and oversized results`, async () => {
-    const value = request();
+    const value = contractRequest();
     const factory = options.factory();
     for (const scenario of ["wrong_identity", "wrong_branch", "malformed", "oversized"] as const) {
       const result = await invokeWorker(factory.create(scenario), value, new AbortController().signal);
@@ -94,7 +94,7 @@ export function registerWorkerAdapterContractSuite(options: WorkerAdapterContrac
   });
 
   test(`${options.name}: normalizes thrown adapters and cancellation`, async () => {
-    const value = request();
+    const value = contractRequest();
     const factory = options.factory();
     const thrown = await invokeWorker(factory.create("throw"), value, new AbortController().signal);
     assert.equal(thrown.ok, true);
@@ -106,7 +106,7 @@ export function registerWorkerAdapterContractSuite(options: WorkerAdapterContrac
   });
 
   test(`${options.name}: capability boundary allows exactly once and denies before invocation`, async () => {
-    const value = request();
+    const value = contractRequest();
     const factory = options.factory();
     const audit = new Audit();
     const allowed = new CapabilityAwareWorkerExecutionPort(new CapabilityEnforcementGate(audit), { get: () => factory.create("CODE_PUSHED") }, { now: () => now });
@@ -120,7 +120,7 @@ export function registerWorkerAdapterContractSuite(options: WorkerAdapterContrac
   });
 
   test(`${options.name}: rejects secret-bearing normalized evidence at the boundary`, async () => {
-    const value = request();
+    const value = contractRequest();
     const factory = options.factory();
     const port = new CapabilityAwareWorkerExecutionPort(new CapabilityEnforcementGate(new Audit()), { get: () => factory.create("secret") }, { now: () => now });
     const result = await port.execute(value, new AbortController().signal);
