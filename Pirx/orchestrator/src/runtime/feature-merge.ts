@@ -15,7 +15,7 @@ export const FEATURE_MERGE_LIMITS = Object.freeze({
   timeoutMs: 120_000,
 } as const);
 
-export type FeatureMergeOutcome = "merged" | "replayed" | "ci_failed" | "ci_pending" | "stale" | "policy_blocked" | "authorization_required" | "rate_limited" | "conflict" | "reconciliation_required" | "not_found" | "provider_error" | "invalid_request";
+export type FeatureMergeOutcome = "merged" | "replayed" | "base_behind" | "ci_failed" | "ci_pending" | "stale" | "policy_blocked" | "authorization_required" | "rate_limited" | "conflict" | "reconciliation_required" | "not_found" | "provider_error" | "invalid_request";
 export type FeatureMergeState = "pending" | "merged";
 export type FeatureMergeMethod = "squash" | "merge" | "rebase";
 
@@ -72,7 +72,7 @@ function context(request: FeatureMergeRequest): GitHubRequestContext { return { 
 function remoteOutcome<T>(request: FeatureMergeRequest, remote: Exclude<GitHubOperationResult<T>, { outcome: "success" }>, repository?: string): FeatureMergeResult {
   const code = remote.error.code;
   const outcome: FeatureMergeOutcome = code === "authentication" || code === "forbidden" ? "authorization_required" : code === "rate_limited" ? "rate_limited" : code === "not_found" ? "not_found" : remote.outcome === "unknown" || code === "unknown" ? "reconciliation_required" : code === "conflict" ? "conflict" : "provider_error";
-  return output(request, outcome, outcome === "authorization_required" ? "GitHub authorization is required." : outcome === "rate_limited" ? "GitHub rate limit blocked feature merge." : outcome === "reconciliation_required" ? "Feature merge result is uncertain and requires reconciliation." : "Feature merge provider operation failed.", repository === undefined ? {} : { repository });
+  return output(request, outcome, outcome === "authorization_required" ? "GitHub authorization is required." : outcome === "rate_limited" ? "GitHub rate limit blocked feature merge." : outcome === "reconciliation_required" ? "Feature merge result is uncertain and requires reconciliation." : `Feature merge provider operation failed: ${remote.error.message}`, repository === undefined ? {} : { repository });
 }
 function validPolicy(policy: FeatureMergePolicy): string | undefined {
   if (!validText(policy.headPattern, 512) || !validText(policy.baseBranch, FEATURE_MERGE_LIMITS.branch) || !validBranch(policy.baseBranch) || !Array.isArray(policy.requiredChecks) || policy.requiredChecks.length === 0 || policy.requiredChecks.length > FEATURE_MERGE_LIMITS.maxChecks || policy.requiredChecks.some((check) => !validText(check, FEATURE_MERGE_LIMITS.checkName)) || !Number.isSafeInteger(policy.requiredApprovals) || policy.requiredApprovals < 0 || !["squash", "merge", "rebase"].includes(policy.mergeMethod)) return "Feature merge policy is invalid.";
@@ -154,6 +154,8 @@ export class FeatureMergeCoordinator {
         const reconciledSha = mergedSha(reconciled.value);
         return saved.outcome === "success" ? output(request, "replayed", "Uncertain merge was reconciled to the exact merged PR.", { repository, pullRequest: reconciled.value, checked, ...(reconciledSha === undefined ? {} : { mergeSha: reconciledSha }) }) : remoteStorage(request, saved, repository);
       }
+      // GitHub may still read a just-pushed PR as mergeable; a base that requires up-to-date PRs then refuses the merge.
+      if (reconciled.outcome === "success" && reconciled.value.state === "open" && !reconciled.value.merged && reconciled.value.mergeableState === "behind") return output(request, "base_behind", `GitHub refused the merge because PR #${reconciled.value.number} is behind ${request.policy.baseBranch}: ${merged.error.message}`, { repository, pullRequest: reconciled.value, checked });
       return remoteOutcome(request, merged, repository);
     }
     const saved = this.#store.featureMerges.markMerged(request.taskId, request.attemptId, merged.value.sha ?? record.observedHeadSha, request.now);

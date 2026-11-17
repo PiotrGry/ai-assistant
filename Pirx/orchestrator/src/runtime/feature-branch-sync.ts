@@ -109,7 +109,7 @@ export class FeatureBranchSyncService {
 
     const recorded = this.#record(request, latest, merged);
     if (recorded.outcome !== "success") return result("reconciliation_required", `The merge ${merged.slice(0, 12)} was pushed but not recorded: ${recorded.message}`, { commit: merged });
-    return result("synced", `Pirx merged ${request.baseBranch} (${base.slice(0, 7)}) into ${latest.branch} as ${merged.slice(0, 7)}; CI runs on the merge commit next.`, { successorAttemptId: recorded.value, commit: merged });
+    return result("synced", `Pirx merged ${request.baseBranch} (${parents[2]!.slice(0, 7)}) into ${latest.branch} as ${merged.slice(0, 7)}; CI runs on the merge commit next.`, { successorAttemptId: recorded.value, commit: merged });
   }
 
   #record(request: FeatureBranchSyncRequest, predecessor: AttemptSnapshot & { readonly state: "terminal" }, merged: string): StorageResult<AttemptId> {

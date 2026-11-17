@@ -162,6 +162,30 @@ test("requires approvals and mergeability, and maps conflict, authorization and 
   }
 });
 
+test("a merge refused because the PR fell behind its base is base_behind, not a provider failure", async () => {
+  // gh-505: GitHub still reported PR #506 mergeable right after a push, then refused the merge
+  // with HTTP 405 because develop requires up-to-date branches.
+  const value = await fixture();
+  try {
+    value.github.mergeResult = failure("permanent_error", "invalid_request", "GitHub rejected the request with HTTP 405.", "merge", "not_accepted");
+    const merge = value.github.mergePullRequest.bind(value.github);
+    value.github.mergePullRequest = async () => { const refused = await merge(); value.github.pull = { ...value.github.pull, mergeableState: "behind" }; return refused; };
+    const output = await new FeatureMergeCoordinator(value.store, value.github, value.ci).merge(request());
+    assert.equal(output.outcome, "base_behind", JSON.stringify(output));
+    assert.equal(value.github.mergeCalls, 1);
+  } finally { await close(value); }
+});
+
+test("a provider failure names GitHub's own error", async () => {
+  const value = await fixture();
+  try {
+    value.github.mergeResult = failure("permanent_error", "invalid_request", "GitHub rejected the request with HTTP 405.", "merge", "not_accepted");
+    const output = await new FeatureMergeCoordinator(value.store, value.github, value.ci).merge(request());
+    assert.equal(output.outcome, "provider_error");
+    assert.match(output.message, /HTTP 405/u);
+  } finally { await close(value); }
+});
+
 test("reconciles an uncertain merge, but never retries an unresolved mutation", async () => {
   const reconciled = await fixture();
   try {
