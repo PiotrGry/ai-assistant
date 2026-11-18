@@ -191,14 +191,16 @@ test("a self-releasing repository completes the Task once its pipeline passed fo
   try {
     const runs: Parameters<typeof selfReleasing>[1] = { validation: [{ id: 7, status: "in_progress" }] };
     const cleanups: Array<{ attemptId: string; baseBranch: string; remoteName: string }> = [];
-    const runtime: HeadlessDeliveryRepositoryRuntime = { ...selfReleasing(value, runs), branchCleanup: { cleanup: async (request) => { cleanups.push({ attemptId: request.attemptId, baseBranch: request.baseBranch, remoteName: request.remoteName }); return { outcome: "deleted", message: "Deleted the branch." }; } } };
+    const closed: number[] = [];
+    const runtime: HeadlessDeliveryRepositoryRuntime = { ...selfReleasing(value, runs), branchCleanup: { cleanup: async (request) => { cleanups.push({ attemptId: request.attemptId, baseBranch: request.baseBranch, remoteName: request.remoteName }); return { outcome: "deleted", message: "Deleted the branch." }; } }, issueCloser: { close: async (request) => { closed.push(request.issueNumber); return { closed: true, message: `Closed Issue #${request.issueNumber}.` }; } } };
     const waiting = await new HeadlessDeliveryCoordinator(value.store, [runtime], { now: () => t1 }).reconcile();
     assert.equal(waiting.outcome, "waiting", waiting.message);
     runs.validation = [{ id: 7, status: "completed", conclusion: "success" }];
     const done = await new HeadlessDeliveryCoordinator(value.store, [runtime], { now: () => t1 }).reconcile();
     assert.equal(done.outcome, "completed", done.message);
     assert.deepEqual(cleanups, [{ attemptId, baseBranch: "develop", remoteName: "origin" }]);
-    assert.match(done.message, /Deleted the branch\.$/u);
+    assert.match(done.message, /Deleted the branch\. Closed Issue #210\.$/u);
+    assert.deepEqual(closed, [210]);
     assert.equal(value.release.calls.length, 0);
     const task = value.store.tasks.get(taskId);
     assert.equal(task.outcome === "success" ? task.value.state : task.outcome, "completed");

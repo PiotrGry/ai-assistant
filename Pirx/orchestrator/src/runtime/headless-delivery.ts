@@ -10,6 +10,7 @@ import { transitionTask, type TaskSnapshot, type TerminalAttemptSnapshot, type U
 import { watchPostMerge, type PostMergeGateway } from "./post-merge-watch.js";
 import type { TaskBranchCleanup } from "./task-branch-cleanup.js";
 import { createPostMergeRetry } from "./post-merge-retry.js";
+import type { GitHubTaskIssueCloser } from "../github/task-issue-close.js";
 
 export const HEADLESS_DELIVERY_SCHEMA_VERSION = 1 as const;
 export type HeadlessDeliveryOutcome =
@@ -43,6 +44,8 @@ export interface HeadlessDeliveryRepositoryRuntime {
   readonly postMerge?: PostMergeGateway;
   /** Deletes the Task branch and worktree once the pipeline passed for the merged change. */
   readonly branchCleanup?: Pick<TaskBranchCleanup, "cleanup">;
+  /** Closes the Task's Issue with the completion evidence. */
+  readonly issueCloser?: Pick<GitHubTaskIssueCloser, "close">;
 }
 
 export interface HeadlessDeliveryCoordinatorOptions {
@@ -165,7 +168,9 @@ export class HeadlessDeliveryCoordinator {
     if (saved.outcome !== "success") return output("reconciliation_required", false, saved.message, extra);
     // ponytail: a failed cleanup is reported once and not retried; the branch and worktree then stay for a human.
     const cleaned = repository.branchCleanup === undefined ? undefined : await repository.branchCleanup.cleanup({ taskId: task.id, attemptId: attempt.id, remoteName: repository.config.remoteName, baseBranch: repository.config.baseBranch, now });
-    return output("completed", true, `Task completed: ${watched.message}${cleaned === undefined ? "" : ` ${cleaned.message}`}`, extra);
+    const issueNumber = task.githubReference?.issueNumber;
+    const closed = repository.issueCloser === undefined || issueNumber === undefined ? undefined : await repository.issueCloser.close({ issueNumber, taskId: task.id, attemptId: attempt.id, commit: mergeSha, summary: `Task completed: merged into ${repository.config.baseBranch} as ${mergeSha.slice(0, 7)}. ${watched.message}`, timestamp: now });
+    return output("completed", true, [`Task completed: ${watched.message}`, cleaned?.message, closed?.message].filter((part) => part !== undefined).join(" "), extra);
   }
 
   async #syncBranch(task: TaskSnapshot, attempt: TerminalAttemptSnapshot, repository: HeadlessDeliveryRepositoryRuntime, shipment: ShipmentCycleResult, now: UtcTimestamp): Promise<HeadlessDeliveryResult> {
