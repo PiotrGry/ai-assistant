@@ -172,6 +172,8 @@ test("an advisor failure records how long it waited, and the model request keeps
     globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => { body = JSON.parse(String(init?.body)) as Record<string, unknown>; return new Response(JSON.stringify({ message: { content: "Use referenceNumber." } }), { status: 200 }); }) as typeof fetch;
     assert.equal(await ollamaAdvisor("prompt", new AbortController().signal), "Use referenceNumber.");
     assert.equal(body?.keep_alive, "30m");
+    // gh-519: Qwen3 spent the 512-token budget thinking and the answer came back empty.
+    assert.equal(body?.think, false);
     assert.ok(((body?.options as { num_predict?: number } | undefined)?.num_predict ?? Infinity) <= 512);
   } finally { globalThis.fetch = originalFetch; store.close(); await rm(root, { recursive: true, force: true }); }
 });
