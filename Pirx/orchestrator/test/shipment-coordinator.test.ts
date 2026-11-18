@@ -395,3 +395,41 @@ test("a PR the repository's own auto-merge merged at the exact pushed head compl
     assert.equal(value.github.mergeCalls, 0);
   } finally { await dispose(value); }
 });
+
+/** GitHub reports the PR as not mergeable (e.g. waiting for a review rule), so Pirx's merge is policy-blocked. */
+class UnmergeableGithub extends FakeGithub {
+  override async createPullRequest(input: { readonly headBranch: string; readonly baseBranch: string; readonly body: string }): Promise<GitHubOperationResult<GitHubPullRequest>> {
+    const created = await super.createPullRequest(input as never);
+    if (created.outcome === "success") this.pull = { ...created.value, mergeable: false };
+    return created.outcome === "success" ? success(this.pull!, "create") : created;
+  }
+}
+
+test("a blocked cycle whose PR the repository merged at the exact head heals itself on the next run", async () => {
+  // gh-525: a cycle blocked at the merge step while the repository's own auto-merge
+  // landed the exact pushed head; it waited for an operator's SQL reopen.
+  const value = await fixture();
+  try {
+    const github = new UnmergeableGithub();
+    const coordinator = new ShipmentCycleCoordinator(value.store, github, new ScriptedCi());
+    const blocked = await coordinator.run(request());
+    assert.equal(blocked.outcome, "policy_blocked", JSON.stringify(blocked));
+    assert.equal(github.mergeCalls, 0);
+    github.pull = { ...github.pull!, state: "closed", merged: true, mergeCommitSha: "d".repeat(40) };
+    const healed = await coordinator.run(request());
+    assert.equal(healed.outcome, "recovery_success", JSON.stringify(healed));
+    assert.equal(healed.mergeSha, "d".repeat(40));
+    assert.equal(github.mergeCalls, 0);
+  } finally { await dispose(value); }
+});
+
+test("a blocked cycle whose PR was merged at another head stays blocked", async () => {
+  const value = await fixture();
+  try {
+    const github = new UnmergeableGithub();
+    const coordinator = new ShipmentCycleCoordinator(value.store, github, new ScriptedCi());
+    assert.equal((await coordinator.run(request())).outcome, "policy_blocked");
+    github.pull = { ...github.pull!, headSha: "e".repeat(40), state: "closed", merged: true, mergeCommitSha: "d".repeat(40) };
+    assert.equal((await coordinator.run(request())).outcome, "policy_blocked");
+  } finally { await dispose(value); }
+});
