@@ -106,7 +106,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
     const control = options.control ?? new SqliteHeadlessControlPort(store, undefined, (failure) => writeEvent(host.stderr, { schemaVersion: 1, event: "observation_persistence_failed", ...failure }));
     runtime = new ProductionRuntime(store, {
       workerId: config.workerId, provider: config.provider, workerCapabilities: config.workerCapabilities,
-      repositories: config.repositories.map(({ repository, repositoryRoot, baseBranch, baseRevision }) => ({ repository, repositoryRoot, baseBranch, baseRevision })),
+      repositories: config.repositories.map(({ repository, repositoryRoot, baseBranch, baseRevision, remoteName }) => ({ repository, repositoryRoot, baseBranch, remoteName, ...(baseRevision === undefined ? {} : { baseRevision }) })),
       worktreeParent: config.worktreeParent, leaseDurationMs: config.leaseDurationMs,
       shutdownTimeoutMs: config.shutdownTimeoutMs, workerTimeoutMs: config.workerTimeoutMs,
       workerOutputBytes: config.workerOutputBytes, workerErrorBytes: config.workerErrorBytes,

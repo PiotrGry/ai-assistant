@@ -105,9 +105,15 @@ export async function runPreflight(config: HeadlessOrchestratorConfig, options: 
         return problem(`${name}:repositoryRoot`, inside.code === "ENOENT" ? `${repository.repositoryRoot} does not exist, or git is not on PATH.` : `${repository.repositoryRoot} is not a git checkout.`);
       }
       ok(`${name}:repositoryRoot`, repository.repositoryRoot);
-      const revision = await run("git", ["cat-file", "-e", `${repository.baseRevision}^{commit}`], repository.repositoryRoot);
-      if (revision.ok) ok(`${name}:baseRevision`, repository.baseRevision);
-      else problem(`${name}:baseRevision`, `Commit ${repository.baseRevision} is not in ${repository.repositoryRoot}. Fetch it, or set baseRevision to a commit of ${repository.baseBranch}.`);
+      if (repository.baseRevision === undefined) {
+        const branch = await run("git", ["ls-remote", "--exit-code", repository.remoteName, `refs/heads/${repository.baseBranch}`], repository.repositoryRoot);
+        if (branch.ok) ok(`${name}:baseBranch`, `${repository.remoteName}/${repository.baseBranch}`);
+        else problem(`${name}:baseBranch`, `${repository.remoteName} has no branch ${repository.baseBranch}; new Task branches start from it.`);
+      } else {
+        const revision = await run("git", ["cat-file", "-e", `${repository.baseRevision}^{commit}`], repository.repositoryRoot);
+        if (revision.ok) ok(`${name}:baseRevision`, repository.baseRevision);
+        else problem(`${name}:baseRevision`, `Commit ${repository.baseRevision} is not in ${repository.repositoryRoot}. Fetch it, set baseRevision to a commit of ${repository.baseBranch}, or leave it out to start from the current ${repository.baseBranch}.`);
+      }
       const remote = await run("git", ["remote", "get-url", repository.remoteName], repository.repositoryRoot);
       if (remote.ok) ok(`${name}:remoteName`, repository.remoteName);
       else problem(`${name}:remoteName`, `The checkout has no git remote named ${repository.remoteName}.`);
