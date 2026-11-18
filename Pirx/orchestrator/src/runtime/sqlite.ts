@@ -2985,13 +2985,18 @@ export class ShipmentCycleRepository {
     });
   }
   /** Reopen a cycle whose stored outcome only meant "not yet" (older rows); it resumes from `state`. */
-  public reopen(taskId: string, attemptId: string, state: "started" | "pr_correlated", updatedAt: UtcTimestamp): StorageResult<ShipmentCycleRecord> {
+  /**
+   * Reopens a blocked cycle: one that was only waiting, or (mergedAtHead) one blocked at the merge
+   * step whose PR the repository has since merged at the exact pushed head.
+   */
+  public reopen(taskId: string, attemptId: string, state: "started" | "pr_correlated", updatedAt: UtcTimestamp, mergedAtHead = false): StorageResult<ShipmentCycleRecord> {
     if (!utcTimestamp(updatedAt).ok) return invalidRecord();
     return this.#store.execute(() => {
       const current = this.getByTaskAttempt(taskId, attemptId); if (current.outcome !== "success") return current;
-      if (current.value.state !== "blocked" || !["pending_or_timeout", "rate_limited"].includes(current.value.outcome ?? "")) return conflict("Only a shipment cycle that was waiting can be reopened.");
+      const reopenable = mergedAtHead ? ["pending_or_timeout", "rate_limited", "policy_blocked", "stale_or_conflicting_evidence"] : ["pending_or_timeout", "rate_limited"];
+      if (current.value.state !== "blocked" || !reopenable.includes(current.value.outcome ?? "")) return conflict("Only a shipment cycle that was waiting, or whose PR was merged at its head, can be reopened.");
       try {
-        this.#store.database.prepare("UPDATE runtime_shipment_cycles SET state = ?, outcome = NULL, message = ?, updated_at = ?, version = version + 1 WHERE task_id = ? AND attempt_id = ? AND version = ?").run(state, "Shipment cycle reopened after a waiting outcome.", updatedAt, taskId, attemptId, current.value.version);
+        this.#store.database.prepare("UPDATE runtime_shipment_cycles SET state = ?, outcome = NULL, message = ?, updated_at = ?, version = version + 1 WHERE task_id = ? AND attempt_id = ? AND version = ?").run(state, mergedAtHead ? "Shipment cycle reopened: the repository merged the PR at the exact pushed head." : "Shipment cycle reopened after a waiting outcome.", updatedAt, taskId, attemptId, current.value.version);
         return this.getByTaskAttempt(taskId, attemptId);
       } catch (error: unknown) { return classifyStorageError(error); }
     });

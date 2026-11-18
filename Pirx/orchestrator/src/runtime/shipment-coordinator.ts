@@ -99,9 +99,10 @@ export class ShipmentCycleCoordinator {
   readonly #evidence: CiFailureEvidenceService;
   readonly #retry: CiRetryCoordinator;
   readonly #merge: FeatureMergeCoordinator;
+  readonly #github: GitHubPullRequestGatewayPort;
 
   public constructor(store: RuntimeSqliteStore, github: GitHubPullRequestGatewayPort, ci: ProviderIndependentCiGateway) {
-    this.#store = store; this.#pullRequests = new GitHubFeaturePullRequestService(store, github); this.#ci = new CiCorrelationService(store, ci); this.#evidence = new CiFailureEvidenceService(store, ci); this.#retry = new CiRetryCoordinator(store); this.#merge = new FeatureMergeCoordinator(store, github, ci);
+    this.#store = store; this.#github = github; this.#pullRequests = new GitHubFeaturePullRequestService(store, github); this.#ci = new CiCorrelationService(store, ci); this.#evidence = new CiFailureEvidenceService(store, ci); this.#retry = new CiRetryCoordinator(store); this.#merge = new FeatureMergeCoordinator(store, github, ci);
   }
 
   public async run(request: ShipmentCycleRequest): Promise<ShipmentCycleResult> {
@@ -115,6 +116,16 @@ export class ShipmentCycleCoordinator {
       const reopened = this.#store.shipmentCycles.reopen(request.taskId, request.attemptId, existing.value.pullRequestNumber === undefined ? "started" : "pr_correlated", request.now);
       if (reopened.outcome !== "success") return result(request, "reconciliation_required", reopened.message);
       existing = reopened;
+    }
+    if (existing.outcome === "success" && existing.value.state === "blocked" && existing.value.pullRequestNumber !== undefined && (existing.value.outcome === "policy_blocked" || existing.value.outcome === "stale_or_conflicting_evidence")) {
+      // The repository may have merged the exact pushed head after Pirx's merge step blocked (gh-525):
+      // that is the delivery Pirx wanted, so resume instead of waiting for an operator.
+      const pull = await this.#github.getPullRequest(existing.value.pullRequestNumber, { correlationId: request.correlationId, ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }), ...(request.signal === undefined ? {} : { signal: request.signal }) });
+      if (pull.outcome === "success" && pull.value.merged && pull.value.headSha === request.expectedHeadSha && pull.value.baseBranch === request.baseBranch) {
+        const reopened = this.#store.shipmentCycles.reopen(request.taskId, request.attemptId, "pr_correlated", request.now, true);
+        if (reopened.outcome !== "success") return result(request, "reconciliation_required", reopened.message);
+        existing = reopened;
+      }
     }
     if (existing.outcome === "success") {
       if (existing.value.outcome !== undefined) {
