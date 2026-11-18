@@ -192,6 +192,9 @@ for (const [blockedBy, blockingDiagnostic, workspaceRevision, expectedResume] of
   ["the repository rejected the push of the worker's commit", () => createWorkerFailureDiagnostic("push_rejected", { stage: "git_state", providerMessage: "git push failed (git_failure): pip-audit: vulnerabilities found" }), "d".repeat(40), "d".repeat(40)],
   // After a hook fix outside the worktree, a plain unblock resumes from the commit Pirx saw refused.
   ["the repository rejected a commit and the operator only fixed the hook", () => createWorkerFailureDiagnostic("push_rejected", { stage: "git_state", providerMessage: "git push failed (git_failure): error: failed to push some refs", observedCommit: "e".repeat(40) }), undefined, "e".repeat(40)],
+  // Same shape as gh-519 attempt 1: the sandboxed worker had no project environment and committed nothing;
+  // the operator added setupCommands and resumes.
+  ["the worker could not use its environment and committed nothing", () => createWorkerFailureDiagnostic("permission_denied", { stage: "process", providerMessage: "No Python env with project deps; sandbox denies pypi.org" }), undefined, undefined],
 ] as const) test(`an operator can retry a Task that ${blockedBy}`, async () => {
   const directory = await mkdtemp(join(tmpdir(), "pirx-production-preworker-unblock-"));
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
@@ -219,7 +222,9 @@ for (const [blockedBy, blockingDiagnostic, workspaceRevision, expectedResume] of
     const blocked = store.tasks.get(taskId); assert.equal(blocked.outcome === "success" ? blocked.value.state : undefined, "blocked");
     const first = store.attempts.listByTask(taskId); assert.equal(first.outcome, "success"); if (first.outcome !== "success") return;
     const attempt = first.value[0]!;
-    assert.equal(isOperatorRetryableBlock(attempt), true);
+    assert.equal(isOperatorRetryableBlock(attempt), true, JSON.stringify(attempt));
+    // A worker that already committed may have pushed work an operator must look at first.
+    if (attempt.state === "terminal" && attempt.diagnostic?.code === "permission_denied") assert.equal(isOperatorRetryableBlock({ ...attempt, finalCommit: "9".repeat(40) }), false);
     // A contract failure on output Claude actually returned is not pre-worker.
     if (attempt.state === "terminal" && attempt.diagnostic?.code === "binding_mismatch") assert.equal(isPreWorkerBlock({ ...attempt, diagnostic: { ...attempt.diagnostic, payloadDigest: "a".repeat(64) } }), false);
     assert.notEqual((await runtime.cycle()).outcome, "started");
