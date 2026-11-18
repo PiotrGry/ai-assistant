@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 
 import type { LeaseAcquireInput, LeaseId, LeaseRecord } from "./lease.js";
@@ -38,7 +39,23 @@ export interface ProductionRepositoryConfig {
   readonly baseRevision?: string;
   /** Remote fetched for the current baseBranch; defaults to origin. */
   readonly remoteName?: string;
+  /**
+   * Run by Pirx in the worktree before every worker Attempt, outside the worker sandbox and with
+   * network, e.g. `uv sync --frozen --extra dev`. The sandboxed worker then has the project
+   * environment it cannot install itself. Only commands from the operator's config run here.
+   */
+  readonly setupCommands?: readonly string[];
 }
+
+/** Runs one setup command; split on spaces, no shell. */
+export type ProductionSetupRunner = (command: string, cwd: string, signal: AbortSignal) => Promise<{ readonly ok: boolean; readonly message: string }>;
+const SETUP_TIMEOUT_MS = 600_000;
+const runSetupCommand: ProductionSetupRunner = (command, cwd, signal) => new Promise((done) => {
+  const [executable, ...args] = command.split(" ").filter(Boolean);
+  execFile(executable!, args, { cwd, signal, timeout: SETUP_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }, (error, _stdout, stderr) => {
+    done(error === null ? { ok: true, message: command } : { ok: false, message: `Setup command "${command}" failed: ${`${stderr}`.trim().slice(-400) || error.message}` });
+  });
+});
 
 /** Resolves the commit a new Task branch starts from. */
 export type ProductionBaseResolver = (repository: ProductionRepositoryConfig, signal: AbortSignal) => Promise<{ readonly revision?: string; readonly message: string }>;
@@ -78,6 +95,7 @@ export interface ProductionRuntimeOptions {
   readonly attemptIdFactory?: (taskId: TaskId, ordinal: number, now: UtcTimestamp) => AttemptId;
   readonly branchFactory?: (task: TaskSnapshot) => string;
   readonly baseResolver?: ProductionBaseResolver;
+  readonly setupRunner?: ProductionSetupRunner;
   /** Receives every failed Lease renewal, for diagnostics. */
   readonly onLeaseRenewalFailure?: (failure: SchedulerLeaseRenewalFailure) => void;
   readonly onWorkerInvocationError?: SchedulerOptions["onWorkerInvocationError"];
@@ -304,6 +322,10 @@ export class ProductionRuntime {
         const claimed = this.#store.workspaces.claim({ taskId: task.value.id, attemptId: attempt.value.id, repository: repository.repository, repositoryRoot: binding.repositoryRoot, assignedBranch: binding.assignedBranch, worktreePath: binding.worktreePath, expectedBaseRevision: binding.expectedBaseRevision, acquiredAt: this.#clock.now() });
         if (claimed.outcome !== "success") return { outcome: "unknown", reason: claimed.message };
       }
+    }
+    for (const command of repository.setupCommands ?? []) {
+      const setup = await (this.#options.setupRunner ?? runSetupCommand)(command, binding.worktreePath, signal);
+      if (!setup.ok) return { outcome: signal.aborted ? "cancelled" : "unknown", reason: setup.message.slice(0, 1_000) };
     }
     const input: WorkerRequestInput = { task: task.value, attempt: attempt.value, workerId: this.#options.workerId, provider: this.#options.provider, repository: repositoryParts(repository.repository)!, workspace: { branch: binding.assignedBranch, worktree: binding.worktreePath }, capabilityGrant: { grantedCapabilities: this.#options.workerCapabilities, resourceScope: { repository: repository.repository, branch: binding.assignedBranch, worktree: binding.worktreePath } }, correlationId: `${task.value.id}:${attempt.value.id}`, limits: { timeoutMs: this.#options.workerTimeoutMs ?? 30_000, maxOutputBytes: this.#options.workerOutputBytes ?? 16_384, maxErrorBytes: this.#options.workerErrorBytes ?? 16_384 }, ...(attempt.value.checkpointReference === undefined ? {} : { resumeContextReference: attempt.value.checkpointReference }) };
     const parsed = createWorkerRequest(input);

@@ -69,7 +69,7 @@ export interface HeadlessOrchestratorConfigSelection {
 }
 
 const TOP_LEVEL_KEYS = new Set(["schemaVersion", "databasePath", "workerId", "provider", "workerCapabilities", "repositories", "worktreeParent", "leaseDurationMs", "shutdownTimeoutMs", "workerTimeoutMs", "workerOutputBytes", "workerErrorBytes", "maximumConsecutiveResumeFailures", "cycleIntervalMs", "errorIntervalMs", "githubProjectOwner", "githubProjectNumber", "githubApiUrl", "githubTimeoutMs", "hostPowerOff"]);
-const REPOSITORY_KEYS = new Set(["repository", "repositoryRoot", "baseBranch", "baseRevision", "remoteName", "testCommands", "maxTurns", "attemptTimeLimitMs", "model", "delivery"]);
+const REPOSITORY_KEYS = new Set(["repository", "repositoryRoot", "baseBranch", "baseRevision", "remoteName", "testCommands", "setupCommands", "maxTurns", "attemptTimeLimitMs", "model", "delivery"]);
 const DELIVERY_KEYS = new Set(["releaseBranch", "featureWorkflowName", "releaseRequiredChecks", "featureRequiredApprovals", "releaseRequiredApprovals", "featureMergeMethod", "releaseMergeMethod", "requireMergeable", "postMerge"]);
 const POST_MERGE_KEYS = new Set(["checks", "mustReach", "optionalGraceMinutes", "timeoutMinutes"]);
 const POST_MERGE_CHECK_KEYS = new Set(["workflow", "branch", "optional"]);
@@ -137,6 +137,7 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
     need(item.baseRevision === undefined || (text(item.baseRevision, 64) && REVISION.test(item.baseRevision)), `${at}.baseRevision`, "must be a commit hash of 4 to 64 hexadecimal characters, or left out to start from the current baseBranch");
     need(text(item.remoteName, 128) && REMOTE.test(item.remoteName), `${at}.remoteName`, 'must be a git remote name such as "origin"');
     need(Array.isArray(item.testCommands) && item.testCommands.length <= 16, `${at}.testCommands`, "must be a list of at most 16 commands");
+    need(item.setupCommands === undefined || (Array.isArray(item.setupCommands) && item.setupCommands.length <= 8 && item.setupCommands.every((command) => text(command, 256) && TEST_COMMAND.test(command))), `${at}.setupCommands`, "must be a list of at most 8 commands that start with a build or package tool (uv, pnpm, npm, …)");
     for (const [commandIndex, command] of item.testCommands.entries()) need(text(command, 256) && TEST_COMMAND.test(command), `${at}.testCommands[${commandIndex}]`, "must start with pnpm, npm, yarn, bun, node, npx, python, python3, pytest, uv, cargo, go or make and use plain arguments without quotes or shell operators");
     need(item.maxTurns === undefined || integer(item.maxTurns, 2, CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxTurns), `${at}.maxTurns`, between(2, CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxTurns));
     need(item.attemptTimeLimitMs === undefined || integer(item.attemptTimeLimitMs, CLAUDE_CODE_WORKER_PROFILE_LIMITS.minimumAttemptTimeLimitMs, CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxAttemptTimeLimitMs), `${at}.attemptTimeLimitMs`, between(CLAUDE_CODE_WORKER_PROFILE_LIMITS.minimumAttemptTimeLimitMs, CLAUDE_CODE_WORKER_PROFILE_LIMITS.maxAttemptTimeLimitMs));
@@ -183,6 +184,7 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
     repositories.push(Object.freeze({
       repository: item.repository, repositoryRoot: resolve(item.repositoryRoot), baseBranch: item.baseBranch, ...(item.baseRevision === undefined ? {} : { baseRevision: item.baseRevision as string }), remoteName: item.remoteName,
       testCommands: Object.freeze([...item.testCommands] as string[]),
+      ...(item.setupCommands === undefined ? {} : { setupCommands: Object.freeze([...item.setupCommands] as string[]) }),
       ...(item.maxTurns === undefined ? {} : { maxTurns: item.maxTurns as number }),
       ...(item.attemptTimeLimitMs === undefined ? {} : { attemptTimeLimitMs: item.attemptTimeLimitMs as number }),
       ...(item.model === undefined ? {} : { model: item.model as string }),

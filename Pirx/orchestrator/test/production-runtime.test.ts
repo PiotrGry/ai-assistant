@@ -425,3 +425,29 @@ test("a base that cannot be resolved never reaches the worker", async () => {
     assert.equal(value.adapterCalls.value, 0);
   } finally { await dispose(value); }
 });
+
+test("setup commands run in the Task worktree, in order, before the worker", async () => {
+  const runs: Array<{ command: string; cwd: string; adapterCallsSoFar: number }> = [];
+  let value: Awaited<ReturnType<typeof setup>> | undefined;
+  value = await setup(undefined, {
+    repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision, setupCommands: ["uv sync --frozen --extra dev", "pnpm install --frozen-lockfile"] }],
+    setupRunner: async (command, cwd) => (runs.push({ command, cwd, adapterCallsSoFar: value?.adapterCalls.value ?? -1 }), { ok: true, message: command }),
+  });
+  try {
+    assert.equal((await value.runtime.cycle()).outcome, "started");
+    assert.deepEqual(runs.map((run) => run.command), ["uv sync --frozen --extra dev", "pnpm install --frozen-lockfile"]);
+    assert.ok(runs.every((run) => run.cwd.startsWith("/tmp/pirx-worktrees/") && run.adapterCallsSoFar === 0), JSON.stringify(runs));
+    assert.equal(value.adapterCalls.value, 1);
+  } finally { await dispose(value); }
+});
+
+test("a failed setup command never reaches the worker", async () => {
+  const value = await setup(undefined, {
+    repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop", baseRevision, setupCommands: ["uv sync --frozen --extra dev"] }],
+    setupRunner: async (command) => ({ ok: false, message: `Setup command "${command}" failed: no network` }),
+  });
+  try {
+    await value.runtime.cycle();
+    assert.equal(value.adapterCalls.value, 0);
+  } finally { await dispose(value); }
+});
