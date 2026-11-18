@@ -168,3 +168,50 @@ test("without a branch sync a behind PR blocks with the reason instead of waitin
     assert.match(result.message, /behind develop\. Branch sync is not configured/u);
   } finally { await dispose(value); }
 });
+
+/** zdrovena-reconciliation releases on its own: Pirx ends the Task at the base merge once the pipeline passed for it. */
+function selfReleasing(value: Awaited<ReturnType<typeof fixture>>, runs: { validation: Array<{ id: number; status: "completed" | "in_progress"; conclusion?: "success" | "failure" }> }): HeadlessDeliveryRepositoryRuntime {
+  value.shipment.result = { outcome: "recovery_success", taskId, attemptId, eventId: "fixture", mergeSha, pullRequest: { number: 210, url: "https://github.com/PiotrGry/ai-assistant/pull/210", state: "closed", headBranch: "pirx/task-headless-delivery", headSha: sha, baseBranch: "develop", merged: true, mergeCommitSha: mergeSha }, message: "feature merged" };
+  const started = value.store.featureMerges.start({ schemaVersion: 1, taskId, attemptId, repository: config.repository, pullRequestNodeId: "PR_210", pullRequestNumber: 210, pullRequestUrl: "https://github.com/PiotrGry/ai-assistant/pull/210", headBranch: "pirx/task-headless-delivery", baseBranch: "develop", expectedHeadSha: sha, state: "pending", createdAt: t1, updatedAt: t1, version: 1 });
+  if (started.outcome !== "success" || value.store.featureMerges.markMerged(taskId, attemptId, mergeSha, t1).outcome !== "success") throw new Error("feature merge fixture failed");
+  const ok = <T>(item: T) => ({ outcome: "success" as const, value: item, correlationId: "test", remoteOutcome: "accepted" as const });
+  return {
+    ...value.runtime,
+    config: { ...config, delivery: { ...config.delivery, postMerge: { checks: [{ workflow: "release-validation.yml", branch: "develop" }], mustReach: ["main"], optionalGraceMinutes: 15, timeoutMinutes: 180 } } },
+    postMerge: {
+      listWorkflowRuns: async () => ok(runs.validation.map((run) => ({ ...run, headSha: mergeSha, pullRequestNumbers: [], url: `https://github.com/o/r/actions/runs/${run.id}`, updatedAt: t1 }))),
+      contains: async (ancestor: string, head: string) => ok(ancestor === head),
+      branchHead: async () => ok(mergeSha),
+    },
+  };
+}
+
+test("a self-releasing repository completes the Task once its pipeline passed for the merge, without a Pirx Release", async () => {
+  const value = await fixture();
+  try {
+    const runs: Parameters<typeof selfReleasing>[1] = { validation: [{ id: 7, status: "in_progress" }] };
+    const runtime = selfReleasing(value, runs);
+    const waiting = await new HeadlessDeliveryCoordinator(value.store, [runtime], { now: () => t1 }).reconcile();
+    assert.equal(waiting.outcome, "waiting", waiting.message);
+    runs.validation = [{ id: 7, status: "completed", conclusion: "success" }];
+    const done = await new HeadlessDeliveryCoordinator(value.store, [runtime], { now: () => t1 }).reconcile();
+    assert.equal(done.outcome, "completed", done.message);
+    assert.equal(value.release.calls.length, 0);
+    const task = value.store.tasks.get(taskId);
+    assert.equal(task.outcome === "success" ? task.value.state : task.outcome, "completed");
+    assert.equal(task.outcome === "success" ? task.value.completionEvidence?.evidenceReference : "", `post-merge:${mergeSha}:7`);
+    assert.equal((await new HeadlessDeliveryCoordinator(value.store, [runtime], { now: () => t1 }).reconcile()).outcome, "idle");
+  } finally { await dispose(value); }
+});
+
+test("a pipeline failure after the merge keeps the Task open and names the failed run", async () => {
+  const value = await fixture();
+  try {
+    const runtime = selfReleasing(value, { validation: [{ id: 8, status: "completed", conclusion: "failure" }] });
+    const failed = await new HeadlessDeliveryCoordinator(value.store, [runtime], { now: () => t1 }).reconcile();
+    assert.equal(failed.outcome, "blocked", failed.message);
+    assert.match(failed.message, /release-validation\.yml on develop failed for bbbbbbb: run 8/u);
+    const task = value.store.tasks.get(taskId);
+    assert.equal(task.outcome === "success" ? task.value.state : task.outcome, "in_progress");
+  } finally { await dispose(value); }
+});
