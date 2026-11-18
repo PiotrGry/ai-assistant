@@ -109,16 +109,7 @@ export class FeatureMergeCoordinator {
     const remote = await this.#pullRequests.getPullRequest(record.pullRequest.number, context(request));
     if (remote.outcome !== "success") return remoteOutcome(request, remote, repository);
     if (!exactPull(remote.value, record)) return output(request, "stale", "Feature PR no longer matches the exact durable provenance.", { repository, pullRequest: remote.value });
-    if (remote.value.merged) {
-      // Merged by the repository itself (an auto-merge workflow) at the exact correlated head: record it, never merge again.
-      if (stored.outcome === "not_found") {
-        const recorded = this.#store.featureMerges.start({ schemaVersion: FEATURE_MERGE_SCHEMA_VERSION, taskId: request.taskId, attemptId: request.attemptId, repository, pullRequestNodeId: record.pullRequest.nodeId, pullRequestNumber: record.pullRequest.number, pullRequestUrl: record.pullRequest.url, headBranch: record.headBranch, baseBranch: record.baseBranch, expectedHeadSha: record.observedHeadSha, state: "pending", createdAt: request.now, updatedAt: request.now, version: 1 });
-        if (recorded.outcome !== "success") return remoteStorage(request, recorded, repository);
-      }
-      const merged = this.#store.featureMerges.markMerged(request.taskId, request.attemptId, mergedSha(remote.value) ?? remote.value.headSha, request.now);
-      if (merged.outcome !== "success") return remoteStorage(request, merged, repository);
-      return output(request, stored.outcome === "success" ? "replayed" : "merged", "Feature PR was already merged at the exact correlated head.", { repository, pullRequest: remote.value, mergeSha: mergedSha(remote.value) ?? remote.value.headSha });
-    }
+    if (remote.value.merged) return this.#recordRepositoryMerge(request, record, remote.value, stored.outcome === "success", repository);
     if (stored.outcome === "success" && stored.value.state === "pending") return output(request, "reconciliation_required", "A previous feature merge mutation is unresolved and must be reconciled before retry.", { repository, pullRequest: remote.value });
     if (stored.outcome === "success" && stored.value.state === "merged") return output(request, "reconciliation_required", "Durable merge state conflicts with the currently open remote pull request.", { repository, pullRequest: remote.value });
     if (remote.value.state !== "open" || (request.policy.requireMergeable === true && remote.value.mergeable !== true)) return output(request, "policy_blocked", "Feature PR is not open and policy-complete for merge.", { repository, pullRequest: remote.value });
@@ -141,6 +132,8 @@ export class FeatureMergeCoordinator {
     if (head.value.sha !== record.observedHeadSha) return output(request, "stale", "Feature branch head changed before merge.", { repository, checked });
     const beforeMerge = await this.#pullRequests.getPullRequest(record.pullRequest.number, context(request));
     if (beforeMerge.outcome !== "success") return remoteOutcome(request, beforeMerge, repository);
+    // The repository's own auto-merge can land between the two reads; that is the merge Pirx wanted, at the exact head.
+    if (beforeMerge.value.merged && exactPull(beforeMerge.value, record)) return this.#recordRepositoryMerge(request, record, beforeMerge.value, false, repository);
     if (!exactPull(beforeMerge.value, record) || beforeMerge.value.state !== "open" || beforeMerge.value.merged || (request.policy.requireMergeable === true && beforeMerge.value.mergeable !== true)) return output(request, "stale", "Feature PR changed after CI and before merge.", { repository, pullRequest: beforeMerge.value, checked });
     const planned = this.#store.featureMerges.start({ schemaVersion: FEATURE_MERGE_SCHEMA_VERSION, taskId: request.taskId, attemptId: request.attemptId, repository, pullRequestNodeId: record.pullRequest.nodeId, pullRequestNumber: record.pullRequest.number, pullRequestUrl: record.pullRequest.url, headBranch: record.headBranch, baseBranch: record.baseBranch, expectedHeadSha: record.observedHeadSha, state: "pending", createdAt: request.now, updatedAt: request.now, version: 1 });
     if (planned.outcome !== "success") return remoteStorage(request, planned, repository);
@@ -165,6 +158,17 @@ export class FeatureMergeCoordinator {
     const saved = this.#store.featureMerges.markMerged(request.taskId, request.attemptId, merged.value.sha ?? record.observedHeadSha, request.now);
     if (saved.outcome !== "success") return remoteStorage(request, saved, repository);
     return output(request, "merged", "Feature PR merged after exact-current-head policy checks.", { repository, pullRequest: beforeMerge.value, checked, ...(merged.value.sha === undefined ? {} : { mergeSha: merged.value.sha }) });
+  }
+
+  /** Merged by the repository itself (an auto-merge workflow) at the exact correlated head: record it, never merge again. */
+  #recordRepositoryMerge(request: FeatureMergeRequest, record: Parameters<typeof exactPull>[1], pull: GitHubPullRequest, alreadyRecorded: boolean, repository: string): FeatureMergeResult {
+    if (!alreadyRecorded) {
+      const recorded = this.#store.featureMerges.start({ schemaVersion: FEATURE_MERGE_SCHEMA_VERSION, taskId: request.taskId, attemptId: request.attemptId, repository, pullRequestNodeId: record.pullRequest.nodeId, pullRequestNumber: record.pullRequest.number, pullRequestUrl: record.pullRequest.url, headBranch: record.headBranch, baseBranch: record.baseBranch, expectedHeadSha: record.observedHeadSha, state: "pending", createdAt: request.now, updatedAt: request.now, version: 1 });
+      if (recorded.outcome !== "success") return remoteStorage(request, recorded, repository);
+    }
+    const merged = this.#store.featureMerges.markMerged(request.taskId, request.attemptId, mergedSha(pull) ?? pull.headSha, request.now);
+    if (merged.outcome !== "success") return remoteStorage(request, merged, repository);
+    return output(request, alreadyRecorded ? "replayed" : "merged", "Feature PR was already merged at the exact correlated head.", { repository, pullRequest: pull, mergeSha: mergedSha(pull) ?? pull.headSha });
   }
 }
 
