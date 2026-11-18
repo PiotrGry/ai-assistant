@@ -64,7 +64,7 @@ test("tracks consecutive resume failures and escalates exactly at the configured
   const value = await fixture();
   try {
     recordFailure(value.store, value.task.id, 1, "FAILED");
-    recordFailure(value.store, value.task.id, 2, "QUOTA_EXHAUSTED");
+    recordFailure(value.store, value.task.id, 2, "FAILED");
     const coordinator = new ResumeEscalationCoordinator(value.store, { maximumConsecutiveFailures: 2 });
     const before = coordinator.evaluate(value.task.id, times[4]);
     assert.equal(before.outcome, "no_action");
@@ -173,6 +173,53 @@ test("operator unblock refuses ambiguous results and Tasks not blocked by the li
     assert.equal(new ResumeEscalationCoordinator(value.store, { maximumConsecutiveFailures: 3 }).evaluate(value.task.id, times[5]).outcome, "escalated");
     assert.equal(unblockEscalatedTask(value.store, { taskId: value.task.id, operationId: "op-ambiguous", reason: "retry", unblockedAt: later[0] }).outcome, "invalid_record");
     assert.equal(unblockEscalatedTask(value.store, { taskId: value.task.id, operationId: "bad id with spaces", reason: "retry", unblockedAt: later[0] }).outcome, "invalid_record");
+  } finally {
+    value.store.close();
+    await rm(value.directory, { recursive: true, force: true });
+  }
+});
+
+test("a usage-limit Attempt is not a resume failure", async () => {
+  // gh-519 (2026-11-18): an Attempt that only hit the Claude 5-hour limit pushed the count to the bound,
+  // so the Task blocked for a human instead of resuming after the reset.
+  const value = await fixture();
+  try {
+    recordFailure(value.store, value.task.id, 1, "FAILED");
+    recordFailure(value.store, value.task.id, 2, "FAILED");
+    recordFailure(value.store, value.task.id, 3, "QUOTA_EXHAUSTED");
+    const evaluated = new ResumeEscalationCoordinator(value.store, { maximumConsecutiveFailures: 2 }).evaluate(value.task.id, times[5]);
+    assert.equal(evaluated.outcome, "no_action", JSON.stringify(evaluated));
+    if (evaluated.outcome === "no_action") assert.equal(evaluated.consecutiveResumeFailures, 1);
+  } finally {
+    value.store.close();
+    await rm(value.directory, { recursive: true, force: true });
+  }
+});
+
+test("an operator unblock starts a fresh count: the approved resume failing once does not escalate again", async () => {
+  const value = await fixture();
+  try {
+    recordFailure(value.store, value.task.id, 1, "FAILED");
+    recordFailure(value.store, value.task.id, 2, "FAILED");
+    recordFailure(value.store, value.task.id, 3, "FAILED");
+    const coordinator = new ResumeEscalationCoordinator(value.store, { maximumConsecutiveFailures: 2 });
+    assert.equal(coordinator.evaluate(value.task.id, times[5]).outcome, "escalated");
+    assert.equal(unblockEscalatedTask(value.store, { taskId: value.task.id, operationId: "op-fresh", reason: "Environment fixed", unblockedAt: later[0] }).outcome, "success");
+    assert.equal(value.store.leases.acquire({ id: "lease:fresh" as never, taskId: value.task.id, workerId: "pirx", now: later[1], durationMs: 60_000 }).outcome, "success");
+    const resumed = startResumedAttempt(value.store, value.task.id, { check: () => ({ repository: "present", branch: "present", worktree: "present", currentCommit: "present" }) }, { id: "resume-escalation-attempt-4" as AttemptId, worker: "pirx", provider: "test", branch: "pirx/resume-escalation", worktree: "/tmp/pirx-resume-escalation", currentCommit: "a".repeat(40) }, later[1]);
+    assert.equal(resumed.outcome, "ready", JSON.stringify(resumed));
+    if (resumed.outcome !== "ready" || !("attempt" in resumed)) return;
+    const ended = "2026-10-30T10:08:00.000Z" as UtcTimestamp;
+    const terminal = transitionAttempt(resumed.attempt, "running", { type: "finish", result: "FAILED", blockingReason: "FAILED after unblock", currentCommit: "a".repeat(40) }, ended);
+    if (!terminal.ok) throw new Error(terminal.error.message);
+    assert.equal(value.store.attempts.update(terminal.value, "running").outcome, "success");
+    const task = value.store.tasks.get(value.task.id); if (task.outcome !== "success") throw new Error("task");
+    const failed = transitionTask(task.value, "in_progress", { type: "fail", reason: "FAILED after unblock" }, ended);
+    if (!failed.ok) throw new Error(failed.error.message);
+    assert.equal(value.store.tasks.update(failed.value, { state: task.value.state, updatedAt: task.value.updatedAt }).outcome, "success");
+    const evaluated = coordinator.evaluate(value.task.id, ended);
+    assert.equal(evaluated.outcome, "no_action", JSON.stringify(evaluated));
+    if (evaluated.outcome === "no_action") assert.equal(evaluated.consecutiveResumeFailures, 1);
   } finally {
     value.store.close();
     await rm(value.directory, { recursive: true, force: true });
