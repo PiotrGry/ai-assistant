@@ -459,3 +459,32 @@ test("a failed setup command never reaches the worker", async () => {
     assert.equal(value.adapterCalls.value, 0);
   } finally { await dispose(value); }
 });
+
+test("a commit left with stray files resumes automatically from that commit", async () => {
+  // gh-526: the worker committed but left coverage scratch files; Pirx failed the Attempt, and the
+  // automatic resume then failed workspace validation with commit_mismatch on every cycle.
+  const observed = "f".repeat(40);
+  let calls = 0; let clock = now; const validated: string[] = [];
+  const adapter: WorkerPort = { execute: async (request) => {
+    calls += 1;
+    if (calls === 1) throw new WorkerFailureError(createWorkerFailureDiagnostic("git_state_mismatch", { stage: "git_state", providerMessage: "Assigned worktree is not clean after the reported commit: cov_before.json. Commit them if they belong to the change, otherwise delete them.", observedCommit: observed }));
+    return { kind: "worker_result", schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, correlationId: request.correlationId, outcome: "CODE_PUSHED", branch: request.workspace.branch, finalCommit: observed };
+  } };
+  const value = await setup(adapter, {
+    attemptIdFactory: (_task, ordinal) => `stray-attempt-${ordinal}` as AttemptId,
+    resumeWorkspaceValidator: { validate: async (request) => (validated.push(request.expectedCurrentCommit), { outcome: "valid", message: "exact durable workspace verified" }) },
+    clock: { now: () => clock },
+  });
+  try {
+    await value.runtime.cycle();
+    const first = value.store.attempts.listByTask(taskId);
+    assert.equal(first.outcome === "success" ? first.value[0]?.currentCommit : undefined, observed);
+    const ownership = value.store.workspaces.getByTask(taskId);
+    assert.equal(ownership.outcome === "success" ? ownership.value.currentRevision : undefined, observed);
+    clock = "2026-09-15T21:05:00.000Z" as UtcTimestamp;
+    const resumed = await value.runtime.cycle();
+    assert.equal(resumed.outcome, "started", JSON.stringify(resumed));
+    assert.deepEqual(validated, [observed]);
+    assert.equal(calls, 2);
+  } finally { await dispose(value); }
+});

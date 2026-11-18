@@ -42,9 +42,14 @@ export class GitWorkerStateVerifier implements WorkerGitStateVerifier {
     // Check branch and cleanliness before the push: a remote write must never precede a local state Pirx then rejects.
     const branch = await this.#git.run(["symbolic-ref", "--short", "HEAD"], request.workspace.worktree, 30_000);
     if (branch.outcome !== "success" || branch.stdout.trim() !== request.workspace.branch) return fail("Assigned worktree is not on the requested branch.");
-    const status = await this.#git.run(["status", "--porcelain=v1", "--untracked-files=all"], request.workspace.worktree, 30_000);
-    if (status.outcome !== "success" || status.stdout.length !== 0) return fail("Assigned worktree is not clean after the reported commit.");
     const head = await this.#git.run(["rev-parse", "HEAD"], request.workspace.worktree, 30_000);
+    const status = await this.#git.run(["status", "--porcelain=v1", "--untracked-files=all"], request.workspace.worktree, 30_000);
+    if (status.outcome !== "success" || status.stdout.length !== 0) {
+      // Name the leftovers and keep HEAD: the next Attempt resumes from the commit and only has to clean up (gh-526).
+      const leftovers = status.stdout.split("\n").map((line) => line.slice(3).trim()).filter(Boolean).slice(0, 10);
+      const observed = head.outcome === "success" && /^[0-9a-f]{40}$/u.test(head.stdout.trim().toLowerCase()) ? head.stdout.trim().toLowerCase() : undefined;
+      return { ok: false, rejected: false, ...(observed === undefined ? {} : { commit: observed }), message: `Assigned worktree is not clean after the reported commit${leftovers.length === 0 ? "." : `: ${leftovers.join(", ")}. Commit them if they belong to the change, otherwise delete them.`}` };
+    }
     // Workers often report an abbreviated SHA; it must still name HEAD exactly.
     if (head.outcome !== "success" || !head.stdout.trim().toLowerCase().startsWith(result.finalCommit.toLowerCase())) return fail(`Local Git HEAD ${head.stdout.trim() || "unknown"} does not match the worker result ${result.finalCommit}.`);
     const commit = head.stdout.trim().toLowerCase();
