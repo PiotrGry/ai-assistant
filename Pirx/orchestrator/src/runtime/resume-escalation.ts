@@ -41,7 +41,11 @@ function consecutiveResumeFailures(history: readonly AttemptSnapshot[]): readonl
   for (let index = history.length - 1; index >= 0; index -= 1) {
     const attempt = history[index];
     if (attempt === undefined || attempt.predecessorAttemptId === undefined || attempt.state !== "terminal" || attempt.result === "CODE_PUSHED") break;
-    failures.unshift(attempt);
+    // A usage limit says nothing about whether resuming works; waiting for the reset is Pirx's job.
+    // ponytail: an error misread as a quota resumes once per cooldown forever; bound quota Attempts separately if that shows up.
+    if (attempt.result !== "QUOTA_EXHAUSTED") failures.unshift(attempt);
+    // An operator unblock approves a fresh start: failures before it no longer count.
+    if (attempt.checkpointReference?.startsWith("operator-unblock-") === true) break;
   }
   return Object.freeze(failures);
 }
@@ -251,7 +255,7 @@ export function unblockEscalatedTask(store: RuntimeSqliteStore, input: OperatorU
       findings: [...base.findings, `Operator unblock reason: ${reason}`, ...(revision !== undefined ? [`Operator moved the workspace to ${revision}.`] : target !== undefined ? [`Resuming from the refused commit ${target}.`] : [])],
       evidence: [...base.evidence, { reference: `operation:${input.operationId}`, summary: "Operator explicitly approved one more resume Attempt." }],
       lastAction: "operator unblocked the Task after resume escalation",
-      resumeInstruction: "Resume once from the latest Attempt evidence; another failure escalates again.",
+      resumeInstruction: "Resume from the latest Attempt evidence; failures from here on count afresh toward the resume limit.",
     });
     if (!created.ok) return { outcome: "invalid_record" as const, message: created.violations[0]?.message ?? "Operator unblock Checkpoint is invalid." };
     const saved = checkpoints.save(created.value);
