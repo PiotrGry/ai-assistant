@@ -8,6 +8,7 @@ import type { RuntimeSqliteStore } from "./sqlite.js";
 import type { HeadlessRepositoryConfig } from "./headless-config.js";
 import { transitionTask, type TaskSnapshot, type TerminalAttemptSnapshot, type UtcTimestamp } from "./task-domain.js";
 import { watchPostMerge, type PostMergeGateway } from "./post-merge-watch.js";
+import type { TaskBranchCleanup } from "./task-branch-cleanup.js";
 
 export const HEADLESS_DELIVERY_SCHEMA_VERSION = 1 as const;
 export type HeadlessDeliveryOutcome =
@@ -39,6 +40,8 @@ export interface HeadlessDeliveryRepositoryRuntime {
   readonly branchSync?: Pick<FeatureBranchSyncService, "sync">;
   /** Reads the repository's own pipeline; required when the delivery policy sets postMerge. */
   readonly postMerge?: PostMergeGateway;
+  /** Deletes the Task branch and worktree once the pipeline passed for the merged change. */
+  readonly branchCleanup?: Pick<TaskBranchCleanup, "cleanup">;
 }
 
 export interface HeadlessDeliveryCoordinatorOptions {
@@ -154,7 +157,9 @@ export class HeadlessDeliveryCoordinator {
     if (!completed.ok) return output("reconciliation_required", false, completed.error.message, extra);
     const saved = this.#store.tasks.update(completed.value, { state: task.state, updatedAt: task.updatedAt });
     if (saved.outcome !== "success") return output("reconciliation_required", false, saved.message, extra);
-    return output("completed", true, `Task completed: ${watched.message}`, extra);
+    // ponytail: a failed cleanup is reported once and not retried; the branch and worktree then stay for a human.
+    const cleaned = repository.branchCleanup === undefined ? undefined : await repository.branchCleanup.cleanup({ taskId: task.id, attemptId: attempt.id, remoteName: repository.config.remoteName, baseBranch: repository.config.baseBranch, now });
+    return output("completed", true, `Task completed: ${watched.message}${cleaned === undefined ? "" : ` ${cleaned.message}`}`, extra);
   }
 
   async #syncBranch(task: TaskSnapshot, attempt: TerminalAttemptSnapshot, repository: HeadlessDeliveryRepositoryRuntime, shipment: ShipmentCycleResult, now: UtcTimestamp): Promise<HeadlessDeliveryResult> {

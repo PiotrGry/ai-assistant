@@ -16,6 +16,7 @@ import { diagnosticContext } from "./runtime/diagnostic-context.js";
 import { HeadlessConfigurationError, loadHeadlessOrchestratorConfig } from "./runtime/headless-config.js";
 import { HeadlessDeliveryCoordinator } from "./runtime/headless-delivery.js";
 import type { PostMergeGateway } from "./runtime/post-merge-watch.js";
+import { TaskBranchCleanup } from "./runtime/task-branch-cleanup.js";
 import { GitHubQueueReconciler, GitHubQueueSynchronizer } from "./runtime/github-queue-sync.js";
 import { HeadlessOrchestratorService, type HeadlessControlPort, type HeadlessDeliveryReconciliationPort, type HeadlessQueueReconciliationPort, type HeadlessServiceEvent } from "./runtime/headless-service.js";
 import { SqliteHeadlessControlPort } from "./runtime/orchestrator-control.js";
@@ -161,6 +162,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
       releaseMerge: new ReleaseMergeCoordinator(store, item.pullRequests, item.ci),
       branchSync: new FeatureBranchSyncService(store),
       postMerge: item.postMerge,
+      branchCleanup: new TaskBranchCleanup(store),
     })), { timeoutMs: config.githubTimeoutMs });
     const service = new HeadlessOrchestratorService(runtime, {
       cycleIntervalMs: config.cycleIntervalMs, errorIntervalMs: config.errorIntervalMs,
