@@ -404,3 +404,24 @@ test("two failed Lease renewals stop the worker, record each failure and leave t
     }
   } finally { await dispose(value); }
 });
+
+test("without a pinned baseRevision a new Task branch starts from the resolved current base", async () => {
+  const provisioned: string[] = [];
+  const value = await setup(undefined, {
+    repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop" }],
+    baseResolver: async () => ({ revision: "d".repeat(40), message: "origin/develop" }),
+    workspace: { provision: async (request) => (provisioned.push(request.expectedBaseRevision), { outcome: "created", message: "workspace ready", binding: { schemaVersion: 1, taskId: request.taskId, attemptId: request.attemptId, repositoryRoot: request.repositoryRoot, assignedBranch: request.assignedBranch, expectedBaseRevision: request.expectedBaseRevision, worktreePath: resolve(request.worktreeParent, worktreeDirectoryName(request.taskId, request.attemptId)) } }) },
+  });
+  try {
+    assert.equal((await value.runtime.cycle()).outcome, "started");
+    assert.deepEqual(provisioned, ["d".repeat(40)]);
+  } finally { await dispose(value); }
+});
+
+test("a base that cannot be resolved never reaches the worker", async () => {
+  const value = await setup(undefined, { repositories: [{ repository, repositoryRoot: "/repo", baseBranch: "develop" }], baseResolver: async () => ({ message: "Fetching origin/develop failed: offline" }) });
+  try {
+    await value.runtime.cycle();
+    assert.equal(value.adapterCalls.value, 0);
+  } finally { await dispose(value); }
+});

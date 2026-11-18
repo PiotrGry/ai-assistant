@@ -10,7 +10,7 @@ import { quotaCooldownFromDiagnostic } from "./worker-recovery.js";
 import { startResumedAttempt } from "./resume.js";
 import { RESUME_ESCALATION_LIMITS, ResumeEscalationCoordinator, isOperatorUnblockCheckpoint, isOperatorRetryableBlock } from "./resume-escalation.js";
 import { WorkerLifecycleCoordinator } from "./worker-lifecycle.js";
-import { WORKSPACE_PROVISION_LIMITS, WorkspaceProvisioner, worktreeDirectoryName, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
+import { GitWorkspaceCommandRunner, WORKSPACE_PROVISION_LIMITS, WorkspaceProvisioner, gitCause, worktreeDirectoryName, type WorkspaceBinding, type WorkspaceProvisionRequest } from "./workspace.js";
 import { WORKSPACE_RESUME_VALIDATION_LIMITS, WorkspaceResumeValidator, type WorkspaceResumeValidationRequest, type WorkspaceResumeValidationResult } from "./workspace-resume-validator.js";
 import type { RunnableTaskCandidate } from "./task-selection.js";
 import type { AttemptId, AttemptSnapshot, TaskId, TaskSnapshot, UtcTimestamp } from "./task-domain.js";
@@ -34,7 +34,24 @@ export interface ProductionRepositoryConfig {
   readonly repository: string;
   readonly repositoryRoot: string;
   readonly baseBranch: string;
-  readonly baseRevision: string;
+  /** Pins new Task branches to one commit. Without it they start from the current remote baseBranch. */
+  readonly baseRevision?: string;
+  /** Remote fetched for the current baseBranch; defaults to origin. */
+  readonly remoteName?: string;
+}
+
+/** Resolves the commit a new Task branch starts from. */
+export type ProductionBaseResolver = (repository: ProductionRepositoryConfig, signal: AbortSignal) => Promise<{ readonly revision?: string; readonly message: string }>;
+
+const FULL_SHA = /^[0-9a-f]{40}$/u;
+export async function currentRemoteBase(repository: ProductionRepositoryConfig, signal: AbortSignal): Promise<{ readonly revision?: string; readonly message: string }> {
+  if (repository.baseRevision !== undefined) return { revision: repository.baseRevision, message: "pinned baseRevision" };
+  const git = new GitWorkspaceCommandRunner(); const remote = repository.remoteName ?? "origin";
+  const fetched = await git.run(["fetch", "--no-tags", remote, `refs/heads/${repository.baseBranch}`], repository.repositoryRoot, WORKSPACE_PROVISION_LIMITS.timeoutMs, signal);
+  if (fetched.outcome !== "success") return { message: `Fetching ${remote}/${repository.baseBranch} failed: ${gitCause(fetched)}` };
+  const head = await git.run(["rev-parse", "FETCH_HEAD"], repository.repositoryRoot, WORKSPACE_PROVISION_LIMITS.timeoutMs, signal);
+  const revision = head.stdout.trim();
+  return head.outcome === "success" && FULL_SHA.test(revision) ? { revision, message: `${remote}/${repository.baseBranch} at ${revision}` } : { message: `Reading the fetched ${repository.baseBranch} failed: ${gitCause(head)}` };
 }
 
 export interface ProductionWorkspacePort {
@@ -60,6 +77,7 @@ export interface ProductionRuntimeOptions {
   readonly clock?: { now(): UtcTimestamp };
   readonly attemptIdFactory?: (taskId: TaskId, ordinal: number, now: UtcTimestamp) => AttemptId;
   readonly branchFactory?: (task: TaskSnapshot) => string;
+  readonly baseResolver?: ProductionBaseResolver;
   /** Receives every failed Lease renewal, for diagnostics. */
   readonly onLeaseRenewalFailure?: (failure: SchedulerLeaseRenewalFailure) => void;
   readonly onWorkerInvocationError?: SchedulerOptions["onWorkerInvocationError"];
@@ -95,7 +113,7 @@ function validateOptions(options: ProductionRuntimeOptions): void {
   if (!Number.isSafeInteger(options.leaseDurationMs) || options.leaseDurationMs <= 0 || options.leaseDurationMs > PRODUCTION_RUNTIME_LIMITS.leaseDurationMs) throw new RangeError("Production Lease duration is outside its bound.");
   if (!Array.isArray(options.repositories) || options.repositories.length === 0) throw new RangeError("Production repository allowlist must contain at least one repository.");
   for (const repository of options.repositories) {
-    if (!validText(repository.repository, PRODUCTION_RUNTIME_LIMITS.repository) || repositoryParts(repository.repository) === undefined || !validText(repository.repositoryRoot, PRODUCTION_RUNTIME_LIMITS.repositoryRoot) || !resolve(repository.repositoryRoot).startsWith("/") || !validBranch(repository.baseBranch) || !validRevision(repository.baseRevision)) throw new RangeError("Production repository configuration is invalid.");
+    if (!validText(repository.repository, PRODUCTION_RUNTIME_LIMITS.repository) || repositoryParts(repository.repository) === undefined || !validText(repository.repositoryRoot, PRODUCTION_RUNTIME_LIMITS.repositoryRoot) || !resolve(repository.repositoryRoot).startsWith("/") || !validBranch(repository.baseBranch) || (repository.baseRevision !== undefined && !validRevision(repository.baseRevision))) throw new RangeError("Production repository configuration is invalid.");
   }
   if (new Set(options.repositories.map((item) => item.repository)).size !== options.repositories.length) throw new RangeError("Production repository allowlist contains duplicates.");
   for (const [value, maximum, label] of [[options.shutdownTimeoutMs ?? 5_000, PRODUCTION_RUNTIME_LIMITS.shutdownTimeoutMs, "shutdown"], [options.workerTimeoutMs ?? 30_000, PRODUCTION_RUNTIME_LIMITS.workerTimeoutMs, "worker"], [options.workerOutputBytes ?? 16_384, PRODUCTION_RUNTIME_LIMITS.workerOutputBytes, "worker output"]] as const) if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) throw new RangeError(`Production ${label} limit is invalid.`);
@@ -264,7 +282,7 @@ export class ProductionRuntime {
   async #invoke(candidate: RunnableTaskCandidate, attemptIdValue: AttemptId, signal: AbortSignal): Promise<ReturnType<typeof workerExecutionResult>> {
     const task = this.#store.tasks.get(candidate.task.id); const attempt = this.#store.attempts.get(attemptIdValue); const repository = task.outcome === "success" ? repositoryFor(task.value, this.#repositories) : undefined;
     if (task.outcome !== "success" || attempt.outcome !== "success" || repository === undefined || attempt.value.branch === undefined || attempt.value.worktree === undefined) return { outcome: "unknown", reason: "Assigned Task, Attempt, repository, or workspace identity is unavailable." };
-    const workspaceRequest: WorkspaceProvisionRequest = { taskId: task.value.id, attemptId: attempt.value.id, repositoryRoot: repository.repositoryRoot, assignedBranch: attempt.value.branch, expectedBaseRevision: repository.baseRevision, worktreeParent: this.#options.worktreeParent, // Git steps have their own bound; workerTimeoutMs is the worker idle window.
+    const workspaceRequest: Omit<WorkspaceProvisionRequest, "expectedBaseRevision"> = { taskId: task.value.id, attemptId: attempt.value.id, repositoryRoot: repository.repositoryRoot, assignedBranch: attempt.value.branch, worktreeParent: this.#options.worktreeParent, // Git steps have their own bound; workerTimeoutMs is the worker idle window.
       timeoutMs: WORKSPACE_PROVISION_LIMITS.timeoutMs, signal };
     const ownership = this.#store.workspaces.getByTaskAttempt(task.value.id, attempt.value.id);
     let binding: WorkspaceBinding | undefined;
@@ -272,13 +290,15 @@ export class ProductionRuntime {
     else {
       const predecessor = attempt.value.predecessorAttemptId === undefined ? undefined : this.#store.workspaces.getByTask(task.value.id);
       if (predecessor?.outcome === "success") {
-        if (attempt.value.predecessorAttemptId !== predecessor.value.attemptId || predecessor.value.repository !== repository.repository || predecessor.value.assignedBranch !== attempt.value.branch || predecessor.value.expectedBaseRevision !== repository.baseRevision) return { outcome: "unknown", reason: "Retry workspace ownership does not match its predecessor Attempt." };
+        if (attempt.value.predecessorAttemptId !== predecessor.value.attemptId || predecessor.value.repository !== repository.repository || predecessor.value.assignedBranch !== attempt.value.branch || (repository.baseRevision !== undefined && predecessor.value.expectedBaseRevision !== repository.baseRevision)) return { outcome: "unknown", reason: "Retry workspace ownership does not match its predecessor Attempt." };
         const transferred = this.#store.workspaces.transfer({ taskId: task.value.id, fromAttemptId: predecessor.value.attemptId, toAttemptId: attempt.value.id, transferredAt: this.#clock.now() });
         if (transferred.outcome !== "success") return { outcome: "unknown", reason: transferred.message };
         binding = { schemaVersion: 1, taskId: transferred.value.taskId, attemptId: transferred.value.attemptId, repositoryRoot: transferred.value.repositoryRoot, assignedBranch: transferred.value.assignedBranch, expectedBaseRevision: transferred.value.expectedBaseRevision, worktreePath: transferred.value.worktreePath };
       } else {
         if (predecessor !== undefined && predecessor.outcome !== "not_found") return { outcome: "unknown", reason: predecessor.message };
-        const provisioned = await this.#workspace.provision(workspaceRequest);
+        const base = await (this.#options.baseResolver ?? currentRemoteBase)(repository, signal);
+        if (base.revision === undefined) return { outcome: signal.aborted ? "cancelled" : "unknown", reason: base.message };
+        const provisioned = await this.#workspace.provision({ ...workspaceRequest, expectedBaseRevision: base.revision });
         if (provisioned.binding === undefined || !["created", "existing_compatible"].includes(provisioned.outcome)) return { outcome: signal.aborted ? "cancelled" : "unknown", reason: provisioned.message };
         binding = provisioned.binding;
         const claimed = this.#store.workspaces.claim({ taskId: task.value.id, attemptId: attempt.value.id, repository: repository.repository, repositoryRoot: binding.repositoryRoot, assignedBranch: binding.assignedBranch, worktreePath: binding.worktreePath, expectedBaseRevision: binding.expectedBaseRevision, acquiredAt: this.#clock.now() });

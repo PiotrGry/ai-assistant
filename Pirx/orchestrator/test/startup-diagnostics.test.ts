@@ -228,7 +228,7 @@ test("preflight names a base revision and a remote the checkout does not have, a
       }),
     });
     const problems = new Map(findings.filter((finding) => finding.outcome === "problem").map((finding) => [finding.check, finding.detail]));
-    assert.match(problems.get("repository:PiotrGry/zdrovena-reconciliation:baseRevision")!, /Commit abc1234 is not in .*Fetch it, or set baseRevision to a commit of develop/u);
+    assert.match(problems.get("repository:PiotrGry/zdrovena-reconciliation:baseRevision")!, /Commit abc1234 is not in .*Fetch it, set baseRevision to a commit of develop, or leave it out/u);
     assert.match(problems.get("repository:PiotrGry/zdrovena-reconciliation:remoteName")!, /no git remote named origin/u);
     assert.match(problems.get("claude")!, /not on the daemon's PATH/u);
     assert.match(problems.get("github:project")!, /The check itself failed: socket hang up/u);

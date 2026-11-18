@@ -134,7 +134,7 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
     need(text(item.repository, 512) && REPOSITORY.test(item.repository), `${at}.repository`, 'must look like "owner/name"');
     need(text(item.repositoryRoot) && isAbsolute(item.repositoryRoot) && !UNSAFE_PATH.test(item.repositoryRoot), `${at}.repositoryRoot`, "must be an absolute path without shell or glob characters");
     need(text(item.baseBranch, 512) && BRANCH.test(item.baseBranch) && !item.baseBranch.includes(".."), `${at}.baseBranch`, "must be a branch name");
-    need(text(item.baseRevision, 64) && REVISION.test(item.baseRevision), `${at}.baseRevision`, "must be a commit hash of 4 to 64 hexadecimal characters");
+    need(item.baseRevision === undefined || (text(item.baseRevision, 64) && REVISION.test(item.baseRevision)), `${at}.baseRevision`, "must be a commit hash of 4 to 64 hexadecimal characters, or left out to start from the current baseBranch");
     need(text(item.remoteName, 128) && REMOTE.test(item.remoteName), `${at}.remoteName`, 'must be a git remote name such as "origin"');
     need(Array.isArray(item.testCommands) && item.testCommands.length <= 16, `${at}.testCommands`, "must be a list of at most 16 commands");
     for (const [commandIndex, command] of item.testCommands.entries()) need(text(command, 256) && TEST_COMMAND.test(command), `${at}.testCommands[${commandIndex}]`, "must start with pnpm, npm, yarn, bun, node, npx, python, python3, pytest, uv, cargo, go or make and use plain arguments without quotes or shell operators");
@@ -181,7 +181,7 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
       }
     }
     repositories.push(Object.freeze({
-      repository: item.repository, repositoryRoot: resolve(item.repositoryRoot), baseBranch: item.baseBranch, baseRevision: item.baseRevision, remoteName: item.remoteName,
+      repository: item.repository, repositoryRoot: resolve(item.repositoryRoot), baseBranch: item.baseBranch, ...(item.baseRevision === undefined ? {} : { baseRevision: item.baseRevision as string }), remoteName: item.remoteName,
       testCommands: Object.freeze([...item.testCommands] as string[]),
       ...(item.maxTurns === undefined ? {} : { maxTurns: item.maxTurns as number }),
       ...(item.attemptTimeLimitMs === undefined ? {} : { attemptTimeLimitMs: item.attemptTimeLimitMs as number }),
