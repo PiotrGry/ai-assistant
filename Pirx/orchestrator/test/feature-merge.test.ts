@@ -199,6 +199,26 @@ test("a provider failure names GitHub's own error", async () => {
   } finally { await close(value); }
 });
 
+test("a PR the repository merges between Pirx's reads is recorded as merged, not as stale", async () => {
+  // gh-525 (2026-11-18): auto-merge-develop merged PR #527 two seconds before Pirx's pre-merge read;
+  // the first read saw it open, the second merged, and the cycle blocked as stale_or_conflicting_evidence.
+  const value = await fixture();
+  try {
+    const read = value.github.getPullRequest.bind(value.github);
+    value.github.getPullRequest = async () => {
+      // The first read sees the PR open; by the next one the repository's auto-merge has merged it.
+      if (value.github.readCalls >= 1) value.github.pull = { ...value.github.pull, state: "closed", merged: true, mergeCommitSha: mergeSha };
+      return read();
+    };
+    const output = await new FeatureMergeCoordinator(value.store, value.github, value.ci).merge(request());
+    assert.equal(output.outcome, "merged", JSON.stringify(output));
+    assert.equal(output.mergeSha, mergeSha);
+    assert.equal(value.github.mergeCalls, 0);
+    const ledger = value.store.featureMerges.getByTaskAttempt(taskId, attemptId);
+    assert.equal(ledger.outcome === "success" ? ledger.value.state : ledger.outcome, "merged");
+  } finally { await close(value); }
+});
+
 test("reconciles an uncertain merge, but never retries an unresolved mutation", async () => {
   const reconciled = await fixture();
   try {
