@@ -241,6 +241,20 @@ export class GitHubActionsGateway implements GitHubActionsReadGateway {
     return run === undefined ? malformed(result.correlationId, result.response) : { ...result, value: run };
   }
 
+  /** The newest runs of one workflow file on one branch, newest first. */
+  async listWorkflowRunsOnBranch(workflow: string, branch: string, context: GitHubRequestContext): Promise<GitHubOperationResult<readonly GitHubActionsWorkflowRun[]>> {
+    const result = await this.#read<RestWorkflowRunsPayload>({
+      method: "GET",
+      path: `${repositoryPath(this.#config)}/actions/workflows/${encodeURIComponent(workflow)}/runs`,
+      query: { branch, per_page: 20 },
+    }, context);
+    if (result.outcome !== "success") return result;
+    if (!isRecord(result.value) || !Array.isArray(result.value.workflow_runs)) return malformed(result.correlationId, result.response);
+    const runs = result.value.workflow_runs.map(mapRun);
+    if (runs.some((run): run is undefined => run === undefined)) return malformed(result.correlationId, result.response);
+    return { ...result, value: runs as GitHubActionsWorkflowRun[] };
+  }
+
   async listWorkflowRunsForPullRequest(
     pullRequestNumber: number,
     context: GitHubRequestContext,

@@ -6,6 +6,7 @@ import { PRODUCTION_RUNTIME_LIMITS, type ProductionRepositoryConfig } from "./pr
 import { HEADLESS_SERVICE_LIMITS } from "./headless-service.js";
 import { CLAUDE_CODE_WORKER_PROFILE_LIMITS, CLAUDE_MODEL_PATTERN, CODE_WORKER_CAPABILITIES } from "../claude/worker-profile.js";
 import type { ReleaseMergeMethod } from "./release-merge.js";
+import type { PostMergeCheck, PostMergePolicy } from "./post-merge-watch.js";
 
 export const HEADLESS_CONFIG_SCHEMA_VERSION = 1 as const;
 
@@ -30,6 +31,8 @@ export interface HeadlessDeliveryPolicyConfig {
   readonly featureMergeMethod: "merge";
   readonly releaseMergeMethod: ReleaseMergeMethod;
   readonly requireMergeable: boolean;
+  /** Set for a repository that releases on its own: the Task ends at the base merge once this pipeline passed. */
+  readonly postMerge?: PostMergePolicy;
 }
 
 export interface HeadlessOrchestratorConfig {
@@ -67,7 +70,10 @@ export interface HeadlessOrchestratorConfigSelection {
 
 const TOP_LEVEL_KEYS = new Set(["schemaVersion", "databasePath", "workerId", "provider", "workerCapabilities", "repositories", "worktreeParent", "leaseDurationMs", "shutdownTimeoutMs", "workerTimeoutMs", "workerOutputBytes", "workerErrorBytes", "maximumConsecutiveResumeFailures", "cycleIntervalMs", "errorIntervalMs", "githubProjectOwner", "githubProjectNumber", "githubApiUrl", "githubTimeoutMs", "hostPowerOff"]);
 const REPOSITORY_KEYS = new Set(["repository", "repositoryRoot", "baseBranch", "baseRevision", "remoteName", "testCommands", "maxTurns", "attemptTimeLimitMs", "model", "delivery"]);
-const DELIVERY_KEYS = new Set(["releaseBranch", "featureWorkflowName", "releaseRequiredChecks", "featureRequiredApprovals", "releaseRequiredApprovals", "featureMergeMethod", "releaseMergeMethod", "requireMergeable"]);
+const DELIVERY_KEYS = new Set(["releaseBranch", "featureWorkflowName", "releaseRequiredChecks", "featureRequiredApprovals", "releaseRequiredApprovals", "featureMergeMethod", "releaseMergeMethod", "requireMergeable", "postMerge"]);
+const POST_MERGE_KEYS = new Set(["checks", "mustReach", "optionalGraceMinutes", "timeoutMinutes"]);
+const POST_MERGE_CHECK_KEYS = new Set(["workflow", "branch", "optional"]);
+const WORKFLOW_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,250}\.ya?ml$/u;
 const SENSITIVE_KEY = /^(?:token|secret|password|passwd|api[_-]?key|authorization|cookie|private[_-]?key|credential|connection[_-]?string)$/iu;
 const SENSITIVE_VALUE = /(?:-----BEGIN [^-]*PRIVATE KEY-----|\bbearer\s+[A-Za-z0-9._~+/=-]+|\b(?:ghp_|github_pat_|xox[baprs]-|sk-)[A-Za-z0-9._-]+)/iu;
 const SAFE_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
@@ -148,13 +154,39 @@ export function parseHeadlessOrchestratorConfig(value: unknown): HeadlessOrchest
     need(delivery.featureMergeMethod === "merge", `${at}.delivery.featureMergeMethod`, 'must be "merge"');
     need(["squash", "merge", "rebase"].includes(String(delivery.releaseMergeMethod)), `${at}.delivery.releaseMergeMethod`, 'must be "squash", "merge" or "rebase"');
     need(typeof delivery.requireMergeable === "boolean", `${at}.delivery.requireMergeable`, "must be true or false");
+    let postMerge: PostMergePolicy | undefined;
+    if (delivery.postMerge !== undefined) {
+      const value = delivery.postMerge; const where = `${at}.delivery.postMerge`;
+      need(record(value), where, "must be a JSON object");
+      if (record(value)) {
+        needKnownKeys(value, POST_MERGE_KEYS, where);
+        const branch = (name: unknown): name is string => text(name, 512) && BRANCH.test(name) && !name.includes("..");
+        const checkList = Array.isArray(value.checks) ? value.checks : [];
+        need(Array.isArray(value.checks) && checkList.length > 0 && checkList.length <= 16, `${where}.checks`, "must list 1 to 16 workflow checks");
+        const parsed: PostMergeCheck[] = [];
+        checkList.forEach((check, index) => {
+          need(record(check), `${where}.checks[${index}]`, "must be a JSON object");
+          if (!record(check)) return;
+          needKnownKeys(check, POST_MERGE_CHECK_KEYS, `${where}.checks[${index}]`);
+          need(typeof check.workflow === "string" && WORKFLOW_FILE.test(check.workflow), `${where}.checks[${index}].workflow`, "must be a workflow file name such as release-validation.yml");
+          need(branch(check.branch), `${where}.checks[${index}].branch`, "must be a branch name");
+          need(check.optional === undefined || typeof check.optional === "boolean", `${where}.checks[${index}].optional`, "must be true or false");
+          parsed.push(Object.freeze({ workflow: check.workflow as string, branch: check.branch as string, ...(check.optional === true ? { optional: true } : {}) }));
+        });
+        const reach = value.mustReach ?? [];
+        need(Array.isArray(reach) && reach.length <= 8 && reach.every(branch), `${where}.mustReach`, "must list up to 8 branch names");
+        need(value.optionalGraceMinutes === undefined || integer(value.optionalGraceMinutes, 1, 240), `${where}.optionalGraceMinutes`, between(1, 240));
+        need(value.timeoutMinutes === undefined || integer(value.timeoutMinutes, 10, 1_440), `${where}.timeoutMinutes`, between(10, 1_440));
+        postMerge = Object.freeze({ checks: Object.freeze(parsed), mustReach: Object.freeze([...(Array.isArray(reach) ? reach : [])] as string[]), optionalGraceMinutes: (value.optionalGraceMinutes as number | undefined) ?? 15, timeoutMinutes: (value.timeoutMinutes as number | undefined) ?? 180 });
+      }
+    }
     repositories.push(Object.freeze({
       repository: item.repository, repositoryRoot: resolve(item.repositoryRoot), baseBranch: item.baseBranch, baseRevision: item.baseRevision, remoteName: item.remoteName,
       testCommands: Object.freeze([...item.testCommands] as string[]),
       ...(item.maxTurns === undefined ? {} : { maxTurns: item.maxTurns as number }),
       ...(item.attemptTimeLimitMs === undefined ? {} : { attemptTimeLimitMs: item.attemptTimeLimitMs as number }),
       ...(item.model === undefined ? {} : { model: item.model as string }),
-      delivery: Object.freeze({ releaseBranch: delivery.releaseBranch, featureWorkflowName: delivery.featureWorkflowName, releaseRequiredChecks: Object.freeze([...checks] as string[]), featureRequiredApprovals: delivery.featureRequiredApprovals, releaseRequiredApprovals: delivery.releaseRequiredApprovals, featureMergeMethod: "merge", releaseMergeMethod: delivery.releaseMergeMethod as ReleaseMergeMethod, requireMergeable: delivery.requireMergeable }),
+      delivery: Object.freeze({ releaseBranch: delivery.releaseBranch, featureWorkflowName: delivery.featureWorkflowName, releaseRequiredChecks: Object.freeze([...checks] as string[]), featureRequiredApprovals: delivery.featureRequiredApprovals, releaseRequiredApprovals: delivery.releaseRequiredApprovals, featureMergeMethod: "merge", releaseMergeMethod: delivery.releaseMergeMethod as ReleaseMergeMethod, requireMergeable: delivery.requireMergeable, ...(postMerge === undefined ? {} : { postMerge }) }),
     }));
   }
   need(new Set(repositories.map((item) => item.repository)).size === repositories.length, "repositories", "must not list the same repository twice");

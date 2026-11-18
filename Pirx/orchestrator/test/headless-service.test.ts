@@ -350,3 +350,13 @@ test("a projection or status write that throws is reported with its location, no
   assert.equal(JSON.stringify(events).includes("raw storage detail"), false);
   assert.equal(JSON.stringify(events).includes("raw status detail"), false);
 });
+
+test("postMerge config is optional, gets its defaults, and rejects anything but workflow files and branches", () => {
+  assert.equal(parseHeadlessOrchestratorConfig(validConfig()).repositories[0]?.delivery.postMerge, undefined);
+  const withPostMerge = (postMerge: unknown) => { const config = structuredClone(validConfig()) as { repositories: Array<{ delivery: Record<string, unknown> }> }; config.repositories[0]!.delivery.postMerge = postMerge; return config; };
+  const parsed = parseHeadlessOrchestratorConfig(withPostMerge({ checks: [{ workflow: "release-validation.yml", branch: "develop" }, { workflow: "prod-deploy.yml", branch: "main", optional: true }], mustReach: ["main"] })).repositories[0]?.delivery.postMerge;
+  assert.deepEqual(parsed, { checks: [{ workflow: "release-validation.yml", branch: "develop" }, { workflow: "prod-deploy.yml", branch: "main", optional: true }], mustReach: ["main"], optionalGraceMinutes: 15, timeoutMinutes: 180 });
+  for (const bad of [{}, { checks: [] }, { checks: [{ workflow: "Release Validation", branch: "develop" }] }, { checks: [{ workflow: "a.yml", branch: "../main" }] }, { checks: [{ workflow: "a.yml", branch: "main" }], timeoutMinutes: 5 }, { checks: [{ workflow: "a.yml", branch: "main", extra: 1 }] }]) {
+    assert.throws(() => parseHeadlessOrchestratorConfig(withPostMerge(bad)), /postMerge/u, JSON.stringify(bad));
+  }
+});

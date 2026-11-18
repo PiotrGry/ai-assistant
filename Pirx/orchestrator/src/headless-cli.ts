@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -14,6 +15,7 @@ import { GitHubTransport } from "./github/transport.js";
 import { diagnosticContext } from "./runtime/diagnostic-context.js";
 import { HeadlessConfigurationError, loadHeadlessOrchestratorConfig } from "./runtime/headless-config.js";
 import { HeadlessDeliveryCoordinator } from "./runtime/headless-delivery.js";
+import type { PostMergeGateway } from "./runtime/post-merge-watch.js";
 import { GitHubQueueReconciler, GitHubQueueSynchronizer } from "./runtime/github-queue-sync.js";
 import { HeadlessOrchestratorService, type HeadlessControlPort, type HeadlessDeliveryReconciliationPort, type HeadlessQueueReconciliationPort, type HeadlessServiceEvent } from "./runtime/headless-service.js";
 import { SqliteHeadlessControlPort } from "./runtime/orchestrator-control.js";
@@ -131,8 +133,15 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
       });
       const transport = new GitHubTransport(githubConfig);
       const pullRequests = new GitHubPullRequestGateway(transport, githubConfig);
-      const ci = new GitHubCiGatewayAdapter(new GitHubActionsGateway(transport, githubConfig), githubConfig);
-      return { repository, githubConfig, transport, pullRequests, ci };
+      const actions = new GitHubActionsGateway(transport, githubConfig);
+      const ci = new GitHubCiGatewayAdapter(actions, githubConfig);
+      const context = () => ({ correlationId: `post-merge:${randomUUID()}`, timeoutMs: config.githubTimeoutMs });
+      const postMerge: PostMergeGateway = {
+        listWorkflowRuns: (workflow, branch) => actions.listWorkflowRunsOnBranch(workflow, branch, context()),
+        contains: (ancestor, head) => pullRequests.containsCommit(ancestor, head, context()),
+        branchHead: async (branch) => { const head = await pullRequests.getBranchHead(branch, context()); return head.outcome === "success" ? { ...head, value: head.value.sha } : head; },
+      };
+      return { repository, githubConfig, transport, pullRequests, ci, postMerge };
     });
     const projectGitHub = deliveryRepositories[0]!;
     const queue = options.queue ?? (() => {
@@ -151,6 +160,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
       shipment: new ShipmentCycleCoordinator(store, item.pullRequests, item.ci),
       releaseMerge: new ReleaseMergeCoordinator(store, item.pullRequests, item.ci),
       branchSync: new FeatureBranchSyncService(store),
+      postMerge: item.postMerge,
     })), { timeoutMs: config.githubTimeoutMs });
     const service = new HeadlessOrchestratorService(runtime, {
       cycleIntervalMs: config.cycleIntervalMs, errorIntervalMs: config.errorIntervalMs,

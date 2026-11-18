@@ -86,6 +86,13 @@ export class GitHubPullRequestGateway implements GitHubPullRequestGatewayPort {
     const object = isRecord(result.value.object) ? result.value.object : undefined; const revision = sha(object?.sha);
     return revision === undefined ? malformed(result.correlationId) : { ...result, value: { branch, sha: revision } };
   }
+  /** True when `head` is `ancestor` or a descendant of it. */
+  public async containsCommit(ancestor: string, head: string, context: GitHubRequestContext): Promise<GitHubOperationResult<boolean>> {
+    const result = await this.#read<{ readonly status?: unknown }>({ method: "GET", path: repoPath(this.#config) + "/compare/" + encodeURIComponent(ancestor) + "..." + encodeURIComponent(head), query: { per_page: 1 } }, context);
+    if (result.outcome !== "success") return result;
+    const status = isRecord(result.value) ? result.value.status : undefined;
+    return typeof status !== "string" ? malformed(result.correlationId) : { ...result, value: status === "ahead" || status === "identical" };
+  }
   public async listPullRequests(headBranch: string, baseBranch: string, context: GitHubRequestContext): Promise<GitHubOperationResult<readonly GitHubPullRequest[]>> {
     const result = await this.#read<unknown[]>({ method: "GET", path: repoPath(this.#config) + "/pulls", query: { head: this.#config.owner + ":" + headBranch, base: baseBranch, state: "open", per_page: 100 } }, context);
     if (result.outcome !== "success") return result;

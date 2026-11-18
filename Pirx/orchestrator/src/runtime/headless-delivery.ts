@@ -6,7 +6,8 @@ import type { ReleaseMergeCoordinator, ReleaseMergeResult } from "./release-merg
 import { releaseId, type ReleaseId, type ReleasePullRequestIdentity } from "./release.js";
 import type { RuntimeSqliteStore } from "./sqlite.js";
 import type { HeadlessRepositoryConfig } from "./headless-config.js";
-import type { TaskSnapshot, TerminalAttemptSnapshot, UtcTimestamp } from "./task-domain.js";
+import { transitionTask, type TaskSnapshot, type TerminalAttemptSnapshot, type UtcTimestamp } from "./task-domain.js";
+import { watchPostMerge, type PostMergeGateway } from "./post-merge-watch.js";
 
 export const HEADLESS_DELIVERY_SCHEMA_VERSION = 1 as const;
 export type HeadlessDeliveryOutcome =
@@ -15,6 +16,7 @@ export type HeadlessDeliveryOutcome =
   | "retry_ready"
   | "waiting"
   | "release_merged"
+  | "completed"
   | "rate_limited"
   | "blocked"
   | "reconciliation_required";
@@ -35,6 +37,8 @@ export interface HeadlessDeliveryRepositoryRuntime {
   readonly releaseMerge: Pick<ReleaseMergeCoordinator, "merge">;
   /** Merges the base into a PR branch GitHub reports as behind; without it such a PR blocks for a human. */
   readonly branchSync?: Pick<FeatureBranchSyncService, "sync">;
+  /** Reads the repository's own pipeline; required when the delivery policy sets postMerge. */
+  readonly postMerge?: PostMergeGateway;
 }
 
 export interface HeadlessDeliveryCoordinatorOptions {
@@ -129,7 +133,28 @@ export class HeadlessDeliveryCoordinator {
     if (shipment.mergeSha === undefined) return output("reconciliation_required", false, "Successful feature shipment has no exact merge revision.", { taskId: task.id, attemptId: attempt.id });
     const featurePullRequest = pullIdentity(shipment);
     if (featurePullRequest === undefined) return output("reconciliation_required", false, "Successful feature shipment has no pull request identity.", { taskId: task.id, attemptId: attempt.id });
+    if (repository.config.delivery.postMerge !== undefined) return this.#afterBaseMerge(task, attempt, repository, shipment.mergeSha, now);
     return this.#release(task, attempt, repository, featurePullRequest, shipment.mergeSha, now, correlationId);
+  }
+
+  /** The repository releases on its own: the Task ends at the base merge once its pipeline passed for the merged change. */
+  async #afterBaseMerge(task: TaskSnapshot, attempt: TerminalAttemptSnapshot, repository: HeadlessDeliveryRepositoryRuntime, mergeSha: string, now: UtcTimestamp): Promise<HeadlessDeliveryResult> {
+    const extra = { taskId: task.id, attemptId: attempt.id };
+    if (repository.postMerge === undefined) return output("reconciliation_required", false, "The delivery policy watches the post-merge pipeline, but no pipeline reader is configured.", extra);
+    const ledger = this.#store.featureMerges.getByTaskAttempt(task.id, attempt.id);
+    if (ledger.outcome !== "success") return output("reconciliation_required", false, `The feature merge of ${mergeSha.slice(0, 7)} is not recorded: ${ledger.message}`, extra);
+    const watched = await watchPostMerge({ policy: repository.config.delivery.postMerge!, mergeSha, mergedAt: ledger.value.updatedAt, now, gateway: repository.postMerge });
+    if (watched.outcome === "waiting") return output("waiting", false, watched.message, extra);
+    if (watched.outcome === "unavailable") return output("rate_limited", false, watched.message, extra);
+    // ponytail: a failure blocks for now; handing it to a retry worker Attempt is the next step.
+    if (watched.outcome !== "passed") return output("blocked", false, watched.message, extra);
+    const history = this.#store.attempts.listByTask(task.id);
+    if (history.outcome !== "success") return output("reconciliation_required", false, history.message, extra);
+    const completed = transitionTask(task, "in_progress", { type: "complete", evidence: { attemptId: attempt.id, finalCommit: attempt.finalCommit!, evidenceReference: `post-merge:${mergeSha}:${watched.passedRunIds.join(",") || "none"}`.slice(0, 1_000) }, attempts: history.value }, now);
+    if (!completed.ok) return output("reconciliation_required", false, completed.error.message, extra);
+    const saved = this.#store.tasks.update(completed.value, { state: task.state, updatedAt: task.updatedAt });
+    if (saved.outcome !== "success") return output("reconciliation_required", false, saved.message, extra);
+    return output("completed", true, `Task completed: ${watched.message}`, extra);
   }
 
   async #syncBranch(task: TaskSnapshot, attempt: TerminalAttemptSnapshot, repository: HeadlessDeliveryRepositoryRuntime, shipment: ShipmentCycleResult, now: UtcTimestamp): Promise<HeadlessDeliveryResult> {
