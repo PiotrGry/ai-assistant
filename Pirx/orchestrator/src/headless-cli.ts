@@ -8,6 +8,9 @@ import { GitHubConfigurationError, loadGitHubConfig, type GitHubConfig } from ".
 import { GitHubActionsGateway } from "./github/ci-watch.js";
 import { GitHubCiGatewayAdapter } from "./github/ci-adapter.js";
 import { GitHubIssueReader } from "./github/issue-read.js";
+import { GitHubIssueMutator } from "./github/issue-mutate.js";
+import { GitHubTaskIssueCloser } from "./github/task-issue-close.js";
+import { GitHubWriteQueue } from "./github/write-queue.js";
 import { GitHubProjectSynchronizer } from "./github/project-sync.js";
 import { GitHubPullRequestGateway } from "./github/pull-request.js";
 import { GitHubQueueSnapshotReader } from "./github/queue-snapshot.js";
@@ -165,6 +168,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
       branchSync: new FeatureBranchSyncService(store),
       postMerge: item.postMerge,
       branchCleanup: new TaskBranchCleanup(store),
+      issueCloser: new GitHubTaskIssueCloser(new GitHubIssueMutator(item.transport, new GitHubIssueReader(item.transport, item.githubConfig), new GitHubWriteQueue(), item.githubConfig)),
     })), { timeoutMs: config.githubTimeoutMs });
     const service = new HeadlessOrchestratorService(runtime, {
       cycleIntervalMs: config.cycleIntervalMs, errorIntervalMs: config.errorIntervalMs,
