@@ -29,7 +29,6 @@ CLI credential stores.
       "repository": "PiotrGry/ai-assistant",
       "repositoryRoot": "/srv/pirx/ai-assistant",
       "baseBranch": "develop",
-      "baseRevision": "0123456789abcdef0123456789abcdef01234567",
       "remoteName": "origin",
       "testCommands": ["npm run check"],
       "delivery": {
@@ -71,9 +70,45 @@ runs until it returns its result. A worker silent for the whole window (here
 16 minutes, maximum 1 hour) is stopped with a `timeout` diagnostic. The daemon
 renews the Lease every third of `leaseDurationMs` while the worker runs.
 
-Every field except `hostPowerOff` is required. Repositories form an explicit allowlist; test commands
-must match the bounded code-worker command policy. Update `baseRevision` to the
-reviewed revision from which a new assigned worktree may be created.
+Every field except `hostPowerOff`, `baseRevision`, `maxTurns`, `attemptTimeLimitMs`,
+`model` and `delivery.postMerge` is required. Repositories form an explicit allowlist; test commands
+must match the bounded code-worker command policy.
+
+A new Task branch starts from the current `<remoteName>/<baseBranch>`: Pirx fetches it when it
+provisions the worktree and records the SHA as the workspace's base. Set `baseRevision` only to pin
+every new branch to one reviewed commit; a pin goes stale as the base moves, and each PR is then
+behind from its first push.
+
+### Repositories that release on their own
+
+Set `delivery.postMerge` when the repository merges and releases by itself (an auto-merge workflow,
+a release PR it opens, a deploy). Pirx then opens no Release. After the feature merge it watches the
+listed workflows and ends the Task when they passed for the merged change:
+
+```json
+"postMerge": {
+  "checks": [
+    { "workflow": "release-validation.yml", "branch": "develop" },
+    { "workflow": "prod-deploy.yml", "branch": "main", "optional": true }
+  ],
+  "mustReach": ["main"],
+  "optionalGraceMinutes": 15,
+  "timeoutMinutes": 180
+}
+```
+
+- For each check, the earliest run on its branch whose head contains the merge commit decides.
+- `mustReach` branches must contain the merge commit.
+- An `optional` workflow without a run for the change (a deploy skipped after a docs-only change)
+  passes `optionalGraceMinutes` after the required checks passed.
+- On success Pirx completes the Task, deletes its branch (remote and local) and worktree, and closes
+  the Issue with a `task_completed` comment. A branch is deleted only when the base contains its head.
+- A failed run becomes a fix Attempt on the same branch, with the run's failed jobs, steps and log
+  excerpt in its Checkpoint; after two fixes the Task blocks for a human. Not finishing within
+  `timeoutMinutes` also blocks.
+
+This needs the repository to merge worker PRs with a merge commit, not a squash: a squash erases
+the branch head from the base, so the branch is kept and a fix cannot continue on it.
 
 `baseBranch` is the integration branch for feature PRs. `delivery.releaseBranch`
 is the protected Release target and must be different. Feature merges are
@@ -140,7 +175,7 @@ without several of these and fails only when an Attempt reaches them, so run
 the check after every change to the profile or the machine:
 
 - the profile, the runtime database and the worktree directory;
-- for each repository: the checkout, the base revision and the git remote;
+- for each repository: the checkout, the pinned base revision or the remote base branch, and the git remote;
 - `git`, the `claude` executable and its minimum version;
 - on Linux, `bwrap` and `socat`, which the Claude worker sandbox requires;
 - the built worker advisor (`mcp-server/dist/advisor-cli.js`);
