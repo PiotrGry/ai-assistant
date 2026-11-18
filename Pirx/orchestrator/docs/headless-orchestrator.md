@@ -79,6 +79,22 @@ provisions the worktree and records the SHA as the workspace's base. Set `baseRe
 every new branch to one reviewed commit; a pin goes stale as the base moves, and each PR is then
 behind from its first push.
 
+### Project environment for the worker
+
+The worker sandbox has no network, so it cannot install the project's dependencies itself.
+`setupCommands` (optional, up to 8) run in the Task worktree before every worker Attempt, outside
+the sandbox and with network, in the daemon's environment; for example the repository's own CI
+install step:
+
+```json
+"setupCommands": ["uv sync --locked --extra dev --extra api --extra cloud"],
+"testCommands": ["uv run --no-sync python -m pytest tests/ -q"]
+```
+
+A failed setup command stops the Attempt before the worker starts. Run the test commands with
+`uv run --no-sync` (or the package manager's offline equivalent) so they use that environment
+without touching the network.
+
 ### Repositories that release on their own
 
 Set `delivery.postMerge` when the repository merges and releases by itself (an auto-merge workflow,

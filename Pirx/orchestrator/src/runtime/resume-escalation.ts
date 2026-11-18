@@ -176,12 +176,18 @@ export function isPreWorkerBlock(attempt: AttemptSnapshot): boolean {
 }
 
 /**
- * A BLOCKED Attempt an operator may retry: a pre-worker block, or a push the
- * repository rejected (e.g. a pre-push gate). Pirx never force-pushes, so
- * pushing the same commit again after the repository is fixed is safe.
+ * A BLOCKED Attempt an operator may retry: a pre-worker block, a push the
+ * repository rejected (e.g. a pre-push gate), or a worker that stopped because
+ * its environment denied what it needed (no project dependencies, no network)
+ * before it committed anything. Pirx never force-pushes, so pushing the same
+ * commit again after the repository is fixed is safe; a worker with no commit
+ * has nothing to repeat once the operator fixed the environment.
  */
 export function isOperatorRetryableBlock(attempt: AttemptSnapshot): boolean {
-  return isPreWorkerBlock(attempt) || (attempt.state === "terminal" && attempt.result === "BLOCKED" && attempt.diagnostic?.code === "push_rejected" && attempt.diagnostic.stage === "git_state");
+  if (attempt.state !== "terminal" || attempt.result !== "BLOCKED") return false;
+  return isPreWorkerBlock(attempt)
+    || (attempt.diagnostic?.code === "push_rejected" && attempt.diagnostic.stage === "git_state")
+    || (attempt.diagnostic?.code === "permission_denied" && attempt.diagnostic.stage === "process" && attempt.finalCommit === undefined);
 }
 
 /**

@@ -360,3 +360,10 @@ test("postMerge config is optional, gets its defaults, and rejects anything but 
     assert.throws(() => parseHeadlessOrchestratorConfig(withPostMerge(bad)), /postMerge/u, JSON.stringify(bad));
   }
 });
+
+test("setupCommands are optional and limited to build and package tools", () => {
+  const withSetup = (setupCommands: unknown) => { const config = structuredClone(validConfig()) as { repositories: Array<Record<string, unknown>> }; config.repositories[0]!.setupCommands = setupCommands; return config; };
+  assert.equal(parseHeadlessOrchestratorConfig(validConfig()).repositories[0]?.setupCommands, undefined);
+  assert.deepEqual(parseHeadlessOrchestratorConfig(withSetup(["uv sync --frozen --extra dev"])).repositories[0]?.setupCommands, ["uv sync --frozen --extra dev"]);
+  for (const bad of [["rm -rf /"], ["curl https://example.com/install.sh"], ["uv sync; rm -rf ~"], "uv sync"]) assert.throws(() => parseHeadlessOrchestratorConfig(withSetup(bad)), /setupCommands/u, JSON.stringify(bad));
+});
