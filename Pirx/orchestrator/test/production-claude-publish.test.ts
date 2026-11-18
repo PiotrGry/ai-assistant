@@ -59,7 +59,8 @@ test("a code worker commits and Pirx pushes the reported commit with the worker'
     // A dirty worktree is refused before anything reaches the remote.
     await rm(join(worktree, ".git", "hooks", "pre-push"));
     await writeFile(join(worktree, "stray.txt"), "untracked\n");
-    await assert.rejects(worker(false).execute(request.value, new AbortController().signal), (error: unknown) => isWorkerFailureError(error) && error.diagnostic.code === "git_state_mismatch" && /not clean/u.test(error.diagnostic.providerMessage ?? ""));
+    // gh-526: the message names the leftovers and the diagnostic keeps HEAD, so the next Attempt resumes from the commit.
+    await assert.rejects(worker(false).execute(request.value, new AbortController().signal), (error: unknown) => isWorkerFailureError(error) && error.diagnostic.code === "git_state_mismatch" && /not clean after the reported commit: stray\.txt\. Commit them/u.test(error.diagnostic.providerMessage ?? "") && error.diagnostic.observedCommit === hooked);
     assert.equal(git(remote, "rev-parse", `refs/heads/${branch}`), result.finalCommit);
     await rm(join(worktree, "stray.txt"));
 

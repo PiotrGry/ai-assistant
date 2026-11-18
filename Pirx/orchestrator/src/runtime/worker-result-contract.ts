@@ -116,6 +116,7 @@ export function workerResultContractInstruction(): string {
   return [
     "FINAL RESPONSE: return exactly one JSON object matching the supplied WorkerResult schema.",
     "On success commit your change on the assigned branch and do not push: Pirx pushes finalCommit and opens the pull request from pullRequestTitle and pullRequestBody (Markdown: what changed, why, how it was tested, open risks).",
+    "Leave the worktree clean after the commit: write scratch files (coverage reports, helper scripts, notes) under $TMPDIR, never in the worktree; Pirx refuses a commit while untracked or modified files remain.",
     variantInstruction(codeCommitted),
     ...WORKER_RESULT_VARIANTS.filter((variant) => variant.outcome !== "CODE_PUSHED").map(variantInstruction),
     `For every non-success outcome include ${fields(nonSuccessRequired)}.`,

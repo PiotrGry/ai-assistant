@@ -153,7 +153,17 @@ export class WorkerLifecycleCoordinator {
           return { outcome: ownership.outcome === "conflict" ? "conflict" as const : "storage_error" as const, message: "Verified CODE_PUSHED result has no matching active workspace ownership." };
         }
       }
-      const nextAttempt = transitionAttempt(attempt.value, "running", result.outcome === "CODE_PUSHED" ? { type: "finish", result: "CODE_PUSHED", branch: result.branch, finalCommit: result.finalCommit, currentCommit: result.finalCommit, ...(result.pullRequestTitle === undefined ? {} : { pullRequestTitle: result.pullRequestTitle }), ...(result.pullRequestBody === undefined ? {} : { pullRequestBody: result.pullRequestBody }), progress: "worker invocation completed" } : { type: "finish", result: result.outcome, blockingReason: result.reason, ...(result.diagnostic === undefined ? {} : { diagnostic: result.diagnostic }), progress: "worker invocation completed" }, at);
+      // Pirx saw the worker's real HEAD (a refused push, a commit left with stray files): resume from it,
+      // or the next Attempt fails workspace validation with commit_mismatch (gh-526).
+      const observedCommit = result.outcome === "CODE_PUSHED" ? undefined : result.diagnostic?.observedCommit;
+      if (observedCommit !== undefined) {
+        const ownership = workspaces.getByTaskAttempt(task.value.id, attempt.value.id);
+        if (ownership.outcome === "success" && ownership.value.currentRevision !== observedCommit) {
+          const moved = workspaces.updateCurrentRevision(attempt.value.id, ownership.value.ownershipToken, ownership.value.version, observedCommit, at);
+          if (moved.outcome !== "success") return moved;
+        }
+      }
+      const nextAttempt = transitionAttempt(attempt.value, "running", result.outcome === "CODE_PUSHED" ? { type: "finish", result: "CODE_PUSHED", branch: result.branch, finalCommit: result.finalCommit, currentCommit: result.finalCommit, ...(result.pullRequestTitle === undefined ? {} : { pullRequestTitle: result.pullRequestTitle }), ...(result.pullRequestBody === undefined ? {} : { pullRequestBody: result.pullRequestBody }), progress: "worker invocation completed" } : { type: "finish", result: result.outcome, blockingReason: result.reason, ...(result.diagnostic === undefined ? {} : { diagnostic: result.diagnostic }), ...(observedCommit === undefined ? {} : { currentCommit: observedCommit }), progress: "worker invocation completed" }, at);
       if (!nextAttempt.ok) return { outcome: "conflict" as const, message: nextAttempt.error.message };
       const storedAttempt = attempts.update(nextAttempt.value, "running");
       if (storedAttempt.outcome !== "success") return storedAttempt;
