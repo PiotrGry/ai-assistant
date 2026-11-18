@@ -17,6 +17,7 @@ import { HeadlessConfigurationError, loadHeadlessOrchestratorConfig } from "./ru
 import { HeadlessDeliveryCoordinator } from "./runtime/headless-delivery.js";
 import type { PostMergeGateway } from "./runtime/post-merge-watch.js";
 import { TaskBranchCleanup } from "./runtime/task-branch-cleanup.js";
+import { readFailureFacts } from "./runtime/post-merge-retry.js";
 import { GitHubQueueReconciler, GitHubQueueSynchronizer } from "./runtime/github-queue-sync.js";
 import { HeadlessOrchestratorService, type HeadlessControlPort, type HeadlessDeliveryReconciliationPort, type HeadlessQueueReconciliationPort, type HeadlessServiceEvent } from "./runtime/headless-service.js";
 import { SqliteHeadlessControlPort } from "./runtime/orchestrator-control.js";
@@ -141,6 +142,7 @@ export async function runHeadlessCli(host: HeadlessCliProcess = process, options
         listWorkflowRuns: (workflow, branch) => actions.listWorkflowRunsOnBranch(workflow, branch, context()),
         contains: (ancestor, head) => pullRequests.containsCommit(ancestor, head, context()),
         branchHead: async (branch) => { const head = await pullRequests.getBranchHead(branch, context()); return head.outcome === "success" ? { ...head, value: head.value.sha } : head; },
+        failureFacts: (run) => readFailureFacts(ci, run.id, context()),
       };
       return { repository, githubConfig, transport, pullRequests, ci, postMerge };
     });

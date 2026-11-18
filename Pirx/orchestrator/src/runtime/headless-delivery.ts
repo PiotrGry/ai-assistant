@@ -9,6 +9,7 @@ import type { HeadlessRepositoryConfig } from "./headless-config.js";
 import { transitionTask, type TaskSnapshot, type TerminalAttemptSnapshot, type UtcTimestamp } from "./task-domain.js";
 import { watchPostMerge, type PostMergeGateway } from "./post-merge-watch.js";
 import type { TaskBranchCleanup } from "./task-branch-cleanup.js";
+import { createPostMergeRetry } from "./post-merge-retry.js";
 
 export const HEADLESS_DELIVERY_SCHEMA_VERSION = 1 as const;
 export type HeadlessDeliveryOutcome =
@@ -149,7 +150,12 @@ export class HeadlessDeliveryCoordinator {
     const watched = await watchPostMerge({ policy: repository.config.delivery.postMerge!, mergeSha, mergedAt: ledger.value.updatedAt, now, gateway: repository.postMerge });
     if (watched.outcome === "waiting") return output("waiting", false, watched.message, extra);
     if (watched.outcome === "unavailable") return output("rate_limited", false, watched.message, extra);
-    // ponytail: a failure blocks for now; handing it to a retry worker Attempt is the next step.
+    if (watched.outcome === "failed" && watched.failedRun !== undefined) {
+      const facts = await repository.postMerge.failureFacts?.(watched.failedRun).catch(() => []) ?? [];
+      const retry = createPostMergeRetry(this.#store, { task, attempt, mergeSha, baseBranch: repository.config.baseBranch, failedRun: watched.failedRun, message: watched.message, facts, now });
+      if (retry.outcome === "created" || retry.outcome === "already_created") return output("retry_ready", true, retry.message, { taskId: task.id, ...(retry.attemptId === undefined ? {} : { attemptId: retry.attemptId }) });
+      return output("blocked", false, retry.message, extra);
+    }
     if (watched.outcome !== "passed") return output("blocked", false, watched.message, extra);
     const history = this.#store.attempts.listByTask(task.id);
     if (history.outcome !== "success") return output("reconciliation_required", false, history.message, extra);

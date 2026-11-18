@@ -29,6 +29,8 @@ export interface PostMergeGateway {
   /** True when `head` is `ancestor` or a descendant of it. */
   contains(ancestor: string, head: string): Promise<GitHubOperationResult<boolean>>;
   branchHead(branch: string): Promise<GitHubOperationResult<string>>;
+  /** Failed jobs, steps and a log excerpt of a failed run, for the worker that fixes it; best effort. */
+  failureFacts?(run: GitHubActionsWorkflowRun): Promise<readonly string[]>;
 }
 
 export type PostMergeOutcome = "passed" | "waiting" | "failed" | "timed_out" | "unavailable";
