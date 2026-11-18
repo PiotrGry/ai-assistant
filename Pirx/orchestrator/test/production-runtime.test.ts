@@ -195,6 +195,9 @@ for (const [blockedBy, blockingDiagnostic, workspaceRevision, expectedResume] of
   // Same shape as gh-519 attempt 1: the sandboxed worker had no project environment and committed nothing;
   // the operator added setupCommands and resumes.
   ["the worker could not use its environment and committed nothing", () => createWorkerFailureDiagnostic("permission_denied", { stage: "process", providerMessage: "No Python env with project deps; sandbox denies pypi.org" }), undefined, undefined],
+  // Same shape as gh-519 attempt 2: a command the worker needed was refused after it committed locally;
+  // the operator ran that step and resumes from the local commit.
+  ["the worker was refused a command after committing locally", () => createWorkerFailureDiagnostic("permission_denied", { stage: "git_state", providerMessage: "Permission layer denied running tests against a584cec^" }), "a".repeat(39) + "1", "a".repeat(39) + "1"],
 ] as const) test(`an operator can retry a Task that ${blockedBy}`, async () => {
   const directory = await mkdtemp(join(tmpdir(), "pirx-production-preworker-unblock-"));
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
