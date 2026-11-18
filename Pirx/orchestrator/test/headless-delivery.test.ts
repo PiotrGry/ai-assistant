@@ -207,14 +207,21 @@ test("a self-releasing repository completes the Task once its pipeline passed fo
   } finally { await dispose(value); }
 });
 
-test("a pipeline failure after the merge keeps the Task open and names the failed run", async () => {
+test("a pipeline failure after the merge goes back to the worker on the same branch, with the failed run", async () => {
   const value = await fixture();
   try {
-    const runtime = selfReleasing(value, { validation: [{ id: 8, status: "completed", conclusion: "failure" }] });
-    const failed = await new HeadlessDeliveryCoordinator(value.store, [runtime], { now: () => t1 }).reconcile();
-    assert.equal(failed.outcome, "blocked", failed.message);
-    assert.match(failed.message, /release-validation\.yml on develop failed for bbbbbbb: run 8/u);
-    const task = value.store.tasks.get(taskId);
-    assert.equal(task.outcome === "success" ? task.value.state : task.outcome, "in_progress");
+    const base = selfReleasing(value, { validation: [{ id: 8, status: "completed", conclusion: "failure" }] });
+    const runtime: HeadlessDeliveryRepositoryRuntime = { ...base, postMerge: { ...base.postMerge!, failureFacts: async () => ["Failed job smoke; failed steps: pytest (#4)."] } };
+    const handed = await new HeadlessDeliveryCoordinator(value.store, [runtime], { now: () => t1 }).reconcile();
+    assert.equal(handed.outcome, "retry_ready", handed.message);
+    assert.equal(handed.allowWorkerCycle, true);
+    const history = value.store.attempts.listByTask(taskId);
+    const fix = history.outcome === "success" ? history.value.at(-1) : undefined;
+    assert.equal(fix?.state, "running");
+    assert.equal(fix?.branch, "pirx/task-headless-delivery");
+    const checkpoint = value.store.checkpoints.get(fix?.checkpointReference ?? "");
+    assert.match(checkpoint.outcome === "success" ? checkpoint.value.findings.join("\n") : "", /run 8 ended failure[\s\S]*pytest/u);
+    // Delivery leaves the running fix to the leased worker.
+    assert.equal((await new HeadlessDeliveryCoordinator(value.store, [runtime], { now: () => t1 }).reconcile()).outcome, "worker_required");
   } finally { await dispose(value); }
 });
