@@ -41,6 +41,7 @@ import { registerOrchestratorTools, SqliteExecutionObservabilityToolPort, Sqlite
 import { registerResourceTools, SqliteResourceReportPort, type ResourceReportPort } from "./tools/resources.js";
 import { registerOrchestratorServiceTool, SystemdOrchestratorServicePort, type OrchestratorServicePort } from "./tools/orchestrator-service.js";
 import { registerOrchestratorLogTool, SystemdOrchestratorLogsPort, type OrchestratorLogsPort } from "./tools/orchestrator-logs.js";
+import { AzureCliProductionErrorsPort, registerProductionErrorsTool, type ProductionErrorsPort } from "./tools/production-errors.js";
 import { SingleUseHostAuthorization } from "./authorization.js";
 import { CodexCliRunner } from "@pirx/orchestrator";
 import {
@@ -71,6 +72,7 @@ export interface McpServerOptions {
   readonly resourceReportPort?: ResourceReportPort;
   readonly orchestratorServicePort?: OrchestratorServicePort;
   readonly orchestratorLogsPort?: OrchestratorLogsPort;
+  readonly productionErrorsPort?: ProductionErrorsPort;
 }
 
 function unavailableCalendar(message: string): CalendarOperations {
@@ -125,6 +127,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
     });
     registerResourceTools(server, { port: options.resourceReportPort ?? new SqliteResourceReportPort(config.resourceDatabasePath) });
     registerOrchestratorLogTool(server, options.orchestratorLogsPort ?? new SystemdOrchestratorLogsPort({ environment }));
+    registerProductionErrorsTool(server, options.productionErrorsPort ?? new AzureCliProductionErrorsPort({ environment, ...(environment.PIRX_APP_INSIGHTS_APP === undefined ? {} : { app: environment.PIRX_APP_INSIGHTS_APP }), ...(environment.PIRX_APP_INSIGHTS_RESOURCE_GROUP === undefined ? {} : { resourceGroup: environment.PIRX_APP_INSIGHTS_RESOURCE_GROUP }) }));
     registerOrchestratorServiceTool(server, {
       port: options.orchestratorServicePort ?? new SystemdOrchestratorServicePort({ environment, checkBinding }),
       ...(config.orchestratorConfigurationError === undefined ? {} : { configurationError: config.orchestratorConfigurationError }),
