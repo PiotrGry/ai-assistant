@@ -24,6 +24,22 @@ export interface ToolSpec<Shape extends z.ZodRawShape> {
   readonly run: (input: z.infer<z.ZodObject<Shape>>, context: CoordinationContext) => Promise<Record<string, unknown>>;
 }
 
+const MUTATING_COMMANDS: readonly RegExp[] = [
+  /^git push\b/u, /^git worktree (?:add|move|remove)\b/u, /^git branch -m\b/u,
+  /^gh (?:pr (?:create|update-branch|merge)|issue (?:close|comment|create|reopen|edit)|run rerun|project item-(?:add|edit))\b/u,
+];
+
+/** In dry-run, commands that would change git or GitHub are recorded and answered with a plausible success. */
+export function dryRunner(run: Runner, intercepted: string[]): Runner {
+  return async (file, args, options) => {
+    const command = [file, ...args].join(" ");
+    if (!MUTATING_COMMANDS.some((pattern) => pattern.test(command))) return run(file, args, options);
+    intercepted.push(command);
+    const stdout = /^gh project item-add/u.test(command) ? JSON.stringify({ id: "dry-run-item" }) : /^gh (?:pr|issue) create/u.test(command) ? "https://github.com/dry-run/0" : "";
+    return { ok: true, code: 0, stdout, stderr: "", command };
+  };
+}
+
 /** A result the tool returns when it refuses on a hard limit. The model reads `refused` and `reason`. */
 export function refuse(reason: string, facts: Record<string, unknown> = {}): Record<string, unknown> {
   return { refused: true, reason, ...facts };
@@ -67,7 +83,12 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, conte
     try {
       if (context.settings.evalFixture !== undefined) result = fromFixture(context.settings.evalFixture, spec.name, input as Record<string, unknown>, spec.mutating);
       else if (spec.mutating && stopped(context.settings)) result = refuse(`The stop switch is on (${context.settings.stopFile} exists). No mutating tool runs until the operator removes it.`);
-      else if (spec.mutating && context.settings.dryRun) result = { dryRun: true, wouldRun: spec.name, input };
+      else if (spec.mutating && context.settings.dryRun) {
+        // Dry-run runs the tool's real checks and reads; only commands that change something are intercepted.
+        const intercepted: string[] = [];
+        result = await spec.run(input, { ...context, run: dryRunner(context.run, intercepted) });
+        result = { dryRun: true, ...result, ...(intercepted.length === 0 ? {} : { wouldRun: intercepted }) };
+      }
       else result = await spec.run(input, context);
       ok = result.refused !== true && result.failed === undefined && result.error === undefined;
     } catch (error: unknown) {

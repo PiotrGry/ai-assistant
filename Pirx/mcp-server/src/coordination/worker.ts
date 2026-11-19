@@ -93,6 +93,7 @@ async function launch(context: CoordinationContext, repo: CoordinatedRepository,
   mkdirSync(dir, { recursive: true });
   const logPath = join(dir, `${stamp}.jsonl`); const reportPath = join(dir, `${stamp}.report.json`);
   const sessionId = sessionArgs[1]!;
+  if (context.settings.dryRun) return { wouldStart: true, task, worktree: cwd, sessionId, instruction };
   if (!context.store.acquire({ task, pid: 0, startedAt: context.store.now(), logPath, reportPath })) return refuse("Another worker is running. Only one worker runs at a time.", { worker: workerFacts(context.store) });
   const args = [...workerToolArguments(cwd, repo.testCommands), ...(context.settings.workerModel === undefined ? [] : ["--model", context.settings.workerModel]), ...sessionArgs, `${WORKER_PREFACE}${instruction}`];
   const job: WorkerJob = { task, cwd, setupCommands: setup ? repo.setupCommands : [], executable: context.settings.claudeExecutable, args, prompt: instruction, env: workerEnvironment(context.environment), logPath, reportPath, timeoutMs: context.settings.caps.workerTimeoutMs, storagePath: context.store.path, sessionId };
