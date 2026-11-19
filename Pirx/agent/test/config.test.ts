@@ -55,3 +55,9 @@ test("agent configuration enables the continuation check unless disabled", () =>
     /PIRX_CONTINUATION_CHECK/u,
   );
 });
+
+test("the output token limit defaults to a chat reply and can be raised for background rounds", () => {
+  assert.equal(loadConfig({}).maxOutputTokens, 1536);
+  assert.equal(loadConfig({ PIRX_MAX_OUTPUT_TOKENS: "4096" }).maxOutputTokens, 4096);
+  assert.throws(() => loadConfig({ PIRX_MAX_OUTPUT_TOKENS: "0" }));
+});
