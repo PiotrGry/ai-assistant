@@ -120,11 +120,23 @@ test("returns explicit dirty, detached, missing, branch, commit, ownership, and 
 
   const commit = await fixture();
   try {
+    // The interrupted worker's own commit on top of the recorded one: resume from it.
     await writeFile(join(commit.worktreePath, "tracked.txt"), "changed\n");
     await git(commit.worktreePath, "add", "tracked.txt");
     await git(commit.worktreePath, "commit", "-m", "changed");
-    assert.equal((await new WorkspaceResumeValidator(commit.store).validate(request(commit))).outcome, "commit_mismatch");
+    const advanced = await new WorkspaceResumeValidator(commit.store).validate(request(commit));
+    assert.equal(advanced.outcome, "valid");
+    assert.equal(advanced.observed?.currentCommit, await git(commit.worktreePath, "rev-parse", "HEAD"));
   } finally { await close(commit); }
+
+  const rewritten = await fixture();
+  try {
+    // A commit that replaces the recorded one (not a descendant) still fails closed.
+    await git(rewritten.worktreePath, "commit", "--amend", "--allow-empty", "-m", "rewritten base");
+    const result = await new WorkspaceResumeValidator(rewritten.store).validate(request(rewritten));
+    assert.equal(result.outcome, "commit_mismatch");
+    assert.match(result.message, /not a descendant/u);
+  } finally { await close(rewritten); }
 });
 
 test("distinguishes a diverged base and missing commit without attempting repair", async () => {
