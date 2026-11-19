@@ -148,6 +148,11 @@ function safeText(value: string, maxLength: number): boolean {
   return value.length <= maxLength && !/[\u0000-\u001f\u007f]/u.test(value);
 }
 
+/** Markdown bodies are multi-line: tab, line feed and carriage return are allowed, other control characters are not. */
+function safeBody(value: string, maxLength: number): boolean {
+  return value.length <= maxLength && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
+}
+
 function validateLabels(values: readonly string[] | undefined): string | undefined {
   if (values === undefined) return undefined;
   if (values.length > 100 || values.some((value) => value.length === 0 || value.length > 100 || !safeText(value, 100))) {
@@ -172,7 +177,7 @@ function validatePatch(patch: GitHubIssuePatch, allowEmpty: boolean): string | u
   const allowed = new Set(["title", "body", "state", "labels", "assignees", "milestone"]);
   if (fields.some((field) => !allowed.has(field))) return "Issue patch contains an unsupported field.";
   if (patch.title !== undefined && (patch.title.length === 0 || patch.title.length > 256 || !safeText(patch.title, 256))) return "Issue title must contain 1 to 256 printable characters.";
-  if (patch.body !== undefined && patch.body !== null && !safeText(patch.body, 65_536)) return "Issue body contains unsupported control characters or is too long.";
+  if (patch.body !== undefined && patch.body !== null && !safeBody(patch.body, 65_536)) return "Issue body contains unsupported control characters or is too long.";
   if (patch.state !== undefined && patch.state !== "open" && patch.state !== "closed") return "Issue state must be open or closed.";
   const labelsError = validateLabels(patch.labels);
   if (labelsError !== undefined) return labelsError;

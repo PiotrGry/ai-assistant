@@ -885,3 +885,35 @@ test("an MCP write that times out after its effect stays unknown and cannot be r
   assert.equal(store.count("operations"), 1);
   assert.equal(await readFile(effects, "utf8"), "effect\n");
 });
+
+test("a mutating tool succeeds at most maxMutationsPerTool times per turn, even with fresh idempotency keys", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-mcp-mutation-cap-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const entry = join(root, "mcp.mjs");
+  const effects = join(root, "effects");
+  await writeFile(entry, `
+    import { appendFileSync } from "node:fs";
+    import { createInterface } from "node:readline";
+    const reply = (id, result) => console.log(JSON.stringify({ jsonrpc: "2.0", id, result }));
+    for await (const line of createInterface({ input: process.stdin })) {
+      const { id, method, params } = JSON.parse(line);
+      if (method === "initialize") reply(id, { protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } });
+      if (method === "tools/list") reply(id, { tools: [{ name: "fixture_create", inputSchema: { type: "object" }, annotations: { readOnlyHint: false } }] });
+      if (method === "tools/call") { appendFileSync(${JSON.stringify(effects)}, "created\\n"); reply(id, { content: [{ type: "text", text: "created" }] }); }
+    }
+  `);
+  const create = (key: string) => ({ role: "assistant", content: "", tool_calls: [{ function: { name: "fixture_create", arguments: { idempotencyKey: key } } }] });
+  const answer = { role: "assistant", content: "Utworzono jedno." };
+  const { agent } = await createContinuationAgent(context, [create("v1"), create("v2"), create("v3"), answer], { mcpServerEntry: entry, continuationCheck: false, maxMutationsPerTool: 1 });
+  const store = SqliteStore.open({ filename: ":memory:" });
+  context.after(() => store.close());
+  const ledger = new SqliteActionLedger(store);
+  const at = new Date().toISOString();
+  store.insertRunEnvironment({ id: "env", createdAt: at, payload: {} });
+  store.insertSession({ id: "session", environmentId: "env", startedAt: at, status: "active" });
+  store.insertTurn({ id: "turn", sessionId: "session", sequence: 0, startedAt: at, status: "started", userPrompt: "Create", payload: {} });
+  const turn = await agent.chat("Create", { actionLedger: ledger, sessionId: "session", turnId: "turn" });
+  assert.equal(await readFile(effects, "utf8"), "created\n");
+  assert.equal(turn.messages.filter((message) => message.role === "tool" && /to limit/u.test(message.content)).length, 2);
+  assert.equal(turn.content, answer.content);
+});

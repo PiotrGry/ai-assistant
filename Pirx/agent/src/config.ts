@@ -27,6 +27,8 @@ export interface AgentConfig {
 
   readonly maxToolIterations: number;
   readonly maxRepeatedToolCalls: number;
+  /** Successful (or uncertain) calls of one mutating tool per turn; more are refused, whatever their arguments. */
+  readonly maxMutationsPerTool?: number;
   readonly maxToolCalls?: number;
   readonly maxTurnDurationMs?: number;
   readonly maxTurnToolResultCharacters?: number;
@@ -170,6 +172,7 @@ export function loadConfig(
       environment.PIRX_MAX_REPEATED_TOOL_CALLS ?? "3",
     ),
     maxToolCalls: positiveInteger("PIRX_MAX_TOOL_CALLS", environment.PIRX_MAX_TOOL_CALLS ?? "8"),
+    maxMutationsPerTool: positiveInteger("PIRX_MAX_MUTATIONS_PER_TOOL", environment.PIRX_MAX_MUTATIONS_PER_TOOL ?? "10"),
     maxOutputTokens: positiveInteger("PIRX_MAX_OUTPUT_TOKENS", environment.PIRX_MAX_OUTPUT_TOKENS ?? "1536"),
     maxTurnDurationMs: positiveInteger("PIRX_MAX_TURN_DURATION_MS", environment.PIRX_MAX_TURN_DURATION_MS ?? "180000"),
     maxTurnToolResultCharacters: positiveInteger("PIRX_MAX_TURN_TOOL_RESULT_CHARACTERS", environment.PIRX_MAX_TURN_TOOL_RESULT_CHARACTERS ?? "24000"),

@@ -36,7 +36,7 @@ Sprawdź po kolei:
       Pisz po angielsku. Nie zgaduj szczegółów, których nie widziałeś w danych z narzędzi (np. nazw katalogów czy typów błędów).
    b. `pirx_work_submit` dla utworzonego issue: `repository: "PiotrGry/zdrovena-reconciliation"`, numer issue, `goal` i `acceptanceCriteria` znak w znak takie jak w treści issue, `priority: "P3"`, `risk: "Low"`, `area: "None"`, `workType: "Task"`, bez `queueOrder`, `operationId` w postaci `round-<numer issue>`.
    c. Sprawdź wynik `pirx_work_submit` (`accepted_pending`). Daemon sam doda zadanie do kolejki i uruchomi workera.
-   Zlecaj przed pisaniem raportu: masz około 20 wywołań narzędzi na cały obchód.
+   Zlecaj przed pisaniem raportu: masz około 20 wywołań narzędzi na cały obchód. Jeśli `github_issue_create` albo `pirx_work_submit` zwróci błąd, nie ponawiaj: zacytuj błąd w części D.
 
 Na koniec napisz raport w czterech częściach:
 A. Co widzisz — fakty z narzędzi, z liczbami i identyfikatorami.

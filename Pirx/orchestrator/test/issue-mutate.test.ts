@@ -263,3 +263,13 @@ test("round-trip reads, mutates, verifies, and proves replay is a no-op", async 
   assert.equal(transport.comments.length, 1);
   assert.equal(transport.writes.length, 1);
 });
+
+test("an Issue body may be multi-line Markdown, but other control characters are refused", async () => {
+  const transport = new FakeMutationTransport();
+  const mutator = createMutator(transport);
+  const body = "## Goal\n\nCover the module.\r\n\n## Acceptance criteria\n\n- [ ] tests pass\n\tindented";
+  assert.equal((await mutator.createIssue({ title: "Multi-line body", body, idempotencyKey: "create-multiline" })).outcome, "success");
+  const refused = await mutator.createIssue({ title: "Bell", body: "ring\u0007", idempotencyKey: "create-bell" });
+  assert.equal(errorCode(refused), "invalid_request");
+  assert.equal(postCount(transport), 1);
+});
