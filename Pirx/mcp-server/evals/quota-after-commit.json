@@ -1,0 +1,109 @@
+{
+ "description": "zdrovena#539: the worker committed its tests, then its usage limit ran out. Adopt the commit and resume or ship; do not start over.",
+ "trigger": "- Worker zakończył pracę nad PiotrGry/zdrovena-reconciliation#539 (raport: worker_status).",
+ "pass": {
+  "anyOf": [
+   {
+    "tool": "worker_resume",
+    "issue": 539
+   },
+   {
+    "tool": "task_ship",
+    "issue": 539
+   },
+   {
+    "tool": "task_adopt_commit",
+    "issue": 539
+   }
+  ],
+  "forbid": [
+   {
+    "tool": "worker_start"
+   },
+   {
+    "tool": "task_restart_clean"
+   }
+  ]
+ },
+ "tools": {
+  "queue_list": {
+   "items": [
+    {
+     "repository": "PiotrGry/zdrovena-reconciliation",
+     "issue": 539,
+     "title": "Add tests for allegro_auth_cmd.py (0% coverage)",
+     "status": "Todo",
+     "worker": "Pirx",
+     "queueOrder": 610,
+     "priority": "P2",
+     "workType": "Task"
+    }
+   ]
+  },
+  "journal_read": {
+   "entries": [
+    {
+     "seq": 1,
+     "at": "2026-11-19T09:30:00Z",
+     "kind": "tool",
+     "name": "worker_start",
+     "task": "PiotrGry/zdrovena-reconciliation#539",
+     "ok": true,
+     "input": {
+      "issue": 539
+     }
+    }
+   ]
+  },
+  "worker_status": {
+   "running": false,
+   "task": "PiotrGry/zdrovena-reconciliation#539",
+   "exited": true,
+   "report": {
+    "outcome": "usage_limit",
+    "startedAt": "2026-11-19T09:30:10Z",
+    "endedAt": "2026-11-19T09:37:36Z",
+    "usageLimitMessage": "You've hit your session limit · resets 21:00 (Europe/Warsaw)",
+    "workerReport": "Committed f0f534b: tests for the Device Authorization flow in allegro_auth_cmd. I was about to run the full test suite when the limit was hit."
+   }
+  },
+  "task_facts": [
+   {
+    "match": {
+     "issue": 539
+    },
+    "result": {
+     "task": "PiotrGry/zdrovena-reconciliation#539",
+     "issue": {
+      "number": 539,
+      "state": "OPEN",
+      "title": "Add tests for allegro_auth_cmd.py (0% coverage)"
+     },
+     "workspace": {
+      "branch": "pirx/task-gh-539",
+      "worktree": "/wt/539",
+      "exists": true,
+      "head": "f0f534b4d66a",
+      "clean": true,
+      "commitsAheadOfBase": [
+       "f0f534b test(allegro-auth): cover Device Authorization flow in allegro_auth_cmd (13 hours ago)"
+      ],
+      "commitsBehindBase": 2,
+      "pushed": false
+     },
+     "pullRequests": {
+      "prs": [],
+      "note": "No pull request from this branch."
+     },
+     "worker": {
+      "running": false
+     }
+    }
+   }
+  ],
+  "ci_status": {
+   "runs": [],
+   "note": "No workflow run for this ref."
+  }
+ }
+}

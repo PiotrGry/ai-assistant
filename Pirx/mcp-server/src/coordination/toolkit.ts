@@ -19,6 +19,8 @@ export interface ToolSpec<Shape extends z.ZodRawShape> {
   readonly input: Shape;
   /** Mutating tools obey the stop switch and dry-run mode. */
   readonly mutating: boolean;
+  /** Works only on Pirx's own journal, so it runs for real even in eval and dry-run mode. */
+  readonly local?: boolean;
   /** The Task this call is about, for the journal (`owner/repo#N`). */
   readonly task?: (input: z.infer<z.ZodObject<Shape>>) => string | undefined;
   readonly run: (input: z.infer<z.ZodObject<Shape>>, context: CoordinationContext) => Promise<Record<string, unknown>>;
@@ -81,7 +83,8 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, conte
     let result: Record<string, unknown>;
     let ok = true;
     try {
-      if (context.settings.evalFixture !== undefined) result = fromFixture(context.settings.evalFixture, spec.name, input as Record<string, unknown>, spec.mutating);
+      if (spec.local === true) result = await spec.run(input, context);
+      else if (context.settings.evalFixture !== undefined) result = fromFixture(context.settings.evalFixture, spec.name, input as Record<string, unknown>, spec.mutating);
       else if (spec.mutating && stopped(context.settings)) result = refuse(`The stop switch is on (${context.settings.stopFile} exists). No mutating tool runs until the operator removes it.`);
       else if (spec.mutating && context.settings.dryRun) {
         // Dry-run runs the tool's real checks and reads; only commands that change something are intercepted.

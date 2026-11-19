@@ -257,6 +257,7 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
     description: "Ask the operator a question Pirx and Opus could not settle. It goes to the journal and the chat shows it; the operator answers in the chat. Meanwhile park the Task or do other work.",
     input: { question: z.string().min(1), repository: repositoryInput.optional(), issue: issueInput.optional() },
     mutating: false,
+    local: true,
     task: (input) => input.repository !== undefined && input.issue !== undefined ? taskKey(input.repository, input.issue) : undefined,
     run: async (input, { store }) => {
       const task = input.repository !== undefined && input.issue !== undefined ? taskKey(input.repository, input.issue) : undefined;

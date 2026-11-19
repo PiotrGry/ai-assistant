@@ -1,0 +1,90 @@
+{
+ "description": "zdrovena#523 is queued for Pirx, but merged PR #530 already fixed it. Close it with that evidence or skip it; do not dispatch the worker.",
+ "trigger": "- Zmieniła się kolejka zadań dla Pirxa.",
+ "pass": {
+  "anyOf": [],
+  "forbid": [
+   {
+    "tool": "worker_start"
+   },
+   {
+    "tool": "worker_resume"
+   },
+   {
+    "tool": "issue_create"
+   }
+  ]
+ },
+ "tools": {
+  "queue_list": {
+   "items": [
+    {
+     "repository": "PiotrGry/zdrovena-reconciliation",
+     "issue": 523,
+     "title": "[BUG] CD coordinator skips a release when it starts seconds after the PR merge",
+     "status": "Todo",
+     "worker": "Pirx",
+     "queueOrder": 600,
+     "priority": "P2",
+     "workType": "Task"
+    }
+   ]
+  },
+  "journal_read": {
+   "entries": []
+  },
+  "worker_status": {
+   "running": false
+  },
+  "task_facts": [
+   {
+    "match": {
+     "issue": 523
+    },
+    "result": {
+     "task": "PiotrGry/zdrovena-reconciliation#523",
+     "issue": {
+      "number": 523,
+      "state": "OPEN",
+      "title": "[BUG] CD coordinator skips a release when it starts seconds after the PR merge",
+      "closedByPullRequestsReferences": []
+     },
+     "workspace": {
+      "exists": false,
+      "note": "No worktree for this Issue yet."
+     },
+     "worker": {
+      "running": false
+     }
+    }
+   }
+  ],
+  "pr_list": {
+   "prs": [
+    {
+     "pr": 530,
+     "title": "fix(cd): retry the commit-to-PR lookup and fail closed (fixes #523)",
+     "state": "MERGED",
+     "branch": "fix/523-cd-pr-lookup",
+     "base": "develop",
+     "mergedAt": "2026-11-19T08:10:00Z",
+     "closes": [],
+     "mentions": [
+      523,
+      530
+     ]
+    }
+   ]
+  },
+  "issue_list": {
+   "issues": [
+    {
+     "issue": 523,
+     "title": "[BUG] CD coordinator skips a release when it starts seconds after the PR merge",
+     "state": "OPEN",
+     "closedBy": []
+    }
+   ]
+  }
+ }
+}

@@ -164,3 +164,12 @@ test("eval mode: facts come from the case file and mutating calls are only recor
     assert.equal(h.store.journal({ kind: "tool" }).length, 2);
   } finally { await h.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+test("eval judge: a forbidden call fails the run, and anyOf needs one matching call", async () => {
+  const { judge } = await import("../src/coordination/eval-cli.js");
+  const entry = (name: string, input: Record<string, unknown>) => ({ seq: 1, at: "", kind: "tool" as const, name, input, ok: true });
+  const testCase = { description: "", trigger: "", pass: { anyOf: [{ tool: "ci_rerun", runId: 7 }], forbid: [{ tool: "worker_start" }] } };
+  assert.equal(judge(testCase, [entry("ci_rerun", { runId: 7 })]).passed, true);
+  assert.equal(judge(testCase, [entry("ci_rerun", { runId: 8 })]).passed, false);
+  assert.equal(judge(testCase, [entry("ci_rerun", { runId: 7 }), entry("worker_start", {})]).passed, false);
+});

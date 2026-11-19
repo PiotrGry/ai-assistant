@@ -19,6 +19,7 @@ export function registerJournalTools(server: McpServer, context: CoordinationCon
     description: "Read Pirx's journal: earlier decisions, notes, questions and tool calls, newest last. Filter by Task or kind. This is Pirx's memory between ticks.",
     input: { ...optionalTask, kind: z.enum(["tool", "tick", "note", "question", "verdict"]).optional(), limit: z.number().int().min(1).max(200).optional() },
     mutating: false,
+    local: true,
     run: async (input, { store }) => {
       const task = keyOf(input);
       const entries = store.journal({ ...(task === undefined ? {} : { task }), ...(input.kind === undefined ? {} : { kind: input.kind }), limit: input.limit ?? 30 });
@@ -31,6 +32,7 @@ export function registerJournalTools(server: McpServer, context: CoordinationCon
     description: "Write a note to Pirx's journal for later ticks, e.g. 'zdrovena#541 waits for the operator's dev-store test'. Optionally tied to one Task.",
     input: { ...optionalTask, text: z.string().min(1) },
     mutating: false,
+    local: true,
     task: keyOf,
     run: async (input, { store, settings }) => {
       const task = keyOf(input);
@@ -44,6 +46,7 @@ export function registerJournalTools(server: McpServer, context: CoordinationCon
     description: "Record the operator's verdict on an earlier journal entry: 'wrong' marks a bad decision so it joins the eval set; 'right' confirms it. Use when the operator says so in chat.",
     input: { seq: z.number().int().positive(), verdict: z.enum(["wrong", "right"]), note: z.string().optional() },
     mutating: false,
+    local: true,
     run: async (input, { store }) => {
       const target = store.journal({ limit: 500 }).find((entry) => entry.seq === input.seq);
       if (target === undefined) return { found: false, note: `No journal entry ${input.seq}.` };
@@ -57,6 +60,7 @@ export function registerJournalTools(server: McpServer, context: CoordinationCon
     description: "Timeline of one Task from the journal: each tick with its trigger, the facts Pirx read, the tools it called with results, its decision and reason, and any operator verdicts.",
     input: { repository: repositoryInput, issue: issueInput, limit: z.number().int().min(1).max(500).optional() },
     mutating: false,
+    local: true,
     run: async (input, { store }) => {
       const task = taskKey(input.repository, input.issue);
       const own = store.journal({ task, limit: input.limit ?? 200 });

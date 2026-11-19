@@ -21,7 +21,8 @@
     "start": "node --enable-source-maps agent/dist/index.js",
     "tui": "node --enable-source-maps tui/dist/index.js",
     "tick": "node --enable-source-maps mcp-server/dist/coordination/tick-cli.js",
-    "watch": "node --enable-source-maps mcp-server/dist/coordination/watch-cli.js"
+    "watch": "node --enable-source-maps mcp-server/dist/coordination/watch-cli.js",
+    "eval": "node --enable-source-maps mcp-server/dist/coordination/eval-cli.js"
   },
   "devDependencies": {
     "@types/node": "^26.4.0",

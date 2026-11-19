@@ -1,0 +1,104 @@
+{
+ "description": "An earlier Pirx proposal (pirx-round #540) is still open and the queue is empty. Do not create another Issue and do not start work that is not queued.",
+ "trigger": "- Obchód okresowy (minęło 61 min od ostatniego ticka).",
+ "pass": {
+  "anyOf": [],
+  "forbid": [
+   {
+    "tool": "issue_create"
+   },
+   {
+    "tool": "worker_start"
+   },
+   {
+    "tool": "worker_resume"
+   }
+  ]
+ },
+ "tools": {
+  "queue_list": {
+   "items": [],
+   "note": "Nothing is queued for Pirx."
+  },
+  "journal_read": {
+   "entries": [
+    {
+     "seq": 40,
+     "at": "2026-11-19T10:01:00Z",
+     "kind": "tool",
+     "name": "issue_create",
+     "ok": true,
+     "output": {
+      "issue": 540
+     }
+    }
+   ]
+  },
+  "worker_status": {
+   "running": false
+  },
+  "issue_list": [
+   {
+    "match": {
+     "label": "pirx-round"
+    },
+    "result": {
+     "issues": [
+      {
+       "issue": 540,
+       "title": "Add tests for files_cmd.py (raise coverage from 53.3%)",
+       "state": "OPEN",
+       "labels": [
+        "pirx-round"
+       ]
+      }
+     ]
+    }
+   },
+   {
+    "result": {
+     "issues": [
+      {
+       "issue": 540,
+       "title": "Add tests for files_cmd.py (raise coverage from 53.3%)",
+       "state": "OPEN",
+       "labels": [
+        "pirx-round"
+       ]
+      },
+      {
+       "issue": 432,
+       "title": "[CI/CD] Harden gates and enable continuous delivery",
+       "state": "OPEN",
+       "labels": []
+      }
+     ]
+    }
+   }
+  ],
+  "zdrovena_code_health": {
+   "outcome": "success",
+   "totalCoverage": 86.4,
+   "weakestFiles": [
+    {
+     "file": "zdrovena/api/commands/files_cmd.py",
+     "percent": 53.3,
+     "missing": 28
+    },
+    {
+     "file": "zdrovena/month_closing/orchestrator.py",
+     "percent": 57.6,
+     "missing": 284
+    }
+   ]
+  },
+  "zdrovena_production_errors": {
+   "outcome": "success",
+   "groups": []
+  },
+  "pr_list": {
+   "prs": [],
+   "note": "No pull request matches."
+  }
+ }
+}
