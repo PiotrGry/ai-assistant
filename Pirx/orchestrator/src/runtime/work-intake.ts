@@ -41,7 +41,8 @@ export interface WorkIntakeInput {
   readonly risk: WorkIntakeRecord["risk"];
   readonly area: string;
   readonly workType: WorkIntakeRecord["workType"];
-  readonly queueOrder: number;
+  /** Omitted: after all existing work (minutes since the Unix epoch at acceptance); a replay keeps the stored value. */
+  readonly queueOrder?: number;
   readonly acceptedAt: UtcTimestamp;
 }
 export interface WorkIntakeTransition {
@@ -80,8 +81,11 @@ function issueMatches(record: WorkIntakeRecord, issue: GitHubIssueSummary): bool
   return normalized.includes(`## Goal\n\n${record.goal}`) && record.acceptanceCriteria.every((criterion) => normalized.includes(`- [ ] ${criterion}`) || normalized.includes(`- [x] ${criterion}`) || normalized.includes(`- [X] ${criterion}`));
 }
 
+/** Work outside Pirx itself (e.g. zdrovena) has no Project Area; the field stays empty, as on Issues added by hand. */
+export const NO_AREA = "None";
+
 function projectMetadata(record: WorkIntakeRecord): GitHubProjectMetadata {
-  return { status: "Todo", priority: record.priority, worker: "Pirx", area: record.area, risk: record.risk, workType: record.workType, queueOrder: record.queueOrder };
+  return { status: "Todo", priority: record.priority, worker: "Pirx", ...(record.area === NO_AREA ? {} : { area: record.area }), risk: record.risk, workType: record.workType, queueOrder: record.queueOrder };
 }
 
 function boundedError(value: string): string { return value.replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 256); }
