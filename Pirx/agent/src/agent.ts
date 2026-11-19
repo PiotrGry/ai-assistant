@@ -452,6 +452,7 @@ export class PirxAgent {
     const timestamp = this.#now().toISOString();
     const gpuBefore = await readGpuStats();
     const repeatedToolCalls = new Map<string, number>();
+    const mutationsByTool = new Map<string, number>();
     let operationSequence = 0;
     const totals: Totals = {
       totalDuration: 0,
@@ -787,6 +788,12 @@ export class PirxAgent {
 
           let actionPlan: ActionPlan | undefined;
           if (!this.#mcp.isReadOnlyTool(name)) {
+            // A fresh idempotency key makes every retry a new operation, so the repeat check above cannot catch it.
+            const mutationLimit = this.#config.maxMutationsPerTool ?? 10;
+            if ((mutationsByTool.get(name) ?? 0) >= mutationLimit) {
+              this.#messages.push({ role: "tool", tool_name: name, content: `Nie wykonano: ${name} zadziałało już ${mutationLimit} raz(y) w tej turze, to limit. Nie ponawiaj; opisz w odpowiedzi, co zostało zrobione.` });
+              continue;
+            }
             const { actionLedger: ledger, sessionId, turnId } = context;
             if (ledger === undefined || sessionId === undefined || turnId === undefined) {
               this.#messages.push({ role: "tool", tool_name: name, content: "Nie wykonano zapisu: trwały rejestr operacji jest niedostępny." });
@@ -854,6 +861,7 @@ export class PirxAgent {
             Math.max(1, Math.floor(deadline - performance.now())),
           );
           const operationState = execution.outcome === "succeeded" ? "succeeded" : execution.outcome === "unknown" ? "unknown" : "failed";
+          if (actionPlan !== undefined && operationState !== "failed") mutationsByTool.set(name, (mutationsByTool.get(name) ?? 0) + 1);
           const toolMessage = actionPlan !== undefined && operationState === "unknown"
             ? `Wynik operacji jest niepewny. Sprawdź stan zewnętrzny przed ponowieniem. ${execution.text}`
             : execution.text;
