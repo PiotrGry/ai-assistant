@@ -1,5 +1,13 @@
 # Pirx w TypeScript
 
+Pirx to lokalna asystentka: czat z lokalnym modelem, który prowadzi kalendarz i
+notatki oraz koordynuje rozwój aplikacji. **Decyduje model**; Claude Code (Opus)
+tylko pisze kod, a wszystko inne to cienkie narzędzia MCP, które model wywołuje.
+Kontrakt: [`PRODUCT.md`](PRODUCT.md). Plan przejścia ze starego daemona:
+[`docs/control-center-refactor.md`](docs/control-center-refactor.md).
+Sekcje poniżej opisują stan obecny, w tym stary daemon, który działa do
+przełączenia.
+
 ## Pytania workera do Pirxa
 
 Daemon automatycznie uruchamia Claude z dedykowanym serwerem MCP
