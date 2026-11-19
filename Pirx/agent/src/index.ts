@@ -66,7 +66,52 @@ async function main(): Promise<void> {
   console.log(`Narzędzia MCP: ${agent.toolNames.join(", ") || "brak"}`);
   console.log("Wpisz /help, aby zobaczyć komendy.");
 
+  const chatTurn = async (prompt: string): Promise<void> => {
+    const turnContext = logger.beginTurn(prompt);
+    try {
+      const turn = await agent.chat(prompt, turnContext);
+      console.log(`\nPirx: ${turn.content}\n`);
+      await logger.saveTurn(
+        prompt,
+        turn.content,
+        turn.metrics,
+        turnContext,
+        turn.messages,
+      );
+      const generationRate =
+        turn.metrics.generation_tokens_per_second === null
+          ? "niedostępne"
+          : `${turn.metrics.generation_tokens_per_second.toFixed(1)} tok/s`;
+      console.log(
+        `Metryki: ${turn.metrics.output_tokens} tokenów, ` +
+        `${generationRate}, ` +
+        `${turn.metrics.tool_calls} wywołań narzędzi.`,
+      );
+      const contextTokens = agent.lastContextTokens;
+      if (contextTokens !== undefined) {
+        console.log(
+          `Kontekst: ${contextTokens} / ${config.numCtx} ` +
+          `(${((contextTokens / config.numCtx) * 100).toFixed(1)}%)`,
+        );
+      }
+    } catch (error: unknown) {
+      await logger.failTurn(turnContext, error);
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error(`\nBłąd komunikacji z Ollamą: ${detail}`);
+    }
+  };
+
   try {
+    // --once: the whole of stdin is one prompt, answered in one turn (scheduled Pirx rounds, #338).
+    // Piped lines arrive faster than readline.question() asks for them and were lost.
+    if (process.argv.includes("--once")) {
+      readline.close();
+      const chunks: Buffer[] = [];
+      for await (const chunk of stdin) chunks.push(chunk as Buffer);
+      const prompt = Buffer.concat(chunks).toString("utf8").trim();
+      if (prompt.length > 0) await chatTurn(prompt);
+      return;
+    }
     while (true) {
       const prompt = await readPrompt(readline);
       if (prompt === undefined) {
@@ -141,40 +186,9 @@ async function main(): Promise<void> {
         case "/exit":
         case "/quit":
           return;
-        default: {
-          const turnContext = logger.beginTurn(prompt);
-          try {
-            const turn = await agent.chat(prompt, turnContext);
-            console.log(`\nPirx: ${turn.content}\n`);
-            await logger.saveTurn(
-              prompt,
-              turn.content,
-              turn.metrics,
-              turnContext,
-              turn.messages,
-            );
-            const generationRate =
-              turn.metrics.generation_tokens_per_second === null
-                ? "niedostępne"
-                : `${turn.metrics.generation_tokens_per_second.toFixed(1)} tok/s`;
-            console.log(
-              `Metryki: ${turn.metrics.output_tokens} tokenów, ` +
-              `${generationRate}, ` +
-              `${turn.metrics.tool_calls} wywołań narzędzi.`,
-            );
-            const contextTokens = agent.lastContextTokens;
-            if (contextTokens !== undefined) {
-              console.log(
-                `Kontekst: ${contextTokens} / ${config.numCtx} ` +
-                `(${((contextTokens / config.numCtx) * 100).toFixed(1)}%)`,
-              );
-            }
-          } catch (error: unknown) {
-            await logger.failTurn(turnContext, error);
-            const detail = error instanceof Error ? error.message : String(error);
-            console.error(`\nBłąd komunikacji z Ollamą: ${detail}`);
-          }
-        }
+        default:
+          await chatTurn(prompt);
+          break;
       }
     }
   } finally {
