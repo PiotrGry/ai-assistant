@@ -112,6 +112,9 @@ The old `runtime.sqlite` is archived as a file. No data migration.
 | `pr_list` | Recent PRs and the Issues they close | read-only |
 | `ci_status` | Checks and runs for a commit or PR, with the failing log tail | read-only |
 | `ci_rerun` | Rerun failed jobs | rerun cap |
+| `pr_update_branch` | Merge the base into a PR that is behind it (on GitHub; no rebase, no force) | `pirx/*` branches only |
+| `issue_list`, `issue_create`, `issue_comment` | Thin Issue tools on `gh`, in place of the old `github_issue_*` (labels, closing PRs, explicit empty result) | allowlisted repositories |
+| `journal_verdict` | Record the operator's verdict on a journal entry; `wrong` entries join the eval set | none |
 | `task_adopt_commit` | Take the worker's commit as the Task's current state | commit must be on the Task branch |
 | `task_restart_clean` | New worktree from the current base | the old one is archived, not deleted |
 | `task_park` | Set a Task aside with a reason | none |
@@ -194,6 +197,14 @@ The old daemon keeps serving zdrovena until T9. Do not add decision logic to it.
 ### Order and dependencies
 
 T1 first. T2 before every tool task. T3, T4, T5 can run in that order or T3 in parallel with T4. T6 needs T2 to T5. T7 needs T6. T8 needs T7 at 5/5. T9, then T10.
+
+## Implementation notes
+
+- The coordination tools live in `mcp-server/src/coordination/` and are visible in the `coordination` tool profile (`PIRX_TOOL_PROFILE=coordination`). They use `git` and `gh` subprocesses and do not import `@pirx/orchestrator`.
+- The repository allowlist, base branch, target branch, test and setup commands are read from the existing `~/.config/pirx/orchestrator.json`, so nothing is configured twice.
+- Stop switch: the file `~/.config/pirx/STOP` (`PIRX_STOP_FILE`). Dry-run: `PIRX_COORDINATION_DRY_RUN=1`. Eval mode: `PIRX_COORDINATION_EVAL=<case.json>` (facts from the case file, mutating calls only recorded).
+- The worker runs detached (`coordination/worker-run.js`) with the old sandbox profile and a persistent Claude session (`--session-id`, then `--resume`). Logs and reports are under `~/.local/share/pirx/coordination/worker-logs/`.
+- Caps (environment): `PIRX_CAP_WORKER_STARTS` (3 per Task per day), `PIRX_CAP_CI_RERUNS` (2 per run), `PIRX_CAP_ASK_OPUS` (3 per Task per day).
 
 ## Operator decisions (2026-11-19)
 

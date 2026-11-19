@@ -1,0 +1,111 @@
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+
+/** One repository Pirx may coordinate. Read from the existing orchestrator config so nothing is configured twice. */
+export interface CoordinatedRepository {
+  readonly repository: string;
+  readonly repositoryRoot: string;
+  readonly baseBranch: string;
+  readonly remoteName: string;
+  /** Branch a change must reach before its Issue may be closed (the repository's own CD target). */
+  readonly targetBranch: string;
+  readonly testCommands: readonly string[];
+  readonly setupCommands: readonly string[];
+}
+
+export interface CoordinationSettings {
+  readonly repositories: readonly CoordinatedRepository[];
+  readonly projectOwner?: string;
+  readonly projectNumber?: number;
+  readonly worktreeParent: string;
+  readonly workerLogDir: string;
+  readonly stopFile: string;
+  readonly dryRun: boolean;
+  readonly evalFixture?: string;
+  readonly tick?: string;
+  readonly claudeExecutable: string;
+  readonly workerModel?: string;
+  readonly opusModel: string;
+  readonly caps: {
+    readonly workerStartsPerTaskPerDay: number;
+    readonly ciRerunsPerRun: number;
+    readonly askOpusPerTaskPerDay: number;
+    readonly workerTimeoutMs: number;
+  };
+  readonly configurationError?: string;
+}
+
+function dataHome(environment: NodeJS.ProcessEnv): string {
+  return environment.XDG_DATA_HOME?.trim() || join(environment.HOME ?? homedir(), ".local", "share");
+}
+function configHome(environment: NodeJS.ProcessEnv): string {
+  return environment.XDG_CONFIG_HOME?.trim() || join(environment.HOME ?? homedir(), ".config");
+}
+function positive(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function loadCoordinationSettings(environment: NodeJS.ProcessEnv): CoordinationSettings {
+  const configPath = environment.PIRX_ORCHESTRATOR_CONFIG?.trim() || join(configHome(environment), "pirx", "orchestrator.json");
+  let raw: Record<string, unknown> = {};
+  let configurationError: string | undefined;
+  try {
+    raw = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+  } catch (error: unknown) {
+    configurationError = `Cannot read ${configPath}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  const repositories: CoordinatedRepository[] = [];
+  for (const item of Array.isArray(raw.repositories) ? raw.repositories as Record<string, unknown>[] : []) {
+    if (typeof item.repository !== "string" || typeof item.repositoryRoot !== "string") continue;
+    const delivery = item.delivery as { postMerge?: { mustReach?: unknown } } | undefined;
+    const mustReach = Array.isArray(delivery?.postMerge?.mustReach) ? delivery!.postMerge!.mustReach as unknown[] : [];
+    const baseBranch = typeof item.baseBranch === "string" ? item.baseBranch : "main";
+    repositories.push({
+      repository: item.repository,
+      repositoryRoot: resolve(item.repositoryRoot),
+      baseBranch,
+      remoteName: typeof item.remoteName === "string" ? item.remoteName : "origin",
+      targetBranch: typeof mustReach[0] === "string" ? mustReach[0] : baseBranch,
+      testCommands: Array.isArray(item.testCommands) ? (item.testCommands as unknown[]).filter((v): v is string => typeof v === "string") : [],
+      setupCommands: Array.isArray(item.setupCommands) ? (item.setupCommands as unknown[]).filter((v): v is string => typeof v === "string") : [],
+    });
+  }
+  const projectNumber = Number(environment.PIRX_GITHUB_PROJECT_NUMBER ?? raw.githubProjectNumber);
+  const projectOwner = (environment.PIRX_GITHUB_PROJECT_OWNER ?? raw.githubProjectOwner) as string | undefined;
+  return {
+    repositories,
+    ...(typeof projectOwner === "string" && projectOwner.length > 0 ? { projectOwner } : {}),
+    ...(Number.isSafeInteger(projectNumber) && projectNumber > 0 ? { projectNumber } : {}),
+    worktreeParent: environment.PIRX_WORKTREE_PARENT?.trim() || join(dataHome(environment), "pirx", "coordination", "worktrees"),
+    workerLogDir: environment.PIRX_WORKER_LOG_DIR?.trim() || join(dataHome(environment), "pirx", "coordination", "worker-logs"),
+    stopFile: environment.PIRX_STOP_FILE?.trim() || join(configHome(environment), "pirx", "STOP"),
+    dryRun: environment.PIRX_COORDINATION_DRY_RUN === "1" || environment.PIRX_COORDINATION_DRY_RUN === "true",
+    ...(environment.PIRX_COORDINATION_EVAL?.trim() ? { evalFixture: environment.PIRX_COORDINATION_EVAL.trim() } : {}),
+    ...(environment.PIRX_TICK_ID?.trim() ? { tick: environment.PIRX_TICK_ID.trim() } : {}),
+    claudeExecutable: environment.PIRX_CLAUDE_EXECUTABLE?.trim() || "claude",
+    ...(environment.PIRX_WORKER_MODEL?.trim() ? { workerModel: environment.PIRX_WORKER_MODEL.trim() } : {}),
+    opusModel: environment.PIRX_OPUS_MODEL?.trim() || "claude-opus-5-5",
+    caps: {
+      workerStartsPerTaskPerDay: positive(environment.PIRX_CAP_WORKER_STARTS, 3),
+      ciRerunsPerRun: positive(environment.PIRX_CAP_CI_RERUNS, 2),
+      askOpusPerTaskPerDay: positive(environment.PIRX_CAP_ASK_OPUS, 3),
+      workerTimeoutMs: positive(environment.PIRX_WORKER_TIMEOUT_MS, 3 * 60 * 60 * 1000),
+    },
+    ...(configurationError === undefined ? {} : { configurationError }),
+  };
+}
+
+export function findRepository(settings: CoordinationSettings, repository: string): CoordinatedRepository | undefined {
+  return settings.repositories.find((item) => item.repository.toLowerCase() === repository.toLowerCase());
+}
+
+export function stopped(settings: CoordinationSettings): boolean {
+  return existsSync(settings.stopFile);
+}
+
+/** Start of the current UTC day, for the per-day caps. */
+export function startOfDay(now: string): string {
+  return `${now.slice(0, 10)}T00:00:00.000Z`;
+}

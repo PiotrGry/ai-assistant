@@ -8,18 +8,20 @@ export interface ProfileSettingDefinition {
   readonly forwardToMcp: boolean;
 }
 
-export const TOOL_PROFILES = ["personal", "development", "operations", "all"] as const;
+export const TOOL_PROFILES = ["personal", "development", "operations", "coordination", "all"] as const;
 export type ToolProfile = typeof TOOL_PROFILES[number];
-export type ToolScope = "common" | "personal" | "development" | "operations";
+export type ToolScope = "common" | "personal" | "development" | "operations" | "coordination";
 
 /** One explicit visibility matrix shared by chat entry points and MCP. */
 export const TOOL_PROFILE_SCOPES: Readonly<Record<ToolProfile, ReadonlySet<ToolScope>>> = Object.freeze({
   personal: new Set<ToolScope>(["common", "personal"]),
   development: new Set<ToolScope>(["common", "development"]),
   operations: new Set<ToolScope>(["common", "development", "operations"]),
+  // The local model coordinating delivery (docs/control-center-refactor.md): only the thin coordination tools.
+  coordination: new Set<ToolScope>(["common", "coordination"]),
   // Explicit operator opt-in: private Calendar/Obsidian data shares a session
   // with GitHub write tools, so untrusted Issue text can steer private data.
-  all: new Set<ToolScope>(["common", "personal", "development", "operations"]),
+  all: new Set<ToolScope>(["common", "personal", "development", "operations", "coordination"]),
 });
 
 export function resolveToolProfile(environment: NodeJS.ProcessEnv): ToolProfile {
@@ -99,6 +101,10 @@ const MCP_OPERATIONAL_KEYS = [
   "PIRX_GITHUB_POC_ISSUE", "PIRX_GITHUB_SHIPMENT_POC", "PIRX_GITHUB_SHIPMENT_POC_STATE_FILE",
   "PIRX_GITHUB_SHIPMENT_CYCLE", "PIRX_GITHUB_FAILURE_HANDOFF_POC", "PIRX_GITHUB_FAILURE_HANDOFF_POC_STATE_FILE",
   "PIRX_CODEX_EXECUTABLE",
+  // Coordination tools (docs/control-center-refactor.md).
+  "PIRX_TICK_ID", "PIRX_COORDINATION_DRY_RUN", "PIRX_COORDINATION_EVAL", "PIRX_STOP_FILE", "PIRX_STORAGE_FILE",
+  "PIRX_ORCHESTRATOR_CONFIG", "PIRX_WORKTREE_PARENT", "PIRX_WORKER_LOG_DIR", "PIRX_CLAUDE_EXECUTABLE", "PIRX_WORKER_MODEL", "PIRX_OPUS_MODEL",
+  "PIRX_CAP_WORKER_STARTS", "PIRX_CAP_CI_RERUNS", "PIRX_CAP_ASK_OPUS", "PIRX_WORKER_TIMEOUT_MS",
 ] as const;
 export const MCP_CHILD_ENVIRONMENT_KEYS = Object.freeze([
   ...MCP_HOST_KEYS,
