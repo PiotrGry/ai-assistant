@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# One observe-only Pirx round (#338 phase 1): the local model reads production errors,
-# the backlog and the daemon state, and writes what it would do. Nothing is changed:
-# mutation tools need host approval, which a non-interactive run never gives.
+# One Pirx round (#338): the local model reads production errors, the backlog, the daemon
+# state and code health, writes what it would do, and may dispatch one tests-only task
+# (agent/prompts/round.md). Every tool call is in the chat action ledger and session log.
 # --once reads the whole prompt from stdin and answers it in one turn.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

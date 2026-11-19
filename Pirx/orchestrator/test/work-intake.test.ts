@@ -145,3 +145,35 @@ test("a retryable intake failure remains visible without stalling unrelated Queu
     assert.equal(pending.outcome === "success" ? pending.value.lastError : undefined, "retry later");
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });
+
+test("work outside Pirx (Area None) leaves the Project Area empty", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-work-intake-none-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  try {
+    assert.equal(store.workIntakes.create(input({ area: "None" })).outcome, "success");
+    let observedMetadata: GitHubProjectMetadata | undefined;
+    const coordinator = new WorkIntakeCoordinator(store, new Map([[repository, {
+      reader: { getIssue: async () => success(issue(), "read-246") },
+      project: { synchronize: async (_issue, metadata) => {
+        observedMetadata = metadata;
+        return { outcome: "synchronized" as const, correlationId: "project-246", message: "synchronized", value: { id: "project-item-246", issueNodeId: "issue-node-246", values: {} } };
+      } },
+    }]]), { now: () => acceptedAt });
+    assert.equal((await coordinator.reconcile()).outcome, "processed");
+    assert.deepEqual(observedMetadata, { status: "Todo", priority: "P1", worker: "Pirx", risk: "Medium", workType: "Task", queueOrder: 246 });
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("an omitted Queue Order is assigned once and kept on replay", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-work-intake-order-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  try {
+    const { queueOrder: _omitted, ...withoutOrder } = input();
+    const created = store.workIntakes.create(withoutOrder);
+    assert.equal(created.outcome === "success" ? created.value.queueOrder : undefined, Math.floor(Date.parse(acceptedAt) / 60_000));
+    const replay = store.workIntakes.create({ ...withoutOrder, acceptedAt: "2026-11-06T13:00:00.000Z" as UtcTimestamp });
+    assert.equal(replay.outcome, "success");
+    assert.equal(replay.outcome === "success" && created.outcome === "success" ? replay.value.id : "", created.outcome === "success" ? created.value.id : "x");
+    assert.equal(replay.outcome === "success" ? replay.value.queueOrder : undefined, Math.floor(Date.parse(acceptedAt) / 60_000));
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});

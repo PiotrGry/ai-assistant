@@ -1546,18 +1546,19 @@ export class OperatorDecisionRepository {
 }
 
 const WORK_INTAKE_REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u;
-const WORK_INTAKE_AREAS = new Set(["Pirx Core", "GitHub", "Orchestrator", "Scheduler", "Checkpoint", "Agent Adapter", "Security", "Architecture Lab", "Research"]);
-function workIntakePayload(input: WorkIntakeInput): string {
+const WORK_INTAKE_AREAS = new Set(["Pirx Core", "GitHub", "Orchestrator", "Scheduler", "Checkpoint", "Agent Adapter", "Security", "Architecture Lab", "Research", "None"]);
+type StoredWorkIntakeInput = WorkIntakeInput & { readonly queueOrder: number };
+function workIntakePayload(input: StoredWorkIntakeInput): string {
   return JSON.stringify({ repository: input.repository, issueNumber: input.issueNumber, goal: input.goal.trim(), acceptanceCriteria: [...input.acceptanceCriteria], priority: input.priority, risk: input.risk, area: input.area, workType: input.workType, queueOrder: input.queueOrder });
 }
-function validWorkIntakeInput(input: WorkIntakeInput): boolean {
+function validWorkIntakeInput(input: StoredWorkIntakeInput): boolean {
   return OPERATOR_ID_PATTERN.test(input.operationId) && WORK_INTAKE_REPOSITORY_PATTERN.test(input.repository) && Number.isSafeInteger(input.issueNumber) && input.issueNumber > 0 && typeof input.goal === "string" && input.goal.trim().length > 0 && input.goal.length <= 2_000 && Array.isArray(input.acceptanceCriteria) && input.acceptanceCriteria.length > 0 && input.acceptanceCriteria.length <= 40 && input.acceptanceCriteria.every((value) => typeof value === "string" && value.trim().length > 0 && value.length <= 512) && new Set(input.acceptanceCriteria).size === input.acceptanceCriteria.length && ["P0", "P1", "P2", "P3"].includes(input.priority) && ["Low", "Medium", "High", "Prod-sensitive"].includes(input.risk) && WORK_INTAKE_AREAS.has(input.area) && ["Task", "Bug", "Experiment"].includes(input.workType) && Number.isSafeInteger(input.queueOrder) && input.queueOrder > 0 && canonicalOperatorTimestamp(input.acceptedAt);
 }
 function workIntakeFromRow(row: Record<string, unknown>): StorageResult<WorkIntakeRecord> {
   try {
     const criteria = jsonParse(row.acceptance_criteria_json);
     if (row.schema_version !== 1 || typeof row.id !== "string" || typeof row.operation_id !== "string" || typeof row.repository !== "string" || typeof row.issue_number !== "number" || typeof row.goal !== "string" || !Array.isArray(criteria) || !criteria.every((value) => typeof value === "string") || typeof row.priority !== "string" || typeof row.risk !== "string" || typeof row.area !== "string" || typeof row.work_type !== "string" || typeof row.queue_order !== "number" || typeof row.state !== "string" || !WORK_INTAKE_STATES.includes(row.state as WorkIntakeRecord["state"]) || typeof row.accepted_at !== "string" || typeof row.updated_at !== "string" || !canonicalOperatorTimestamp(row.accepted_at) || !canonicalOperatorTimestamp(row.updated_at) || !Number.isSafeInteger(row.version) || Number(row.version) <= 0 || typeof row.content_hash !== "string" || !/^[0-9a-f]{64}$/u.test(row.content_hash)) return invalidRecord();
-    const input: WorkIntakeInput = { operationId: row.operation_id, repository: row.repository, issueNumber: row.issue_number, goal: row.goal, acceptanceCriteria: criteria as string[], priority: row.priority as WorkIntakeRecord["priority"], risk: row.risk as WorkIntakeRecord["risk"], area: row.area, workType: row.work_type as WorkIntakeRecord["workType"], queueOrder: row.queue_order, acceptedAt: row.accepted_at as UtcTimestamp };
+    const input: StoredWorkIntakeInput = { operationId: row.operation_id, repository: row.repository, issueNumber: row.issue_number, goal: row.goal, acceptanceCriteria: criteria as string[], priority: row.priority as WorkIntakeRecord["priority"], risk: row.risk as WorkIntakeRecord["risk"], area: row.area, workType: row.work_type as WorkIntakeRecord["workType"], queueOrder: row.queue_order, acceptedAt: row.accepted_at as UtcTimestamp };
     if (!validWorkIntakeInput(input) || workIntakeId(input.operationId) !== row.id || createHash("sha256").update(workIntakePayload(input)).digest("hex") !== row.content_hash) return invalidRecord();
     if (row.issue_node_id !== null && typeof row.issue_node_id !== "string" || row.task_id !== null && typeof row.task_id !== "string" || row.last_error !== null && typeof row.last_error !== "string") return invalidRecord();
     return success(Object.freeze({ schemaVersion: 1, id: row.id, ...input, acceptanceCriteria: Object.freeze([...input.acceptanceCriteria]), state: row.state as WorkIntakeRecord["state"], ...(typeof row.issue_node_id === "string" ? { issueNodeId: row.issue_node_id } : {}), ...(typeof row.task_id === "string" ? { taskId: row.task_id } : {}), updatedAt: row.updated_at as UtcTimestamp, version: Number(row.version), ...(typeof row.last_error === "string" ? { lastError: row.last_error } : {}), contentHash: row.content_hash }));
@@ -1567,12 +1568,14 @@ function workIntakeFromRow(row: Record<string, unknown>): StorageResult<WorkInta
 export class WorkIntakeRepository {
   readonly #store: RuntimeSqliteStore;
   public constructor(store: RuntimeSqliteStore) { this.#store = store; }
-  public create(input: WorkIntakeInput): StorageResult<WorkIntakeRecord> {
-    if (!validWorkIntakeInput(input)) return { outcome: "invalid_record", message: "Work intake input is invalid." };
-    const id = workIntakeId(input.operationId); const payload = workIntakePayload(input); const contentHash = createHash("sha256").update(payload).digest("hex");
+  public create(requested: WorkIntakeInput): StorageResult<WorkIntakeRecord> {
     return this.#store.execute(() => {
       try {
-        const existing = this.getByOperation(input.operationId);
+        const existing = this.getByOperation(requested.operationId);
+        // Duplicate Queue Orders block the whole Queue, so a caller may leave the order to Pirx.
+        const input = { ...requested, queueOrder: requested.queueOrder ?? (existing.outcome === "success" ? existing.value.queueOrder : Math.floor(Date.parse(requested.acceptedAt) / 60_000)) };
+        if (!validWorkIntakeInput(input)) return { outcome: "invalid_record", message: "Work intake input is invalid." };
+        const id = workIntakeId(input.operationId); const payload = workIntakePayload(input); const contentHash = createHash("sha256").update(payload).digest("hex");
         if (existing.outcome === "success") return existing.value.contentHash === contentHash ? existing : conflict("Work intake operation ID conflicts with another payload.");
         if (existing.outcome !== "not_found") return existing;
         this.#store.database.prepare("INSERT INTO runtime_work_intakes (id, schema_version, operation_id, repository, issue_number, goal, acceptance_criteria_json, priority, risk, area, work_type, queue_order, state, issue_node_id, task_id, accepted_at, updated_at, version, last_error, content_hash) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', NULL, NULL, ?, ?, 1, NULL, ?)").run(id, input.operationId, input.repository, input.issueNumber, input.goal.trim(), jsonValue(input.acceptanceCriteria), input.priority, input.risk, input.area, input.workType, input.queueOrder, input.acceptedAt, input.acceptedAt, contentHash);
