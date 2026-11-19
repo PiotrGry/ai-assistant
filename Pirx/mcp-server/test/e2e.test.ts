@@ -122,29 +122,28 @@ test("e2e: a worker question reaches the chat, and the operator's answer resumes
   } finally { await fixture.cleanup(); }
 });
 
-test("e2e: one queued Issue without the planning contract stops the whole Queue, and the chat is told which Issue", async () => {
+test("e2e: one queued Issue without the planning contract is skipped, the rest of the Queue runs, and the chat is told which Issue", async () => {
   const fixture = await E2eFixture.create();
   try {
     fixture.addIssue(issue);
     fixture.addIssue({ number: 463, goal: "No template", criteria: [], body: "## Problem\n\nThis Issue has no Goal, Implementation scope or Acceptance criteria section." });
     fixture.queueOnProject(issue.number, 10);
     fixture.queueOnProject(463, 20);
+    await fixture.planClaude([{ do: "commit" }]);
 
     const daemon = fixture.startDaemon();
-    await fixture.waitFor("the Queue to be rejected", () => daemon.events.some((event) => event.event === "queue" && event.outcome === "invalid_snapshot"), daemon);
-    // Give the daemon a few more cycles: the valid Issue must not start while the Queue is invalid.
-    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+    await fixture.waitFor("the valid Issue to push", () => fixture.results(issue.number)[0] === "CODE_PUSHED", daemon);
+    const skippedEvent = daemon.events.find((event) => event.event === "queue" && event.outcome === "synchronized" && /e2e-fixture#463/u.test(JSON.stringify(event)));
+    assert.ok(skippedEvent, "The queue event does not name the skipped Issue.");
+    assert.match(JSON.stringify(skippedEvent), /Missing or empty section/u);
 
     await withChat(fixture, async (chat) => {
       const status = await chat.call("pirx_orchestrator_status", {});
       assert.equal(status.isError, false, JSON.stringify(status.value));
-      const snapshot = status.value.snapshot as { lastQueueOutcome?: string };
-      assert.equal(snapshot.lastQueueOutcome, "invalid_snapshot");
-      assert.match(JSON.stringify(status.value), new RegExp(`${"PiotrGry/e2e-fixture"}#463`, "u"), "The status does not name the Issue that broke the Queue.");
+      assert.equal((status.value.snapshot as { lastQueueOutcome?: string }).lastQueueOutcome, "synchronized");
     });
     assert.equal(await daemon.stop(), 0, fixture.describe(daemon));
-    assert.deepEqual(fixture.results(issue.number), [], "A Task started although the Queue snapshot was invalid.");
-    assert.deepEqual(await fixture.claudeCalls(), []);
+    assert.deepEqual(fixture.results(463), [], "A Task started for the Issue without the planning contract.");
   } finally { await fixture.cleanup(); }
 });
 
