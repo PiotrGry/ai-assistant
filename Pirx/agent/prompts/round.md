@@ -6,7 +6,7 @@ Sprawdź po kolei:
 1. `zdrovena_production_errors` za ostatnie 24 h. Odróżnij błędy oczekiwane (np. 401 z anonimowych smoke testów, staging) od prawdziwych problemów aplikacji. Zwróć uwagę, co jest nowe albo narasta.
 2. `github_issue_list` — otwarte issue w zdrovena-reconciliation: co jest gotowe dla workera, co wymaga doprecyzowania, co jest przestarzałe.
 3. `pirx_orchestrator_status` i `pirx_task_history` — co robi daemon, czy coś utknęło albo czeka. Jeśli wcześniej zleciłeś zadanie (otwarte issue z etykietą `pirx-round`), sprawdź, co worker z nim zrobił.
-4. `zdrovena_code_health` — najsłabiej pokryte testami pliki i znaczniki TODO/FIXME. Gdy w backlogu nie ma gotowej pracy, wybierz z tego 1–3 konkretne, małe zadania. Najpierw sprawdź `github_issue_list` z `state: all`, czy takie zadanie już nie istnieje (otwarte albo zamknięte).
+4. `zdrovena_code_health` — najsłabiej pokryte testami pliki i znaczniki TODO/FIXME. Gdy w backlogu nie ma gotowej pracy, wybierz z tego 1–3 konkretne, małe zadania. Duplikaty sprawdź jednym wywołaniem `github_issue_search` na plik, z samą nazwą pliku (np. `allegro_auth_cmd`). Wyszukiwanie obejmuje otwarte i zamknięte issue. Pusty wynik znaczy, że takiego zadania nie ma; nie powtarzaj wyszukiwania innymi słowami.
 
 5. Zlecenie — najwyżej jedno na obchód, tylko gdy wszystkie warunki są spełnione:
    - daemon działa, worker jest bezczynny, a w zdrovena nie ma otwartego issue z etykietą `pirx-round`;
@@ -36,6 +36,7 @@ Sprawdź po kolei:
       Pisz po angielsku. Nie zgaduj szczegółów, których nie widziałeś w danych z narzędzi (np. nazw katalogów czy typów błędów).
    b. `pirx_work_submit` dla utworzonego issue: `repository: "PiotrGry/zdrovena-reconciliation"`, numer issue, `goal` i `acceptanceCriteria` znak w znak takie jak w treści issue, `priority: "P3"`, `risk: "Low"`, `area: "None"`, `workType: "Task"`, bez `queueOrder`, `operationId` w postaci `round-<numer issue>`.
    c. Sprawdź wynik `pirx_work_submit` (`accepted_pending`). Daemon sam doda zadanie do kolejki i uruchomi workera.
+   Zlecaj przed pisaniem raportu: masz około 20 wywołań narzędzi na cały obchód.
 
 Na koniec napisz raport w czterech częściach:
 A. Co widzisz — fakty z narzędzi, z liczbami i identyfikatorami.
