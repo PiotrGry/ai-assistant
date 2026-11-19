@@ -212,11 +212,13 @@ function timestamp(value: unknown, field: string): UtcTimestamp | DomainError {
 function reason(value: unknown, field: string): string | DomainError {
   return text(value, field, 1_000);
 }
-function arrayOfText(value: unknown, field: string, required: boolean): readonly string[] | DomainError {
+const ISSUE_TEXT_LIMIT = 65_536;
+
+function arrayOfText(value: unknown, field: string, required: boolean, maxLength = 512): readonly string[] | DomainError {
   if (!Array.isArray(value)) return { code: "invalid_input", message: `${field} must be an array.`, field };
   const values: string[] = [];
   for (const item of value) {
-    const parsed = text(item, field, 512);
+    const parsed = text(item, field, maxLength);
     if (typeof parsed !== "string") return parsed;
     if (!values.includes(parsed)) values.push(parsed);
   }
@@ -307,9 +309,10 @@ export function utcTimestamp(value: string): DomainResult<UtcTimestamp> {
 export function createTask(input: TaskInput): DomainResult<TaskSnapshot> {
   const parsedId = id(input.id, "TaskId");
   if (typeof parsedId !== "string") return { ok: false, error: parsedId };
-  const goal = text(input.goal, "goal");
-  const scope = text(input.scope, "scope");
-  const criteria = arrayOfText(input.acceptanceCriteria, "acceptanceCriteria", true);
+  // Issue text is bounded by GitHub (65,536 characters), not by a smaller Pirx limit.
+  const goal = text(input.goal, "goal", ISSUE_TEXT_LIMIT);
+  const scope = text(input.scope, "scope", ISSUE_TEXT_LIMIT);
+  const criteria = arrayOfText(input.acceptanceCriteria, "acceptanceCriteria", true, ISSUE_TEXT_LIMIT);
   const capabilities = arrayOfText(input.requiredCapabilities, "requiredCapabilities", true);
   const createdAt = timestamp(input.createdAt, "createdAt");
   const updatedAt = timestamp(input.updatedAt ?? input.createdAt, "updatedAt");
