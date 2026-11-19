@@ -81,6 +81,8 @@ export const PROFILE_SETTING_DEFINITIONS = Object.freeze({
   PIRX_GITHUB_TIMEOUT_MS: integration,
   PIRX_GITHUB_OWNER: integration,
   PIRX_GITHUB_REPOSITORY: integration,
+  PIRX_APP_INSIGHTS_APP: integration,
+  PIRX_APP_INSIGHTS_RESOURCE_GROUP: integration,
   PIRX_GITHUB_PROJECT_OWNER: integration,
   PIRX_GITHUB_PROJECT_NUMBER: integration,
 } satisfies Record<string, ProfileSettingDefinition>);
