@@ -276,6 +276,12 @@ export class ProductionRuntime {
       if (ownership.value.repository !== repository.repository || ownership.value.repositoryRoot !== repository.repositoryRoot || ownership.value.assignedBranch !== previous.branch || ownership.value.worktreePath !== previous.worktree) return portFailure("Resume workspace ownership does not match the predecessor Attempt.", "conflict");
       const validated = await this.#resumeWorkspaceValidator.validate({ taskId, attemptId: previous.id, repository: ownership.value.repository, repositoryRoot: ownership.value.repositoryRoot, worktreePath: ownership.value.worktreePath, assignedBranch: ownership.value.assignedBranch, expectedCurrentCommit: ownership.value.currentRevision, expectedOwnershipVersion: ownership.value.version, timeoutMs: WORKSPACE_RESUME_VALIDATION_LIMITS.maxTimeoutMs });
       if (validated.outcome !== "valid") return portFailure(`Resume workspace validation failed: ${validated.outcome}.`, validated.outcome === "unknown" ? "unknown" : "conflict");
+      // The worker's own commits from the interrupted Attempt: record them so the successor resumes from them.
+      const advancedTo = validated.observed?.currentCommit;
+      if (advancedTo !== undefined && advancedTo !== ownership.value.currentRevision) {
+        const moved = this.#store.workspaces.updateCurrentRevision(previous.id, ownership.value.ownershipToken, ownership.value.version, advancedTo, now);
+        if (moved.outcome !== "success") return portFailure(`Resume could not record the worker's commit ${advancedTo}: ${moved.message}`, "conflict");
+      }
       const id = this.#options.attemptIdFactory?.(taskId, ordinal, now) ?? attemptId(taskId, ordinal, now);
       const resumed = startResumedAttempt(this.#store, taskId, { check: () => ({ repository: "present", branch: "present", worktree: "present", currentCommit: "present" }) }, { id, worker: workerId, provider: this.#options.provider, branch: ownership.value.assignedBranch, worktree: ownership.value.worktreePath, currentCommit: ownership.value.currentRevision }, now, { transferWorkspaceOwnership: true });
       if (resumed.outcome !== "ready" || !("attempt" in resumed)) return portFailure("Resume could not create a durable successor Attempt.", resumed.outcome === "human_action_required" ? "conflict" : "failed");

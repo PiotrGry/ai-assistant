@@ -134,7 +134,15 @@ export class WorkspaceResumeValidator {
     const headFailure = commandFailure(head, "Current commit validation", { ...commonObserved, branch: normalized.assignedBranch }); if (headFailure !== undefined) return headFailure;
     const currentCommit = head.stdout.trim().toLowerCase();
     if (currentCommit.length === 0) return result("missing_commit", "The worktree has no current commit.", observed({ ...commonObserved, branch: normalized.assignedBranch }));
-    if (currentCommit !== expectedCommit || entry.head?.toLowerCase() !== expectedCommit) return result("commit_mismatch", "The worktree commit differs from the expected durable commit.", observed({ ...commonObserved, branch: normalized.assignedBranch, currentCommit }));
+    if (entry.head?.toLowerCase() !== currentCommit) return result("commit_mismatch", "Git reports a different HEAD for the registered worktree.", observed({ ...commonObserved, branch: normalized.assignedBranch, currentCommit }));
+    if (currentCommit !== expectedCommit) {
+      // An interrupted Attempt (quota, timeout, restart) can leave the worker's own commits on its branch.
+      // Resume from them when they only add to the recorded commit; anything else still fails closed.
+      const advanced = await this.#git.run(["merge-base", "--is-ancestor", expectedCommit, currentCommit], repositoryRoot, validTimeout(request.timeoutMs)!, request.signal);
+      if (advanced.outcome === "cancelled") return result("cancelled", "Workspace validation was cancelled.", observed({ ...commonObserved, branch: normalized.assignedBranch, currentCommit }));
+      if (advanced.outcome === "timeout") return result("timeout", "Commit relation validation timed out.", observed({ ...commonObserved, branch: normalized.assignedBranch, currentCommit }));
+      if (advanced.outcome !== "success") return result("commit_mismatch", `The worktree commit ${currentCommit} is not a descendant of the expected durable commit ${expectedCommit}.`, observed({ ...commonObserved, branch: normalized.assignedBranch, currentCommit }));
+    }
     const base = await this.#git.run(["merge-base", "--is-ancestor", record.expectedBaseRevision, currentCommit], repositoryRoot, validTimeout(request.timeoutMs)!, request.signal);
     if (base.outcome === "cancelled") return result("cancelled", "Workspace validation was cancelled.", observed({ ...commonObserved, branch: normalized.assignedBranch, currentCommit }));
     if (base.outcome === "timeout") return result("timeout", "Base relation validation timed out.", observed({ ...commonObserved, branch: normalized.assignedBranch, currentCommit }));
