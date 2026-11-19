@@ -1,9 +1,11 @@
 # Chat execution and context policy
 
-The daemon owns scheduling and durable execution. Chat reads its state and issues
-explicit supported commands. `running` is a daemon state, not evidence that a
-blocked Task is executing. Orchestrator status includes `attentionRequired` with
-the queued failed/blocked Task, last Attempt and sanitized blocking reason.
+The local model coordinates development work through MCP tools (see
+[`../../PRODUCT.md`](../../PRODUCT.md)). Until the switch-over in
+[`../../docs/control-center-refactor.md`](../../docs/control-center-refactor.md),
+the old daemon still runs Tasks. For it, `running` is a daemon state, not evidence
+that a blocked Task is executing, and its status includes `attentionRequired` with
+the queued failed or blocked Task, its last Attempt and the blocking reason.
 
 ## Shared startup configuration
 
