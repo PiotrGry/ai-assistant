@@ -5,7 +5,8 @@ import { createTask, type TaskId, type TaskRisk, type TaskSnapshot, type UtcTime
 import type { RuntimeSqliteStore } from "./sqlite.js";
 
 export const GITHUB_QUEUE_SYNC_SCHEMA_VERSION = 1 as const;
-export const GITHUB_QUEUE_SYNC_LIMITS = Object.freeze({ maximumCriteria: 40, maximumCapabilities: 16 } as const);
+/** GitHub's own Issue body limit is the only size bound; a section has no smaller one. */
+export const GITHUB_QUEUE_SYNC_LIMITS = Object.freeze({ maximumCriteria: 40, maximumCapabilities: 16, maximumText: 65_536 } as const);
 
 export interface GitHubQueueSynchronizerOptions {
   readonly workerCapabilities: readonly string[];
@@ -13,12 +14,15 @@ export interface GitHubQueueSynchronizerOptions {
 }
 
 export type GitHubQueueSyncResult =
-  | { readonly outcome: "synchronized"; readonly created: number; readonly updated: number; readonly queued: number; readonly unqueued: number }
+  | { readonly outcome: "synchronized"; readonly created: number; readonly updated: number; readonly queued: number; readonly unqueued: number; readonly skipped: readonly SkippedIssue[]; readonly message?: string }
   | { readonly outcome: "invalid_snapshot" | "conflict" | "storage_error"; readonly message: string };
 
 export type GitHubQueueReconcileResult =
   | GitHubQueueSyncResult
   | { readonly outcome: "rate_limited" | "provider_error" | "schema_drift"; readonly message: string };
+
+/** An Issue left out of the Queue because it breaks the planning contract; the rest of the Queue still runs. */
+export interface SkippedIssue { readonly issue: string; readonly reason: string }
 
 interface PlannedTask {
   readonly issue: GitHubQueueIssue;
@@ -42,17 +46,23 @@ function section(body: string, name: string): string | undefined {
   if (start < 0) return undefined;
   const endOffset = lines.slice(start + 1).findIndex((line) => /^##\s+/u.test(line.trim()));
   const value = lines.slice(start + 1, endOffset < 0 ? undefined : start + 1 + endOffset).join("\n").trim();
-  return value === undefined || value.length === 0 || value.length > 2_000 ? undefined : value;
+  return value.length === 0 ? undefined : value;
 }
-function planning(issue: GitHubQueueIssue): PlannedTask | undefined {
+/** Returns the plan, or the exact rule the Issue breaks so the operator can fix it. */
+function planning(issue: GitHubQueueIssue): PlannedTask | string {
+  if (issue.body.length > GITHUB_QUEUE_SYNC_LIMITS.maximumText) return `Issue body is longer than ${GITHUB_QUEUE_SYNC_LIMITS.maximumText} characters.`;
   const goal = section(issue.body, "Goal");
   const scope = section(issue.body, "Implementation scope");
   const acceptance = section(issue.body, "Acceptance criteria");
-  if (goal === undefined || scope === undefined || acceptance === undefined || issue.priority === undefined || issue.risk === undefined) return undefined;
-  const acceptanceCriteria = acceptance.split(/\r?\n/u).map((line) => /^\s*- \[[ xX]\]\s+(.+)\s*$/u.exec(line)?.[1]?.trim()).filter((value): value is string => value !== undefined && value.length > 0 && value.length <= 512);
-  const priority = PRIORITY[issue.priority]; const risk = RISK[issue.risk];
-  if (acceptanceCriteria.length === 0 || acceptanceCriteria.length > GITHUB_QUEUE_SYNC_LIMITS.maximumCriteria || priority === undefined || risk === undefined) return undefined;
-  return { issue, goal, scope, acceptanceCriteria: Object.freeze([...new Set(acceptanceCriteria)]), priority, risk };
+  const missing = [["Goal", goal], ["Implementation scope", scope], ["Acceptance criteria", acceptance]].filter(([, value]) => value === undefined).map(([name]) => `## ${name}`);
+  if (missing.length > 0) return `Missing or empty section(s): ${missing.join(", ")}.`;
+  const acceptanceCriteria = acceptance!.split(/\r?\n/u).map((line) => /^\s*- \[[ xX]\]\s+(.+)\s*$/u.exec(line)?.[1]?.trim()).filter((value): value is string => value !== undefined && value.length > 0);
+  if (acceptanceCriteria.length === 0) return "## Acceptance criteria has no \"- [ ] ...\" checkbox line.";
+  if (acceptanceCriteria.length > GITHUB_QUEUE_SYNC_LIMITS.maximumCriteria) return `## Acceptance criteria has ${acceptanceCriteria.length} checkboxes; the limit is ${GITHUB_QUEUE_SYNC_LIMITS.maximumCriteria}.`;
+  const priority = issue.priority === undefined ? undefined : PRIORITY[issue.priority]; const risk = issue.risk === undefined ? undefined : RISK[issue.risk];
+  if (priority === undefined) return `Project field Priority is missing or unsupported (${issue.priority ?? "empty"}).`;
+  if (risk === undefined) return `Project field Risk is missing or unsupported (${issue.risk ?? "empty"}).`;
+  return { issue, goal: goal!, scope: scope!, acceptanceCriteria: Object.freeze([...new Set(acceptanceCriteria)]), priority, risk };
 }
 function taskId(issue: GitHubQueueIssue): TaskId { return `gh-${issue.issueNumber}-${createHash("sha256").update(issue.nodeId).digest("hex").slice(0, 16)}` as TaskId; }
 
@@ -73,6 +83,8 @@ export class GitHubQueueSynchronizer {
     if (snapshot.schemaVersion !== GITHUB_QUEUE_SYNC_SCHEMA_VERSION || !Number.isFinite(Date.parse(snapshot.synchronizedAt)) || new Date(snapshot.synchronizedAt).toISOString() !== snapshot.synchronizedAt) return failure("invalid_snapshot", "Queue snapshot envelope is invalid.");
     const orders = new Map<number, string>();
     const planned: PlannedTask[] = [];
+    const skipped: SkippedIssue[] = [];
+    const skip = (issue: GitHubQueueIssue, reason: string): void => { skipped.push(Object.freeze({ issue: identity(issue), reason })); };
     for (const issue of snapshot.items) {
       if (issue.queueOrder === undefined) continue;
       // Queue Order can remain on historical and non-executable Project items.
@@ -81,14 +93,15 @@ export class GitHubQueueSynchronizer {
         || (issue.status !== undefined && !EXECUTABLE_STATUS.has(issue.status))
         || (issue.worker !== undefined && issue.worker !== "Pirx")
         || (issue.workType !== undefined && !EXECUTABLE_TYPE.has(issue.workType))) continue;
-      if (issue.worker === undefined || issue.status === undefined || issue.workType === undefined) return failure("invalid_snapshot", `Queued Issue ${identity(issue)} is missing required planning metadata (Worker, Status or Work Type).`);
-      if (!Number.isSafeInteger(issue.queueOrder) || issue.queueOrder <= 0) return failure("invalid_snapshot", `Queue Order must be a positive integer for active Pirx work. Issue ${identity(issue)} has Queue Order=${issue.queueOrder}, Issue state=${issue.state}, Project Status=${issue.status}.`);
+      // One bad Issue is skipped and reported; it must not stop every other queued Task.
+      if (issue.worker === undefined || issue.status === undefined || issue.workType === undefined) { skip(issue, "Missing Project field Worker, Status or Work Type."); continue; }
+      if (!Number.isSafeInteger(issue.queueOrder) || issue.queueOrder <= 0) { skip(issue, `Queue Order must be a positive integer (has ${issue.queueOrder}).`); continue; }
       const previous = orders.get(issue.queueOrder);
       if (previous !== undefined) return failure("invalid_snapshot", `Duplicate Queue Order=${issue.queueOrder} among active Pirx work: ${previous} conflicts with ${identity(issue)} (Issue state=${issue.state}, Project Status=${issue.status}).`);
       orders.set(issue.queueOrder, `${identity(issue)} (Issue state=${issue.state}, Project Status=${issue.status ?? "missing"})`);
-      if (!this.#repositories.has(`${issue.owner}/${issue.repository}`)) return failure("invalid_snapshot", "A Pirx Queue item targets a repository outside the configured allowlist.");
+      if (!this.#repositories.has(`${issue.owner}/${issue.repository}`)) { skip(issue, "Repository is outside the configured allowlist."); continue; }
       const parsed = planning(issue);
-      if (parsed === undefined) return failure("invalid_snapshot", `Queued Issue ${identity(issue)} has an invalid planning contract.`);
+      if (typeof parsed === "string") { skip(issue, parsed); continue; }
       planned.push(parsed);
     }
     const plannedIdentities = new Set(planned.map((value) => identity(value.issue)));
@@ -148,7 +161,7 @@ export class GitHubQueueSynchronizer {
       return { outcome: "success" as const, value: { created, updated, queued: planned.length, unqueued } };
     });
     if (result.outcome !== "success") return failure(result.outcome === "conflict" ? "conflict" : "storage_error", result.message);
-    return { outcome: "synchronized", ...result.value };
+    return { outcome: "synchronized", ...result.value, skipped: Object.freeze(skipped), ...(skipped.length === 0 ? {} : { message: `Skipped ${skipped.length} Issue(s) that break the planning contract: ${skipped.map((item) => `${item.issue}: ${item.reason}`).join(" ")}` }) };
   }
 }
 

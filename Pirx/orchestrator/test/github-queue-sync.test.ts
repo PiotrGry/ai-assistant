@@ -88,27 +88,29 @@ test("projects one runtime Task per Issue, skips an external blocker, replays, a
     const sync = new GitHubQueueSynchronizer(store, { workerCapabilities: ["repository.read", "repository.write"], repositories: ["PiotrGry/ai-assistant"] });
     const blocker = { nodeId: "outside", owner: "PiotrGry", repository: "ai-assistant", issueNumber: 999, state: "OPEN" as const };
     const first = sync.synchronize(snapshot([queueIssue(1, 10, { blockers: [blocker] }), queueIssue(2, 20)]));
-    assert.deepEqual(first, { outcome: "synchronized", created: 2, updated: 0, queued: 2, unqueued: 0 });
+    assert.deepEqual(first, { outcome: "synchronized", created: 2, updated: 0, queued: 2, unqueued: 0, skipped: [] });
     const tasks = store.tasks.list(); assert.equal(tasks.outcome, "success"); if (tasks.outcome !== "success") return;
     assert.equal(tasks.value.length, 2);
     const selected = store.selection.select({ evaluatedAt: now as UtcTimestamp, worker: { workerId: "pirx", capabilities: ["repository.read", "repository.write"] } });
     assert.equal(selected.outcome, "selected"); if (selected.outcome === "selected") assert.equal(selected.candidate.task.githubReference?.issueNumber, 2);
     const blocked = selected.outcome === "selected" ? selected.explanations.find((value) => value.taskId !== selected.candidate.task.id) : undefined;
     assert.deepEqual(blocked?.externalBlockers, ["PiotrGry/ai-assistant#999"]);
-    assert.deepEqual(sync.synchronize(snapshot([queueIssue(1, 10, { blockers: [blocker] }), queueIssue(2, 20)])), { outcome: "synchronized", created: 0, updated: 0, queued: 2, unqueued: 0 });
+    assert.deepEqual(sync.synchronize(snapshot([queueIssue(1, 10, { blockers: [blocker] }), queueIssue(2, 20)])), { outcome: "synchronized", created: 0, updated: 0, queued: 2, unqueued: 0, skipped: [] });
     const replayedTasks = store.tasks.list(); assert.equal(replayedTasks.outcome === "success" ? replayedTasks.value.length : 0, 2);
-    assert.deepEqual(sync.synchronize(snapshot([])), { outcome: "synchronized", created: 0, updated: 0, queued: 0, unqueued: 2 });
+    assert.deepEqual(sync.synchronize(snapshot([])), { outcome: "synchronized", created: 0, updated: 0, queued: 0, unqueued: 2, skipped: [] });
     assert.equal(store.selection.select({ evaluatedAt: now as UtcTimestamp, worker: { workerId: "pirx", capabilities: ["repository.read", "repository.write"] } }).outcome, "no_runnable_task");
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test("rejects duplicate order and malformed planning before any durable Task is created", async () => {
+test("rejects duplicate order, and skips malformed planning without creating a Task", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pirx-queue-invalid-"));
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
   try {
     const sync = new GitHubQueueSynchronizer(store, { workerCapabilities: ["repository.read"], repositories: ["PiotrGry/ai-assistant"] });
     assert.equal(sync.synchronize(snapshot([queueIssue(1, 10), queueIssue(2, 10)])).outcome, "invalid_snapshot");
-    assert.equal(sync.synchronize(snapshot([queueIssue(1, 10, { body: "missing contract" })])).outcome, "invalid_snapshot");
+    const malformed = sync.synchronize(snapshot([queueIssue(1, 10, { body: "missing contract" })]));
+    assert.equal(malformed.outcome, "synchronized");
+    if (malformed.outcome === "synchronized") assert.match(malformed.skipped[0]?.reason ?? "", /## Goal/u);
     const tasks = store.tasks.list(); assert.equal(tasks.outcome, "success"); if (tasks.outcome === "success") assert.equal(tasks.value.length, 0);
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });
@@ -139,12 +141,12 @@ test("historical and non-executable items do not reserve or invalidate active Qu
     const selected = store.selection.select({ evaluatedAt: now as UtcTimestamp, worker: { workerId: "pirx", capabilities: ["repository.read"] } });
     assert.equal(selected.outcome, "selected");
     if (selected.outcome === "selected") assert.equal(selected.candidate.task.githubReference?.issueNumber, 462);
-    assert.deepEqual(sync.synchronize(snapshot([queueIssue(462, 190, { status: "Done" }), ...ignored])), { outcome: "synchronized", created: 0, updated: 0, queued: 0, unqueued: 1 });
+    assert.deepEqual(sync.synchronize(snapshot([queueIssue(462, 190, { status: "Done" }), ...ignored])), { outcome: "synchronized", created: 0, updated: 0, queued: 0, unqueued: 1, skipped: [] });
     assert.equal(store.selection.select({ evaluatedAt: now as UtcTimestamp, worker: { workerId: "pirx", capabilities: ["repository.read"] } }).outcome, "no_runnable_task");
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test("active Queue conflicts, invalid orders and incomplete metadata still fail closed", async () => {
+test("duplicate active Queue Orders fail closed; invalid orders and incomplete metadata skip only that Issue", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pirx-queue-active-invalid-"));
   const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
   try {
@@ -156,13 +158,36 @@ test("active Queue conflicts, invalid orders and incomplete metadata still fail 
       assert.match(conflict.message, /ai-assistant#1/u);
       assert.match(conflict.message, /ai-assistant#2/u);
     }
-    for (const order of [0, -1, 354.5, NaN, Infinity]) assert.equal(sync.synchronize(snapshot([queueIssue(1, order)])).outcome, "invalid_snapshot");
+    for (const order of [0, -1, 354.5, NaN, Infinity]) {
+      const result = sync.synchronize(snapshot([queueIssue(1, order)]));
+      assert.equal(result.outcome, "synchronized");
+      if (result.outcome === "synchronized") assert.match(result.skipped[0]?.reason ?? "", /Queue Order/u);
+    }
     for (const field of ["worker", "status", "workType"] as const) {
       const { [field]: _missing, ...incomplete } = queueIssue(1, 10);
-      assert.equal(sync.synchronize(snapshot([incomplete])).outcome, "invalid_snapshot");
+      const result = sync.synchronize(snapshot([incomplete]));
+      assert.equal(result.outcome, "synchronized");
+      if (result.outcome === "synchronized") assert.equal(result.skipped[0]?.issue, "PiotrGry/ai-assistant#1");
     }
     const tasks = store.tasks.list();
     assert.equal(tasks.outcome, "success");
     if (tasks.outcome === "success") assert.equal(tasks.value.length, 0);
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("one Issue that breaks the planning contract is skipped and reported, and the rest of the Queue still runs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirx-queue-skip-"));
+  const store = RuntimeSqliteStore.open({ filename: join(directory, "runtime.sqlite") });
+  try {
+    const sync = new GitHubQueueSynchronizer(store, { workerCapabilities: ["repository.read"], repositories: ["PiotrGry/ai-assistant"] });
+    const longScope = `## Goal\n\nShip it.\n\n## Implementation scope\n\n${"- detail\n".repeat(400)}\n## Acceptance criteria\n\n- [ ] ${"long criterion ".repeat(60)}`;
+    const result = sync.synchronize(snapshot([queueIssue(1, 10, { body: "no sections" }), queueIssue(2, 20, { body: longScope }), queueIssue(3, 30)]));
+    assert.equal(result.outcome, "synchronized");
+    if (result.outcome !== "synchronized") return;
+    assert.equal(result.queued, 2);
+    assert.deepEqual(result.skipped.map((item) => item.issue), ["PiotrGry/ai-assistant#1"]);
+    assert.match(result.skipped[0]!.reason, /Missing or empty section/u);
+    const tasks = store.tasks.list();
+    assert.deepEqual(tasks.outcome === "success" ? tasks.value.map((task) => task.githubReference?.issueNumber).sort() : [], [2, 3]);
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });
