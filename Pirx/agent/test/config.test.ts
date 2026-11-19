@@ -61,3 +61,9 @@ test("the output token limit defaults to a chat reply and can be raised for back
   assert.equal(loadConfig({ PIRX_MAX_OUTPUT_TOKENS: "4096" }).maxOutputTokens, 4096);
   assert.throws(() => loadConfig({ PIRX_MAX_OUTPUT_TOKENS: "0" }));
 });
+
+test("the per-tool mutation limit may be 0, which allows no mutation at all", () => {
+  assert.equal(loadConfig({}).maxMutationsPerTool, 10);
+  assert.equal(loadConfig({ PIRX_MAX_MUTATIONS_PER_TOOL: "0" }).maxMutationsPerTool, 0);
+  assert.throws(() => loadConfig({ PIRX_MAX_MUTATIONS_PER_TOOL: "-1" }));
+});

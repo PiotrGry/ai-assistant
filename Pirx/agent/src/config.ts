@@ -43,6 +43,15 @@ export interface SystemPrompt {
   readonly sha256: string;
 }
 
+/** 0 is a real value here: it turns a limit into "none allowed". */
+function nonNegativeInteger(name: string, value: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} musi być nieujemną liczbą całkowitą (otrzymano: ${value}).`);
+  }
+  return parsed;
+}
+
 function positiveInteger(name: string, value: string): number {
   const parsed = Number(value);
 
@@ -172,7 +181,7 @@ export function loadConfig(
       environment.PIRX_MAX_REPEATED_TOOL_CALLS ?? "3",
     ),
     maxToolCalls: positiveInteger("PIRX_MAX_TOOL_CALLS", environment.PIRX_MAX_TOOL_CALLS ?? "8"),
-    maxMutationsPerTool: positiveInteger("PIRX_MAX_MUTATIONS_PER_TOOL", environment.PIRX_MAX_MUTATIONS_PER_TOOL ?? "10"),
+    maxMutationsPerTool: nonNegativeInteger("PIRX_MAX_MUTATIONS_PER_TOOL", environment.PIRX_MAX_MUTATIONS_PER_TOOL ?? "10"),
     maxOutputTokens: positiveInteger("PIRX_MAX_OUTPUT_TOKENS", environment.PIRX_MAX_OUTPUT_TOKENS ?? "1536"),
     maxTurnDurationMs: positiveInteger("PIRX_MAX_TURN_DURATION_MS", environment.PIRX_MAX_TURN_DURATION_MS ?? "180000"),
     maxTurnToolResultCharacters: positiveInteger("PIRX_MAX_TURN_TOOL_RESULT_CHARACTERS", environment.PIRX_MAX_TURN_TOOL_RESULT_CHARACTERS ?? "24000"),
