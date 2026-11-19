@@ -1,0 +1,135 @@
+{
+ "description": "zdrovena#543: the PR's Security scan failed on a TLS handshake timeout inside pip-audit, not on the change. Rerun the failed jobs; do not involve the worker.",
+ "trigger": "- Zmienił się stan PR albo CI na gałęziach pirx/* w PiotrGry/zdrovena-reconciliation: #559.",
+ "pass": {
+  "anyOf": [
+   {
+    "tool": "ci_rerun",
+    "runId": 44612328605
+   }
+  ],
+  "forbid": [
+   {
+    "tool": "worker_start"
+   },
+   {
+    "tool": "worker_resume"
+   },
+   {
+    "tool": "task_restart_clean"
+   }
+  ]
+ },
+ "tools": {
+  "queue_list": {
+   "items": [
+    {
+     "repository": "PiotrGry/zdrovena-reconciliation",
+     "issue": 543,
+     "title": "Email the printed label sheet",
+     "status": "Todo",
+     "worker": "Pirx",
+     "queueOrder": 640,
+     "priority": "P2",
+     "workType": "Task"
+    }
+   ]
+  },
+  "journal_read": {
+   "entries": [
+    {
+     "seq": 5,
+     "at": "2026-11-19T20:40:00Z",
+     "kind": "tool",
+     "name": "task_ship",
+     "task": "PiotrGry/zdrovena-reconciliation#543",
+     "ok": true,
+     "output": {
+      "pushed": true,
+      "pr": {
+       "number": 559
+      }
+     }
+    }
+   ]
+  },
+  "worker_status": {
+   "running": false
+  },
+  "task_facts": [
+   {
+    "match": {
+     "issue": 543
+    },
+    "result": {
+     "task": "PiotrGry/zdrovena-reconciliation#543",
+     "issue": {
+      "number": 543,
+      "state": "OPEN"
+     },
+     "workspace": {
+      "branch": "pirx/issue-543",
+      "exists": true,
+      "head": "a4adfdf",
+      "clean": true,
+      "commitsAheadOfBase": [
+       "a4adfdf test(shipping): decouple label-email popup tests",
+       "12ad42d feat(shipping): offer to email the batch label sheet after printing"
+      ],
+      "commitsBehindBase": 0,
+      "pushed": {
+       "upToDate": true
+      }
+     },
+     "pullRequests": [
+      {
+       "number": 559,
+       "state": "OPEN",
+       "mergeStateStatus": "BLOCKED",
+       "statusCheckRollup": [
+        {
+         "name": "Fast gate / Quality Gate",
+         "conclusion": "SUCCESS"
+        },
+        {
+         "name": "Fast gate / Security scan",
+         "conclusion": "FAILURE",
+         "workflow": "Develop — Fast Gate"
+        },
+        {
+         "name": "Fast gate / Frontend lint + test + build",
+         "conclusion": "SUCCESS"
+        }
+       ]
+      }
+     ],
+     "worker": {
+      "running": false
+     }
+    }
+   }
+  ],
+  "ci_status": {
+   "checks": [
+    {
+     "name": "Fast gate / Security scan",
+     "bucket": "fail"
+    },
+    {
+     "name": "Fast gate / Quality Gate",
+     "bucket": "pass"
+    }
+   ],
+   "runs": [
+    {
+     "databaseId": 44612328605,
+     "workflowName": "Develop — Fast Gate",
+     "status": "completed",
+     "conclusion": "failure",
+     "headSha": "a4adfdf",
+     "failedLogTail": "Security scan\tRun pip-audit\t  File \"/home/runner/work/.venv/lib/python3.12/site-packages/urllib3/connectionpool.py\", line 470, in _make_request\nSecurity scan\tRun pip-audit\t    self._validate_conn(conn)\nSecurity scan\tRun pip-audit\t  File \".../ssl.py\", line 457, in wrap_socket\nSecurity scan\tRun pip-audit\tTimeoutError: _ssl.c:993: The handshake operation timed out\nSecurity scan\tRun pip-audit\t##[error]Process completed with exit code 1."
+    }
+   ]
+  }
+ }
+}

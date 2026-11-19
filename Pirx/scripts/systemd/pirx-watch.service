@@ -1,0 +1,15 @@
+[Unit]
+Description=Pirx watcher: wake a coordination tick when something happened (#338)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# RUNTIME is replaced on deploy by the runtime directory, e.g. %h/.local/share/pirx/runtime-<sha>/Pirx
+WorkingDirectory=RUNTIME
+EnvironmentFile=%h/.config/pirx/orchestrator.env
+# Shadow run (T8): mutating tools only report what they would do, into a separate journal.
+Environment=PIRX_COORDINATION_DRY_RUN=1
+Environment=PIRX_STORAGE_FILE=%h/.local/share/pirx/pirx-shadow.sqlite
+ExecStart=/usr/bin/node --enable-source-maps RUNTIME/mcp-server/dist/coordination/watch-cli.js
+TimeoutStartSec=1800
+Nice=5

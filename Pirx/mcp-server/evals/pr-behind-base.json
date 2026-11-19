@@ -1,0 +1,116 @@
+{
+ "description": "zdrovena#542: the PR is green but behind develop, so the strict ruleset blocks the merge. Update the branch.",
+ "trigger": "- Zmienił się stan PR albo CI na gałęziach pirx/* w PiotrGry/zdrovena-reconciliation: #556.",
+ "pass": {
+  "anyOf": [
+   {
+    "tool": "pr_update_branch",
+    "pr": 556
+   },
+   {
+    "tool": "worker_resume",
+    "issue": 542
+   }
+  ],
+  "forbid": [
+   {
+    "tool": "worker_start"
+   },
+   {
+    "tool": "task_restart_clean"
+   },
+   {
+    "tool": "ci_rerun"
+   }
+  ]
+ },
+ "tools": {
+  "queue_list": {
+   "items": [
+    {
+     "repository": "PiotrGry/zdrovena-reconciliation",
+     "issue": 542,
+     "title": "Label sheet saves as zdrovena_portal_DDMMYY.pdf",
+     "status": "Todo",
+     "worker": "Pirx",
+     "queueOrder": 620,
+     "priority": "P2",
+     "workType": "Task"
+    }
+   ]
+  },
+  "journal_read": {
+   "entries": []
+  },
+  "worker_status": {
+   "running": false
+  },
+  "task_facts": [
+   {
+    "match": {
+     "issue": 542
+    },
+    "result": {
+     "task": "PiotrGry/zdrovena-reconciliation#542",
+     "issue": {
+      "number": 542,
+      "state": "OPEN"
+     },
+     "workspace": {
+      "branch": "pirx/issue-542",
+      "exists": true,
+      "head": "c4b77ad",
+      "clean": true,
+      "commitsAheadOfBase": [
+       "c4b77ad fix(shipping): name the saved batch label PDF zdrovena_portal_DDMMYY"
+      ],
+      "commitsBehindBase": 3,
+      "pushed": {
+       "upToDate": true
+      }
+     },
+     "pullRequests": [
+      {
+       "number": 556,
+       "state": "OPEN",
+       "mergeable": "MERGEABLE",
+       "mergeStateStatus": "BEHIND",
+       "statusCheckRollup": [
+        {
+         "name": "Fast gate / Quality Gate",
+         "conclusion": "SUCCESS"
+        },
+        {
+         "name": "Fast gate / Security scan",
+         "conclusion": "SUCCESS"
+        }
+       ]
+      }
+     ],
+     "worker": {
+      "running": false
+     }
+    }
+   }
+  ],
+  "ci_status": {
+   "checks": [
+    {
+     "name": "Fast gate / Quality Gate",
+     "bucket": "pass"
+    },
+    {
+     "name": "Fast gate / Security scan",
+     "bucket": "pass"
+    }
+   ],
+   "runs": [
+    {
+     "databaseId": 44600000001,
+     "workflowName": "Develop — Fast Gate",
+     "conclusion": "success"
+    }
+   ]
+  }
+ }
+}
