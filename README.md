@@ -1,12 +1,12 @@
 # Pirx
 
-Pirx is a local assistant that hands development work to Claude Code and sees it through to a finished change.
+Pirx is a local assistant: a chat backed by a local model (today Qwen 27B on Ollama). It keeps your calendar and notes, and it coordinates the development of your application. In that work **the local model is the coordinator**: it picks the work, writes the instruction for the worker, checks the result against git, reacts to CI and delivery, and closes the task. Claude Code (Opus) is the worker and only writes code. Everything else is a thin tool the model calls.
 
-You describe a task as a GitHub Issue. Pirx's daemon picks it from the Project queue and runs Claude Code in a dedicated branch and worktree. It then watches CI and the repository's own delivery pipeline. When the task is done, Pirx closes the Issue with the evidence. If Claude Code hits its usage limit, Pirx waits for the reset and resumes the same task; you do not have to restart it.
+The product contract is [`Pirx/PRODUCT.md`](Pirx/PRODUCT.md). The move from the old daemon to this design is planned in [`Pirx/docs/control-center-refactor.md`](Pirx/docs/control-center-refactor.md).
 
-The code lives in [`Pirx/`](Pirx). The product scope, what is current and what is excluded, is in [`Pirx/PRODUCT.md`](Pirx/PRODUCT.md).
+The code lives in [`Pirx/`](Pirx).
 
-## What works today
+## What works today (old daemon, until the switch-over)
 
 - **Headless daemon** (`Pirx/orchestrator`). It runs one Task at a time, from a GitHub Project queue. Its state lives in SQLite, so a restart or a reboot loses no accepted work.
 - **Claude Code worker.** It runs in a sandboxed worktree on an assigned branch, with bounded capabilities: read, write, tests, commit, and push of that branch only.

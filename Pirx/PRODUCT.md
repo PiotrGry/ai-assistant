@@ -1,65 +1,78 @@
 # Pirx product scope
 
-Pirx is a local engineering orchestrator controlled through a conversational
-interface. Its primary product loop is:
+Pirx is the operator's local assistant. It is a chat application backed by a
+local model: today Qwen 27B on Ollama, and the model is swappable. It has three
+jobs:
 
-1. a human defines or approves work in chat and GitHub;
-2. Pirx records durable intent and state;
-3. the headless daemon selects only refined Queue work;
-4. a capability-bounded worker executes one leased Attempt;
-5. Pirx observes CI and delivery, persists evidence, and reports the result;
-6. ambiguous or sensitive decisions return to the human.
+1. calendar;
+2. notes;
+3. coordinating the development of the operator's application (today
+   zdrovena-reconciliation).
 
-The chat is a control surface, not the execution owner. The daemon owns Task,
-Attempt, Lease, retry, checkpoint and delivery transitions. GitHub is the
-human-visible planning projection. Runtime SQLite is the machine source of
-truth. Closing the chat or restarting a worker must not lose accepted work.
+## Who decides
 
-## Supported product scenarios
+In the third job **the local model is the coordinator**. It:
 
-### Engineering orchestration (primary)
+- decides what to work on, from production errors, bug reports, the backlog and
+  code health;
+- writes the instruction for the worker;
+- reads the result and checks it against git;
+- reacts to CI and delivery;
+- closes the Task.
 
-- inspect and submit bounded GitHub work;
-- run one-machine, one-worker FIFO orchestration;
-- invoke Claude Code CLI in an assigned worktree and branch;
-- observe exact-SHA CI and route bounded evidence to a retry Attempt;
-- merge an exact-green feature PR under configured policy;
-- pause, resume, inspect and safely shut down the local runtime.
+It asks Opus for a second opinion when it cannot resolve an anomaly, and the
+operator only when that does not settle it.
 
-The daemon owns execution. Chat may submit an authorized intent, answer a
-durable operator question, or request a control transition; it cannot directly
-create an Attempt, acquire a Lease, select a worker or bypass Queue order.
+The **worker** (Claude Code, Opus) writes code and nothing else.
 
-### Local personal assistant (secondary, opt-in)
+Everything else is a **tool the model calls**. Tools are thin: one job each,
+facts in, facts out. No daemon owns decisions. A small watcher wakes the model
+when something happens (a worker exited, CI finished, new work was queued, or a
+timer fired). The watcher decides nothing.
 
-The `personal` profile exposes bounded Calendar and Obsidian operations. These
-tools share the chat and authorization host but do not participate in the
-engineering scheduler or runtime Task model. Missing private integrations must
-not prevent engineering tools from starting.
+This is an experiment in how well a local model coordinates. Every decision is
+journaled with the facts the model saw, the decision and the reason it gave.
 
-## Current, experimental and excluded capabilities
+## Sources of truth
 
-Current capabilities are ordinary chat, bounded MCP tools, SQLite-backed
-runtime state, GitHub Issue/Project/CI integration, Claude Code CLI workers,
-checkpoints, Queue/Lease scheduling, diagnostics and guarded feature delivery.
+- **git and GitHub are the truth** for Issues, Project fields, branches, PRs,
+  checks and merges. Tools read them live and do not keep copies.
+- **Local state** is only what exists nowhere else:
+  - the Task's worktree and worker session id;
+  - the single-worker lock;
+  - the journal.
 
-Legacy round-trip, shipment and failure-handoff tools are controlled
-experiments. They may prove a boundary but are not alternative production
-schedulers. New production behavior belongs in the durable runtime path.
+  It lives in `~/.local/share/pirx/pirx.sqlite`.
 
-OpenCode and n8n are not part of the current product. Production deployment,
-arbitrary infrastructure mutation, unrestricted shells and a distributed
-multi-host scheduler remain out of scope. The custom TUI remains the intended
-interactive surface; richer views can be added after their underlying durable
-contracts exist.
+## Safety
 
-## Completion and authority
+Safety lives in the tools, not in the prompt. The model cannot change these
+limits:
 
-A chat acknowledgement proves only that an intent was durably accepted. A
-worker start requires Queue eligibility, an exclusive Lease and a persisted
-Attempt. `CODE_PUSHED` proves a worker pushed its assigned branch; it does not
-complete the Task. Completion requires the configured delivery evidence.
+- one worker at a time;
+- only allowlisted repositories;
+- only `pirx/*` branches, and no force push;
+- no merge on red checks;
+- a cap on worker starts per Task per day, on CI reruns per run, and on
+  `ask_opus` calls;
+- the worker runs in a sandbox: its worktree only, no credentials, no push;
+- a stop switch that makes every mutating tool refuse.
 
-Every mutation is deny-by-default, bound to exact arguments and a single-use
-host authorization. Replays use a separate durable idempotency identity.
-Unknown remote outcomes are reconciled before any retry.
+## Personal assistant
+
+The `personal` profile exposes Calendar and Obsidian tools. It shares the chat
+but not the coordination toolset.
+
+## Out of scope
+
+- Production deployment by Pirx: the application's own CD deploys.
+- Arbitrary infrastructure changes, unrestricted shells, and more than one
+  machine.
+
+## Status
+
+The old headless daemon (`Pirx/orchestrator`) still delivers Tasks until the
+new coordination loop passes its evals and a supervised switch-over. The plan,
+the tool list and the tasks are in
+[`docs/control-center-refactor.md`](docs/control-center-refactor.md). Do not
+add decision logic to the old daemon.
