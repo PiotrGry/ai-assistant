@@ -516,6 +516,19 @@ export class PirxAgent {
     };
 
     let finalContent: string | undefined;
+    const TEXT_TOOL_CALL = /<\/?(?:tool_call|function(?:=|\s|>)|parameter(?:=|\s|>))/iu;
+    let finalAnswerRetried = false;
+    // With tools withdrawn, a model may still write a tool call (as markup or a parsed call) instead of
+    // answering. The actions it already took stand; ask once more for the answer alone, so the turn ends
+    // with a decision instead of a limit notice (eval worker-died-without-report, 2026-11-20).
+    const answerWithoutTools = async (source: Message[], request: ChatRequest & { stream: false }): Promise<string | undefined> => {
+      if (finalAnswerRetried) return undefined;
+      finalAnswerRetried = true;
+      const retry = await executeModel(withSystemInstruction(source, "[Pirx: koniec narzędzi] Narzędzia są już niedostępne w tej turze. Nie zapisuj żadnego wywołania narzędzia, także jako tekstu. Odpowiedz teraz zwykłym tekstem na podstawie wyników, które już masz."), [], request, undefined);
+      addMetrics(totals, retry);
+      const content = retry.message.content ?? "";
+      return (retry.message.tool_calls ?? []).length === 0 && !TEXT_TOOL_CALL.test(content) && content.trim().length > 0 ? content : undefined;
+    };
     try {
 
       for (
@@ -728,8 +741,12 @@ export class PirxAgent {
         }
 
         if (toolCalls.length === 0) {
-          const textToolCall = /<\/?(?:tool_call|function(?:=|\s|>)|parameter(?:=|\s|>))/iu.test(response.message.content);
-          if (textToolCall) {
+          const textToolCall = TEXT_TOOL_CALL.test(response.message.content);
+          const retried = textToolCall && !mayExecuteTools ? await answerWithoutTools(messagesForModel, request) : undefined;
+          if (retried !== undefined) {
+            finalContent = retried;
+            this.#messages.push({ role: "assistant", content: finalContent });
+          } else if (textToolCall) {
             // Without tools the model can only write markup; report the real cause.
             finalContent = mayExecuteTools
               ? "Model zapisał wywołanie narzędzia jako tekst zamiast wykonać poprawne wywołanie. Ta akcja nie została wykonana. Wyniki wcześniejszych narzędzi są zachowane; nie potwierdzam rozpoczęcia ani zakończenia pracy na podstawie tego tekstu."
@@ -743,6 +760,12 @@ export class PirxAgent {
           break;
         }
 
+        const retriedAnswer = !mayExecuteTools ? await answerWithoutTools(messagesForModel, request) : undefined;
+        if (retriedAnswer !== undefined) {
+          finalContent = retriedAnswer;
+          this.#messages.push({ role: "assistant", content: finalContent });
+          break;
+        }
         if (!mayExecuteTools || tools.length === 0) {
           finalContent = mayExecuteTools
             ? "Serwer MCP jest niedostępny, więc nie wykonano kolejnego wywołania narzędzia."

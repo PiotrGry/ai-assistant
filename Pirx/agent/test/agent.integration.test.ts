@@ -277,6 +277,7 @@ test("textual tool markup after the tool budget is exhausted is never presented 
   const { agent, ollama } = await createContinuationAgent(context, [
     ...calls,
     { role: "assistant", content: "<tool_call><function=pirx_orchestrator_diagnostic><parameter=sequence>480</parameter></function></tool_call>" },
+    { role: "assistant", content: "<tool_call><function=pirx_orchestrator_diagnostic><parameter=sequence>481</parameter></function></tool_call>" },
   ], { maxCallsPerToolPerTurn: 20 });
   const turn = await agent.chat("Sprawdź wynik.");
   assert.equal(turn.metrics.tool_calls, 8);
@@ -284,10 +285,12 @@ test("textual tool markup after the tool budget is exhausted is never presented 
   assert.match(turn.content, /Osiągnięto limit 8 rund wywołań narzędzi/u);
   assert.doesNotMatch(turn.content, /zapisał wywołanie narzędzia jako tekst/u);
   assert.equal(turn.content.includes("<tool_call>"), false);
-  assert.equal(ollama.requests.length, 9);
+  assert.equal(ollama.requests.length, 10, "one more request asks for the answer alone");
   const final = ollama.requests[8]!;
   assert.equal(final.tools, undefined);
   assert.match((final.messages as Array<{ content: string }>)[0]!.content, /limit narzędzi/u);
+  assert.equal(ollama.requests[9]!.tools, undefined);
+  assert.match((ollama.requests[9]!.messages as Array<{ content: string }>)[0]!.content, /koniec narzędzi/u);
 });
 
 test("backend failure after MCP keeps evidence in the turn and in the next request", async (context) => {
@@ -668,8 +671,7 @@ test("po limicie agent finalizuje bez wykonania kolejnej akcji", async (context)
 
   const turn = await agent.chat("Zapętl wywołania.");
 
-  assert.equal(chatRequests, 2);
-  assert.equal(turn.metrics.model_calls, 2);
+  assert.equal(chatRequests, 3, "the tool call, the turn without tools, one retry for the answer");
   assert.equal(turn.metrics.tool_calls, 1);
   assert.equal(turn.metrics.done_reason, "tool_iteration_limit");
   assert.match(turn.content, /Ostatnia żądana akcja nie została wykonana/u);
@@ -928,4 +930,17 @@ test("one tool called with ever new arguments is capped per turn, and the turn s
   assert.equal(turn.metrics.tool_calls, 3);
   assert.ok(turn.messages.some((message) => message.role === "tool" && /działało już 3 razy/u.test(message.content)));
   assert.equal(turn.content, answer.content);
+});
+
+test("after the tool budget, markup instead of an answer gets one more request, and its answer stands", async (context) => {
+  const calls = Array.from({ length: 8 }, (_, index) => ({ role: "assistant", content: "", tool_calls: [{ function: { name: "hello", arguments: { name: `t-${index}` } } }] }));
+  const { agent, ollama } = await createContinuationAgent(context, [
+    ...calls,
+    { role: "assistant", content: "<tool_call><function=worker_status></function></tool_call>" },
+    { role: "assistant", content: "Decyzja: wznowiłam workera na #548.\nPowód: poprzedni start padł bez raportu." },
+  ], { maxCallsPerToolPerTurn: 20 });
+  const turn = await agent.chat("Obchód.");
+  assert.equal(turn.metrics.tool_calls, 8);
+  assert.match(turn.content, /^Decyzja: wznowiłam workera/u);
+  assert.equal(ollama.requests.length, 10);
 });
