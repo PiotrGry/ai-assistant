@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { closeSync, openSync, unlinkSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,6 +20,15 @@ import { runTick } from "./tick-cli.js";
 export function issueOfBranch(branch: string): number | undefined {
   const match = /^pirx\/(?:issue-|task-gh-)(\d+)(?:[-/]|$)/u.exec(branch);
   return match === null ? undefined : Number(match[1]);
+}
+
+/** One tick at a time. The guard file holds the pid; a guard left by a dead process is taken over. */
+export function takeGuard(path: string): boolean {
+  try { writeFileSync(path, String(process.pid), { flag: "wx" }); return true; } catch { /* exists */ }
+  const holder = Number(readFileSync(path, "utf8").trim());
+  if (Number.isSafeInteger(holder) && holder > 0 && pidAlive(holder)) return false;
+  rmSync(path, { force: true });
+  try { writeFileSync(path, String(process.pid), { flag: "wx" }); return true; } catch { return false; }
 }
 
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
@@ -58,14 +67,18 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
   const settings = loadCoordinationSettings(environment);
   const storage = defaultStoragePath(environment);
   const guard = join(dirname(storage), "pirx-tick.lock");
-  let fd: number;
-  try { fd = openSync(guard, "wx"); } catch { process.stdout.write("A tick is already running.\n"); process.exit(0); }
+  if (!takeGuard(guard)) { process.stdout.write("A tick is already running.\n"); process.exit(0); }
+  let code = 0;
   try {
     const store = new CoordinationStore(storage);
     const events = await collectEvents(store, settings, runCommand, Number(environment.PIRX_TICK_TIMER_MINUTES ?? 60));
     store.close();
-    if (events.length === 0) { process.stdout.write("No events.\n"); process.exit(0); }
-    const result = await runTick({ trigger: events.map((event) => `- ${event}`).join("\n"), dryRun: settings.dryRun, storage });
-    process.stdout.write(`${result.tick} (${Math.round(result.durationMs / 1000)} s, ${result.toolCalls} tool calls)\n${result.answer}\n`);
-  } finally { closeSync(fd); unlinkSync(guard); }
+    if (events.length === 0) process.stdout.write("No events.\n");
+    else {
+      const result = await runTick({ trigger: events.map((event) => `- ${event}`).join("\n"), dryRun: settings.dryRun, storage });
+      process.stdout.write(`${result.tick} (${Math.round(result.durationMs / 1000)} s, ${result.toolCalls} tool calls)\n${result.answer}\n`);
+      code = result.exitCode === 0 ? 0 : 1;
+    }
+  } finally { rmSync(guard, { force: true }); }
+  process.exit(code);
 }
