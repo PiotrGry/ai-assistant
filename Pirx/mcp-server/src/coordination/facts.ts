@@ -13,7 +13,8 @@ import { defineTool, issueInput, refuse, repositoryInput, type CoordinationConte
 /** The Issue a pirx/* branch works on: pirx/issue-<N> (Pirx's tools) or pirx/task-gh-<N>-... (old daemon). Archived branches have none. */
 export function issueOfBranch(branch: string): number | undefined {
   const match = /^pirx\/(?:issue-|task-gh-)(\d+)(?:[-/]|$)/u.exec(branch);
-  return match === null ? undefined : Number(match[1]);
+  const issue = match === null ? undefined : Number(match[1]);
+  return issue !== undefined && Number.isSafeInteger(issue) && issue > 0 ? issue : undefined;
 }
 
 export function tail(text: string, lines: number): string {

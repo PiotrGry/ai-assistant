@@ -164,11 +164,14 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
       const workspace = await locateWorkspace(run, store, repo, input.issue);
       let prs: { number: number; mergeCommit?: { oid: string } | null; state: string }[] | undefined;
       if (input.pr !== undefined) {
-        const pr = jsonOf(await run("gh", ["pr", "view", String(input.pr), "-R", input.repository, "--json", "number,state,mergeCommit,title,body,headRefName,closingIssuesReferences"])) as { number: number; state: string; mergeCommit?: { oid: string } | null; title?: string; body?: string; headRefName?: string; closingIssuesReferences?: { number: number }[] } | undefined;
+        const pr = jsonOf(await run("gh", ["pr", "view", String(input.pr), "-R", input.repository, "--json", "number,state,mergeCommit,title,body,headRefName,closingIssuesReferences"])) as { number: number; state: string; mergeCommit?: { oid: string } | null; title?: string; body?: string; headRefName?: string; closingIssuesReferences?: { number: number; repository?: { name?: string; owner?: { login?: string } } }[] } | undefined;
         if (pr === undefined) return refuse(`Cannot read PR #${input.pr}.`);
         // The PR must belong to this Issue: it closes it, names it, or comes from its branch. Any merged number is not enough.
-        const mentions = new RegExp(`(^|[^0-9])#${input.issue}([^0-9]|$)`, "u");
-        const related = (pr.closingIssuesReferences ?? []).some((issue) => issue.number === input.issue)
+        // "#5" or "owner/this-repo#5"; not "other/repo#5", "epic#5" or "#55".
+        const escaped = input.repository.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+        const mentions = new RegExp(`(^|[^\\w/#-])(${escaped})?#${input.issue}(?![0-9])`, "iu");
+        const sameRepository = (issue: { repository?: { name?: string; owner?: { login?: string } } }) => issue.repository?.name === undefined || `${issue.repository.owner?.login ?? ""}/${issue.repository.name}`.toLowerCase() === input.repository.toLowerCase();
+        const related = (pr.closingIssuesReferences ?? []).some((issue) => issue.number === input.issue && sameRepository(issue))
           || mentions.test(`${pr.title ?? ""} ${pr.body ?? ""}`)
           || (pr.headRefName !== undefined && (pr.headRefName === workspace?.branch || issueOfBranch(pr.headRefName) === input.issue));
         if (!related) return refuse(`PR #${pr.number} does not close or mention #${input.issue} and is not from its branch. Give the PR that carries this change.`, { pr: { number: pr.number, title: pr.title, branch: pr.headRefName } });

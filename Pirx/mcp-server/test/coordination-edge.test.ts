@@ -443,3 +443,135 @@ test("worker runner: output that is not JSON, and a worker that says nothing, st
   const silent = await runWorker("exit 0");
   try { assert.equal(silent.report.outcome, "finished"); assert.equal(silent.report.workerReport, ""); } finally { await rm(silent.root, { recursive: true, force: true }); }
 });
+
+// ── Second round: relations, text and time that look right but are not ──────
+
+test("task_close: a reference to the same number in another repository does not count", async () => {
+  const pr = (fields: Record<string, unknown>) => ok(JSON.stringify({ number: 9, state: "MERGED", mergeCommit: { oid: "abc" }, title: "t", body: "", headRefName: "fix/x", closingIssuesReferences: [], ...fields }));
+  let current = pr({});
+  const h = await harness((file, args) => file === "gh" && args[1] === "view" ? current : file === "git" && args[1] === "list" ? ok("") : undefined);
+  const close = () => call(h, "task_close", { repository: REPO, issue: 5, evidence: "done", pr: 9 });
+  try {
+    current = pr({ body: "Fixes PiotrGry/ai-assistant#5" });
+    assert.equal((await close()).refused, true, "other/repo#5 is not this #5");
+    current = pr({ body: "Part of epic#5 work" });
+    assert.equal((await close()).refused, true, "word#5 is not a reference");
+    current = pr({ closingIssuesReferences: [{ number: 5, repository: { name: "ai-assistant", owner: { login: "PiotrGry" } } }] });
+    assert.equal((await close()).refused, true, "closes ai-assistant#5, not zdrovena#5");
+    current = pr({ closingIssuesReferences: [{ number: 5, repository: { name: "zdrovena-reconciliation", owner: { login: "PiotrGry" } } }] });
+    assert.equal((await close()).closed, true);
+    current = pr({ body: "(#5)" });
+    assert.equal((await close()).closed, true);
+    current = pr({ body: `Fixes ${REPO}#5` });
+    assert.equal((await close()).closed, true, "the full name of this repository counts");
+  } finally { await h.close(); }
+});
+
+test("bug fingerprint: Polish messages that differ only in Polish words are different bugs", async () => {
+  const { bugFingerprint } = await import("../src/coordination/actions.js");
+  assert.notEqual(bugFingerprint("exception|wysyłka|Brak źródła"), bugFingerprint("exception|wysyłka|Błąd żądania"));
+  assert.notEqual(bugFingerprint("Żółć"), bugFingerprint("Źdźbło"));
+  assert.equal(bugFingerprint("Błąd przy zamówieniu 1234"), bugFingerprint("błąd przy zamówieniu 98"));
+  assert.notEqual(bugFingerprint(""), undefined);
+});
+
+test("daily caps: an unknown time zone falls back to UTC instead of breaking every capped tool", async () => {
+  const { startOfDay } = await import("../src/coordination/settings.js");
+  assert.equal(startOfDay("2026-11-20T10:00:00.000Z", "Mars/Olympus"), "2026-11-20T00:00:00.000Z");
+  assert.equal(startOfDay("2026-11-20T10:00:00.000Z", ""), "2026-11-20T00:00:00.000Z");
+  const h = await harness((file) => file === "/bin/false" ? ok(JSON.stringify({ result: "advice" })) : undefined, { PIRX_GOOGLE_CALENDAR_TIMEZONE: "Mars/Olympus" });
+  try { assert.equal((await call(h, "ask_opus", { repository: REPO, issue: 5, facts: "f", question: "q", pirxView: "v" })).advice, "advice"); } finally { await h.close(); }
+});
+
+test("result budget: huge keys, emoji at the cut and a single giant string all stay within budget and valid", async () => {
+  const { fitBudget, RESULT_BUDGET } = await import("../src/coordination/toolkit.js");
+  const giantKeys = Object.fromEntries(Array.from({ length: 3 }, (_, index) => [`${index}${"k".repeat(20_000)}`, 1]));
+  const emoji = { text: "😀".repeat(10_000) };
+  for (const value of [giantKeys, emoji, { only: "x".repeat(1_000_000) }]) {
+    const fitted = JSON.stringify(fitBudget(value));
+    assert.ok(fitted.length <= RESULT_BUDGET, String(fitted.length));
+    assert.equal(/\\ud[89ab][0-9a-f]{2}(?!\\ud[c-f])/iu.test(fitted) || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u.test(fitted), false, "no emoji cut in half");
+  }
+});
+
+test("watcher: queued work that is parked, or in a repository Pirx does not coordinate, does not wake it", async () => {
+  const { collectEvents } = await import("../src/coordination/watch-cli.js");
+  const { loadCoordinationSettings } = await import("../src/coordination/settings.js");
+  const h = await harness();
+  const settings = loadCoordinationSettings({ HOME: h.root, PIRX_ORCHESTRATOR_CONFIG: join(h.root, "orchestrator.json") });
+  let items: Record<string, unknown>[] = [];
+  const run: Runner = async (file, args) => ok(file === "gh" && args[0] === "pr" ? "[]" : JSON.stringify({ items }));
+  const nudged = async () => (await collectEvents(h.store, settings, run, 60)).events.some((event) => event.includes("worker nie pracuje"));
+  try {
+    h.store.append({ kind: "tick", name: "tick", ok: true });
+    h.store.upsertTask({ repository: REPO, issue: 3, branch: "pirx/issue-3", worktree: "", state: "parked", note: "waits for operator" });
+    items = [{ content: { repository: REPO, number: 3 }, worker: "Pirx", status: "Todo" }, { content: { repository: "PiotrGry/elsewhere", number: 4 }, worker: "Pirx", status: "Todo" }];
+    assert.equal(await nudged(), false, "only parked or foreign work is queued");
+    items.push({ content: { repository: REPO, number: 8 }, worker: "Pirx", status: "Todo" });
+    assert.equal(await nudged(), true);
+    assert.equal(await nudged(), false, "at most once per IDLE_NUDGE_MINUTES");
+  } finally { await h.close(); }
+});
+
+test("watcher: after three failed ticks the events are let go, and the counter starts again", async () => {
+  const { settleEvents } = await import("../src/coordination/watch-cli.js");
+  const h = await harness();
+  let commits = 0;
+  const collected = { events: ["e"], commit: () => { commits += 1; } };
+  try {
+    settleEvents(h.store, collected, false); settleEvents(h.store, collected, false);
+    assert.equal(commits, 0);
+    settleEvents(h.store, collected, false);
+    assert.equal(commits, 1);
+    assert.equal(h.store.watchValue("failed_ticks"), "0");
+    settleEvents(h.store, collected, false);
+    assert.equal(commits, 1, "a new run of failures starts from zero");
+    settleEvents(h.store, collected, true);
+    assert.equal(commits, 2);
+    assert.equal(h.store.watchValue("failed_ticks"), "0");
+  } finally { await h.close(); }
+});
+
+test("settings: a broken coordination.json is reported, not silently replaced by defaults", async () => {
+  const { loadCoordinationSettings } = await import("../src/coordination/settings.js");
+  const root = await mkdtemp(join(tmpdir(), "pirx-edge-settings-"));
+  try {
+    await writeFile(join(root, "coordination.json"), "{ \"workerModel\": \"claude-opus-5-5\", }");
+    const settings = loadCoordinationSettings({ HOME: root, PIRX_COORDINATION_CONFIG: join(root, "coordination.json") });
+    assert.match(String(settings.configurationError), /coordination\.json/u);
+    const missing = loadCoordinationSettings({ HOME: root, PIRX_COORDINATION_CONFIG: join(root, "absent.json"), PIRX_ORCHESTRATOR_CONFIG: join(root, "absent-orchestrator.json") });
+    assert.doesNotMatch(String(missing.configurationError ?? ""), /coordination\.json/u, "a missing file is fine");
+    for (const value of ["0", "-2", "abc", "1.5", ""]) assert.equal(loadCoordinationSettings({ HOME: root, PIRX_COORDINATION_CONFIG: join(root, "absent.json"), PIRX_CAP_WORKER_STARTS: value }).caps.workerStartsPerTaskPerDay, 3, value);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("worker lock: a second acquire while one is held fails, and release frees it once", async () => {
+  const h = await harness();
+  try {
+    const lock = { task: `${REPO}#1`, pid: process.pid, startedAt: h.store.now(), logPath: "/dev/null", reportPath: "/dev/null" };
+    assert.equal(h.store.acquire(lock), true);
+    assert.equal(h.store.acquire({ ...lock, task: `${REPO}#2` }), false);
+    assert.equal(h.store.lock()?.task, `${REPO}#1`);
+    h.store.release();
+    assert.equal(h.store.acquire({ ...lock, task: `${REPO}#2` }), true);
+  } finally { await h.close(); }
+});
+
+test("branch names: zero, leading zeros, suffixes and look-alikes", async () => {
+  const { issueOfBranch } = await import("../src/coordination/facts.js");
+  assert.equal(issueOfBranch("pirx/issue-0"), undefined, "Issue 0 does not exist");
+  assert.equal(issueOfBranch("pirx/issue-007"), 7);
+  assert.equal(issueOfBranch("pirx/issue-5x"), undefined);
+  assert.equal(issueOfBranch("pirx/issue-"), undefined);
+  assert.equal(issueOfBranch("pirx/issue-12/retry"), 12);
+  assert.equal(issueOfBranch("xpirx/issue-12"), undefined);
+  assert.equal(issueOfBranch("pirx/issue-99999999999999999999"), undefined, "not a safe integer");
+});
+
+test("tick outcome: whitespace, the limit message after blank lines, and an exit by signal are failures", async () => {
+  const { tickSucceeded } = await import("../src/coordination/tick-cli.js");
+  assert.equal(tickSucceeded(0, " \n\t"), false);
+  assert.equal(tickSucceeded(0, "\n\nOsiągnięto limit wywołań narzędzi."), false);
+  assert.equal(tickSucceeded(null, "Decyzja: nic"), false);
+  assert.equal(tickSucceeded(0, "Decyzja: nic. Osiągnięto limit nie dotyczy."), true);
+});

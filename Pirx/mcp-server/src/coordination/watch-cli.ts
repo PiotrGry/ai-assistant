@@ -11,7 +11,7 @@ export { issueOfBranch } from "./facts.js";
 export { takeGuard } from "./proc.js";
 import { jsonOf, runCommand, type Runner } from "./shell.js";
 import { loadCoordinationSettings, type CoordinationSettings } from "./settings.js";
-import { CoordinationStore, defaultStoragePath } from "./store.js";
+import { CoordinationStore, defaultStoragePath, taskKey } from "./store.js";
 import { runTick } from "./tick-cli.js";
 
 /**
@@ -61,14 +61,22 @@ export async function collectEvents(store: CoordinationStore, settings: Coordina
   if (settings.projectOwner !== undefined && settings.projectNumber !== undefined) {
     const items = jsonOf(await run("gh", ["project", "item-list", String(settings.projectNumber), "--owner", settings.projectOwner, "--format", "json", "--limit", "500"], { timeoutMs: 60_000 })) as { items?: Record<string, unknown>[] } | undefined;
     if (items !== undefined) {
-      const queued = (items.items ?? []).filter((item) => item.worker === "Pirx" && item.status !== "Done").map((item) => [(item.content as { repository?: string; number?: number } | undefined)?.repository, (item.content as { number?: number } | undefined)?.number, item.status, item["queue Order"]]);
+      const coordinated = new Set(settings.repositories.map((repo) => repo.repository.toLowerCase()));
+      const all = (items.items ?? []).filter((item) => item.worker === "Pirx" && item.status !== "Done");
+      // Work Pirx can pick up now: in a coordinated repository and not parked waiting for someone.
+      const startable = all.filter((item) => {
+        const content = item.content as { repository?: string; number?: number } | undefined;
+        if (content?.repository === undefined || content.number === undefined || !coordinated.has(content.repository.toLowerCase())) return false;
+        return store.getTask(taskKey(content.repository, content.number))?.state !== "parked";
+      });
+      const queued = all.map((item) => [(item.content as { repository?: string; number?: number } | undefined)?.repository, (item.content as { number?: number } | undefined)?.number, item.status, item["queue Order"]]);
       const value = digest(queued);
       if (store.watchValue("queue") !== undefined && store.watchValue("queue") !== value) events.push("Zmieniła się kolejka zadań dla Pirxa.");
       pending.push(["queue", value]);
       // Queued work with an idle worker is itself a reason to wake up, at most every IDLE_NUDGE_MINUTES.
       const lastNudge = Date.parse(store.watchValue("idle_nudge") ?? "1970-01-01T00:00:00.000Z");
-      if (queued.length > 0 && !working && Date.parse(store.now()) - lastNudge >= IDLE_NUDGE_MINUTES * 60_000) {
-        events.push(`W kolejce czeka ${queued.length} zadań dla Pirxa, a worker nie pracuje.`);
+      if (startable.length > 0 && !working && Date.parse(store.now()) - lastNudge >= IDLE_NUDGE_MINUTES * 60_000) {
+        events.push(`W kolejce czeka ${startable.length} zadań dla Pirxa, a worker nie pracuje.`);
         store.setWatchValue("idle_nudge", store.now());
       }
     }
