@@ -43,6 +43,28 @@ export function dryRunner(run: Runner, intercepted: string[]): Runner {
   };
 }
 
+/**
+ * Every result must fit the local model's context whole. The agent cuts results above 12,000
+ * characters, and a cut JSON made the model search again (2026-11-20). Tools shape their own
+ * results; this is the safety net: long strings and long lists are shortened, never the JSON itself.
+ */
+export const RESULT_BUDGET = 8_000;
+
+export function fitBudget(value: Record<string, unknown>, budget = RESULT_BUDGET): Record<string, unknown> {
+  if (JSON.stringify(value).length <= budget) return value;
+  for (const [maxString, maxItems] of [[2_000, 30], [800, 15], [300, 8], [120, 4]] as const) {
+    const shrink = (item: unknown): unknown => {
+      if (typeof item === "string") return item.length > maxString ? `${item.slice(0, maxString)}… (${item.length} characters, shortened)` : item;
+      if (Array.isArray(item)) return [...item.slice(0, maxItems).map(shrink), ...(item.length > maxItems ? [`… ${item.length - maxItems} more items`] : [])];
+      if (item !== null && typeof item === "object") return Object.fromEntries(Object.entries(item).map(([key, entry]) => [key, shrink(entry)]));
+      return item;
+    };
+    const shrunk = { ...(shrink(value) as Record<string, unknown>), shortened: true };
+    if (JSON.stringify(shrunk).length <= budget) return shrunk;
+  }
+  return { shortened: true, note: "The result was too large to show. Ask for less (a single Task, fewer items).", keys: Object.keys(value) };
+}
+
 /** A result the tool returns when it refuses on a hard limit. The model reads `refused` and `reason`. */
 export function refuse(reason: string, facts: Record<string, unknown> = {}): Record<string, unknown> {
   return { refused: true, reason, ...facts };
@@ -128,6 +150,7 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, conte
       }
       else result = await spec.run(input, context);
       ok = result.refused !== true && result.failed === undefined && result.error === undefined;
+      result = fitBudget(result);
     } catch (error: unknown) {
       ok = false;
       result = { error: error instanceof Error ? error.message : String(error) };

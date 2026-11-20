@@ -452,6 +452,7 @@ export class PirxAgent {
     const timestamp = this.#now().toISOString();
     const gpuBefore = await readGpuStats();
     const repeatedToolCalls = new Map<string, number>();
+    const callsPerTool = new Map<string, number>();
     let blockedRepeats = 0;
     const mutationsByTool = new Map<string, number>();
     let operationSequence = 0;
@@ -773,12 +774,17 @@ export class PirxAgent {
           const repeatedToolCallCount = (repeatedToolCalls.get(fingerprint) ?? 0) + 1;
           repeatedToolCalls.set(fingerprint, repeatedToolCallCount);
 
-          if (repeatedToolCallCount > this.#config.maxRepeatedToolCalls) {
+          // Varied arguments (other search words) also loop: cap calls of one tool per turn as well.
+          const toolCallCount = (callsPerTool.get(name) ?? 0) + 1;
+          callsPerTool.set(name, toolCallCount);
+          const perToolLimit = this.#config.maxCallsPerToolPerTurn ?? 6;
+          if (repeatedToolCallCount > this.#config.maxRepeatedToolCalls || toolCallCount > perToolLimit) {
             this.#messages.push({
               role: "tool",
               tool_name: name,
-              content:
-                "Przerwano identyczną operację narzędzia z powodu wykrycia pętli powtarzających się wywołań. Odpowiedz teraz na podstawie tego, co już wiesz.",
+              content: repeatedToolCallCount > this.#config.maxRepeatedToolCalls
+                ? "Przerwano identyczną operację narzędzia z powodu wykrycia pętli powtarzających się wywołań. Odpowiedz teraz na podstawie tego, co już wiesz."
+                : `Nie wykonano: ${name} działało już ${perToolLimit} razy w tej turze. Kolejne wywołania nie dodadzą faktów; odpowiedz teraz na podstawie tego, co już wiesz.`,
             });
             // Telling the model once is not enough: it kept repeating until the iteration limit and never answered.
             // After the second blocked repeat the turn's tool budget is spent, so the next step is the final answer.

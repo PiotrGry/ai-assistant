@@ -394,3 +394,16 @@ test("tick result: a limit notice or a failure notice is not a decision", async 
   assert.equal(tickSucceeded(1, "Decyzja: nic"), false);
   assert.equal(tickSucceeded(0, "  "), false);
 });
+
+test("result budget: long text and lists are shortened, the JSON stays whole, and small results are untouched", async () => {
+  const { fitBudget, RESULT_BUDGET } = await import("../src/coordination/toolkit.js");
+  const small = { a: 1, b: "x" };
+  assert.equal(fitBudget(small), small);
+  const big = { issue: { body: "x".repeat(20_000) }, entries: Array.from({ length: 200 }, (_, index) => ({ seq: index, output: "y".repeat(500) })) };
+  const fitted = fitBudget(big);
+  const text = JSON.stringify(fitted);
+  assert.ok(text.length <= RESULT_BUDGET, `${text.length}`);
+  assert.equal(fitted.shortened, true);
+  assert.doesNotThrow(() => JSON.parse(text));
+  assert.match(text, /characters, shortened/u);
+});

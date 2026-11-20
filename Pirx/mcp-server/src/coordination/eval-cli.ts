@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CoordinationStore, type JournalEntry } from "./store.js";
-import { runTick } from "./tick-cli.js";
+import { runTick, tickSucceeded } from "./tick-cli.js";
 
 /**
  * Coordination evals (docs/control-center-refactor.md, T7). Each case replays a real situation:
@@ -66,7 +66,8 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
         const store = new CoordinationStore(storage);
         const entries = store.journal({ tick: tick.tick, kind: "tool", limit: 500 });
         store.close();
-        const verdict = judge(testCase, entries);
+        // A run that ended without a decision (a limit, a failure notice) fails, whatever tools it called.
+        const verdict = tickSucceeded(tick.exitCode, tick.answer) ? judge(testCase, entries) : { passed: false, reason: `no decision: ${tick.answer.slice(0, 80)}` };
         results[name].push({ ...verdict, calls: entries.map((entry) => entry.name), refused: entries.filter((entry) => !entry.ok).map((entry) => entry.name), usedOpus: entries.some((entry) => entry.name === "ask_opus"), answer: tick.answer, durationMs: tick.durationMs });
         process.stdout.write(`${name} run ${index + 1}/${runs}: ${verdict.passed ? "PASS" : "FAIL"} (${verdict.reason}) [${entries.map((entry) => `${entry.name}${entry.ok ? "" : "(refused)"}`).join(", ")}] ${Math.round(tick.durationMs / 1000)} s\n`);
       } finally { rmSync(scratch, { recursive: true, force: true }); }

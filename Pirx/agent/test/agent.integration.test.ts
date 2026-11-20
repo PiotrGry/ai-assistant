@@ -277,7 +277,7 @@ test("textual tool markup after the tool budget is exhausted is never presented 
   const { agent, ollama } = await createContinuationAgent(context, [
     ...calls,
     { role: "assistant", content: "<tool_call><function=pirx_orchestrator_diagnostic><parameter=sequence>480</parameter></function></tool_call>" },
-  ]);
+  ], { maxCallsPerToolPerTurn: 20 });
   const turn = await agent.chat("Sprawdź wynik.");
   assert.equal(turn.metrics.tool_calls, 8);
   assert.equal(turn.metrics.done_reason, "tool_iteration_limit");
@@ -915,5 +915,17 @@ test("a mutating tool succeeds at most maxMutationsPerTool times per turn, even 
   const turn = await agent.chat("Create", { actionLedger: ledger, sessionId: "session", turnId: "turn" });
   assert.equal(await readFile(effects, "utf8"), "created\n");
   assert.equal(turn.messages.filter((message) => message.role === "tool" && /to limit/u.test(message.content)).length, 2);
+  assert.equal(turn.content, answer.content);
+});
+
+test("one tool called with ever new arguments is capped per turn, and the turn still ends with an answer", async (context) => {
+  const call = (index: number) => ({ role: "assistant", content: "", tool_calls: [{ function: { name: "hello", arguments: { name: `N${index}` } } }] });
+  const answer = { role: "assistant", content: "Odpowiedź po limicie." };
+  // Three run, the next two are refused, then the tools are gone and the model must answer.
+  const replies = [...Array.from({ length: 5 }, (_, index) => call(index)), answer];
+  const { agent } = await createContinuationAgent(context, replies, { continuationCheck: false, maxToolCalls: 20, maxCallsPerToolPerTurn: 3 });
+  const turn = await agent.chat("Szukaj.");
+  assert.equal(turn.metrics.tool_calls, 3);
+  assert.ok(turn.messages.some((message) => message.role === "tool" && /działało już 3 razy/u.test(message.content)));
   assert.equal(turn.content, answer.content);
 });
