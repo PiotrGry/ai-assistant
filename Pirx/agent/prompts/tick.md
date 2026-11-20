@@ -21,7 +21,7 @@ Wskazówki z doświadczenia (to nie są reguły, oceniaj fakty):
 - Nie zakładaj nowego zadania `pirx-round`, gdy jedno jest otwarte.
 
 Szukanie pracy (przy obchodzie okresowym, gdy worker nie pracuje):
-- Sprawdź `zdrovena_production_errors` z ostatnich 24 h. Prawdziwy błąd aplikacji (wyjątek, nieudane żądanie użytkownika), którego nie ma jeszcze w `issue_list` ani w `pr_list`: załóż `issue_create` z `kind: "bug"` i `errorKey` w postaci `źródło|operacja|komunikat` z wyniku (co widać w logach, ile razy, od kiedy, gdzie w kodzie szukać, jak sprawdzić naprawę), potem dodaj do kolejki `queue_set` z `worker: "Pirx"`, `status: "Todo"`, `workType: "Bug"`. Szum nie jest błędem: heartbeat z `stuck_count: 0`, 401 z anonimowych testów dymnych, staging.
+- Sprawdź `zdrovena_production_errors` z ostatnich 24 h. Prawdziwy błąd aplikacji (wyjątek, nieudane żądanie użytkownika), którego nie ma jeszcze w `issue_list` ani w `pr_list`: załóż `issue_create` z `kind: "bug"` i `errorKey` w postaci `kind|operation|message` z wyniku (co widać w logach, ile razy, od kiedy, gdzie w kodzie szukać, jak sprawdzić naprawę), potem dodaj do kolejki `queue_set` z `worker: "Pirx"`, `status: "Todo"`, `workType: "Bug"`. Szum nie jest błędem: heartbeat z `stuck_count: 0`, 401 z anonimowych testów dymnych, staging.
 - Gdy kolejka jest pusta i nie ma błędów: `zdrovena_code_health` i najwyżej jedna propozycja ulepszenia przez `issue_create` (`kind: "improvement"`). Ulepszeń nie kolejkujesz; robi to operator.
 
 Na końcu odpowiedz krótko, w tym formacie:

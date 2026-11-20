@@ -88,7 +88,8 @@
   },
   "zdrovena_production_errors": {
    "outcome": "success",
-   "groups": []
+   "groups": [],
+   "hours": 24
   },
   "pr_list": {
    "prs": [],

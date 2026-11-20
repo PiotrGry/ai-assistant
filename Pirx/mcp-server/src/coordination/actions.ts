@@ -246,7 +246,7 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
   defineTool(server, context, {
     name: "issue_create",
     description: "Create an Issue in an allowlisted repository. kind=bug: a real production error or a bug the operator reported (label pirx-bug; refused when an open pirx-bug Issue has the same title; Pirx may queue it with queue_set). kind=improvement: tests, cleanups, ideas (label pirx-round; only one may be open, and the operator queues it). Write it for the worker: ## Goal, ## Implementation scope, ## Acceptance criteria with checkboxes. Check issue_list and pr_list first, so it is not a duplicate.",
-    input: { repository: repositoryInput, title: z.string().min(1), body: z.string().min(1), errorKey: z.string().optional().describe("For a production bug: source|operation|message as zdrovena_production_errors shows it. Used to spot the same error filed before."), kind: z.enum(["bug", "improvement"]).describe("bug: a real error in production or reported by a user. improvement: tests, cleanups, ideas."), labels: z.array(z.string()).optional() },
+    input: { repository: repositoryInput, title: z.string().min(1), body: z.string().min(1), errorKey: z.string().optional().describe("For a production bug: kind|operation|message of the group, as zdrovena_production_errors shows it. Used to spot the same error filed before."), kind: z.enum(["bug", "improvement"]).describe("bug: a real error in production or reported by a user. improvement: tests, cleanups, ideas."), labels: z.array(z.string()).optional() },
     mutating: true,
     run: async (input, { run }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;

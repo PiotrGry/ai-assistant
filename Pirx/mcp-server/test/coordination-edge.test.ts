@@ -575,3 +575,34 @@ test("tick outcome: whitespace, the limit message after blank lines, and an exit
   assert.equal(tickSucceeded(null, "Decyzja: nic"), false);
   assert.equal(tickSucceeded(0, "Decyzja: nic. Osiągnięto limit nie dotyczy."), true);
 });
+
+// ── Eval fixtures ──────────────────────────────────────────────────────────
+
+test("eval fixtures: every app tool result matches that tool's output schema", async () => {
+  // A fixture that does not match fails MCP output validation, the model sees an error instead of the
+  // data, and the case fails for a reason that has nothing to do with the model (production-error-new,
+  // 2026-11-20: groups had "source" where the schema says "kind").
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const { registerProductionErrorsTool } = await import("../src/tools/production-errors.js");
+  const { registerCodeHealthTool } = await import("../src/tools/code-health.js");
+  const schemas = new Map<string, { safeParse(value: unknown): { success: boolean; error?: unknown } }>();
+  const capture = { registerTool: (name: string, config: { outputSchema?: { safeParse(value: unknown): { success: boolean } } }) => { if (config.outputSchema !== undefined) schemas.set(name, config.outputSchema); } } as unknown as McpServer;
+  registerProductionErrorsTool(capture, { read: async () => ({ outcome: "unconfigured", message: "" }) } as never);
+  registerCodeHealthTool(capture, "/nonexistent");
+  assert.ok(schemas.has("zdrovena_production_errors"));
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "evals");
+  let checked = 0;
+  for (const file of readdirSync(dir).filter((name) => name.endsWith(".json"))) {
+    const tools = (JSON.parse(readFileSync(join(dir, file), "utf8")) as { tools?: Record<string, unknown> }).tools ?? {};
+    for (const [name, fixture] of Object.entries(tools)) {
+      const schema = schemas.get(name);
+      if (schema === undefined) continue;
+      for (const result of Array.isArray(fixture) ? fixture.map((item: { result: unknown }) => item.result) : [fixture]) {
+        const parsed = schema.safeParse(result);
+        assert.equal(parsed.success, true, `${file} ${name}: ${JSON.stringify(parsed.error).slice(0, 300)}`);
+        checked += 1;
+      }
+    }
+  }
+  assert.ok(checked >= 2, `checked ${checked} fixtures`);
+});

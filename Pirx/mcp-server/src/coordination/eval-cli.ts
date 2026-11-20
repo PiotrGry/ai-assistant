@@ -18,7 +18,7 @@ import { runTick, runtimeCommit, tickSucceeded } from "./tick-cli.js";
 interface Rule { readonly tool: string; readonly [field: string]: unknown }
 interface EvalCase { readonly description: string; readonly trigger: string; readonly prompt?: string; readonly pass: { readonly anyOf: readonly Rule[]; readonly forbid: readonly Rule[] } }
 
-export interface RunVerdict { readonly passed: boolean; readonly refused: string[]; readonly reason: string; readonly calls: string[]; readonly usedOpus: boolean; readonly answer: string; readonly durationMs: number }
+export interface RunVerdict { readonly actions?: unknown[]; readonly passed: boolean; readonly refused: string[]; readonly reason: string; readonly calls: string[]; readonly usedOpus: boolean; readonly answer: string; readonly durationMs: number }
 
 function matches(entry: JournalEntry, rule: Rule): boolean {
   if (entry.kind !== "tool" || entry.name !== rule.tool) return false;
@@ -68,7 +68,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
         store.close();
         // A run that ended without a decision (a limit, a failure notice) fails, whatever tools it called.
         const verdict = tickSucceeded(tick.exitCode, tick.answer) ? judge(testCase, entries) : { passed: false, reason: `no decision: ${tick.answer.slice(0, 80)}` };
-        results[name].push({ ...verdict, calls: entries.map((entry) => entry.name), refused: entries.filter((entry) => !entry.ok).map((entry) => entry.name), usedOpus: entries.some((entry) => entry.name === "ask_opus"), answer: tick.answer, durationMs: tick.durationMs });
+        results[name].push({ ...verdict, calls: entries.map((entry) => entry.name), refused: entries.filter((entry) => !entry.ok).map((entry) => entry.name), actions: entries.filter((entry) => entry.name !== undefined && !/^(queue_list|worker_status|journal_read|task_facts|issue_list|pr_list|zdrovena_)/u.test(entry.name)).map((entry) => ({ name: entry.name, input: entry.input, ok: entry.ok, output: JSON.stringify(entry.output ?? null).slice(0, 300) })), usedOpus: entries.some((entry) => entry.name === "ask_opus"), answer: tick.answer, durationMs: tick.durationMs });
         process.stdout.write(`${name} run ${index + 1}/${runs}: ${verdict.passed ? "PASS" : "FAIL"} (${verdict.reason}) [${entries.map((entry) => `${entry.name}${entry.ok ? "" : "(refused)"}`).join(", ")}] ${Math.round(tick.durationMs / 1000)} s\n`);
       } finally { rmSync(scratch, { recursive: true, force: true }); }
     }
