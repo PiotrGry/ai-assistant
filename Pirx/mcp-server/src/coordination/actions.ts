@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { failure, jsonOf, type Runner } from "./shell.js";
 import { startOfDay, type CoordinationSettings } from "./settings.js";
 import { taskKey } from "./store.js";
-import { WORKER_ENV_ALLOWLIST } from "./worker.js";
+import { tooLong, WORKER_ENV_ALLOWLIST } from "./worker.js";
 import { defineTool, issueInput, refuse, repositoryInput, type CoordinationContext } from "./toolkit.js";
 
 /** Every Issue Pirx creates carries this label, and only one may be open at a time. */
@@ -291,6 +291,7 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
     task: taskOf,
     run: async (input, { run, store, environment }) => {
       const task = taskOf(input);
+      const long = tooLong(`${input.facts}${input.question}${input.pirxView}`, "question for Opus"); if (long !== undefined) return long;
       const used = store.countCalls("ask_opus", startOfDay(store.now()), { task });
       if (used >= settings.caps.askOpusPerTaskPerDay) return refuse(`Opus was asked ${used} times today about ${task}; the cap is ${settings.caps.askOpusPerTaskPerDay}. Ask the operator.`);
       const prompt = `You advise Pirx, a local model that coordinates software delivery for ${input.repository}. Pirx will decide and act; you only advise. Answer in at most 12 lines: what is going on, what Pirx should do next (one of its tools if possible), and what would make you change your mind.\n\nTask: ${task}\n\nFacts:\n${input.facts}\n\nPirx's view:\n${input.pirxView}\n\nQuestion:\n${input.question}`;

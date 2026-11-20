@@ -32,6 +32,22 @@ const MUTATING_COMMANDS: readonly RegExp[] = [
   /^gh (?:pr (?:create|update-branch|merge)|issue (?:close|comment|create|reopen|edit)|run rerun|project item-(?:add|edit))\b/u,
 ];
 
+/**
+ * In dry-run nothing changes locally either: Task records, the worker lock and watcher cursors
+ * stay as they are. Reads and the journal still work.
+ */
+export function readOnlyStore(store: CoordinationStore): CoordinationStore {
+  const blocked: Record<string, (...args: unknown[]) => unknown> = {
+    upsertTask: (task) => ({ key: "dry-run", createdAt: store.now(), updatedAt: store.now(), ...(task as object) }),
+    acquire: () => true, setLockPid: () => undefined, release: () => undefined, setWatchValue: () => undefined,
+  };
+  return new Proxy(store, { get: (target, property) => {
+    if (typeof property === "string" && property in blocked) return blocked[property];
+    const value = Reflect.get(target, property, target) as unknown;
+    return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+  } });
+}
+
 /** In dry-run, commands that would change git or GitHub are recorded and answered with a plausible success. */
 export function dryRunner(run: Runner, intercepted: string[]): Runner {
   return async (file, args, options) => {
@@ -56,13 +72,16 @@ export function fitBudget(value: Record<string, unknown>, budget = RESULT_BUDGET
     const shrink = (item: unknown): unknown => {
       if (typeof item === "string") return item.length > maxString ? `${item.slice(0, maxString)}… (${item.length} characters, shortened)` : item;
       if (Array.isArray(item)) return [...item.slice(0, maxItems).map(shrink), ...(item.length > maxItems ? [`… ${item.length - maxItems} more items`] : [])];
-      if (item !== null && typeof item === "object") return Object.fromEntries(Object.entries(item).map(([key, entry]) => [key, shrink(entry)]));
+      if (item !== null && typeof item === "object") {
+        const entries = Object.entries(item); const maxKeys = maxItems * 2;
+        return Object.fromEntries([...entries.slice(0, maxKeys).map(([key, entry]) => [key, shrink(entry)] as const), ...(entries.length > maxKeys ? [["…", `${entries.length - maxKeys} more fields`] as const] : [])]);
+      }
       return item;
     };
     const shrunk = { ...(shrink(value) as Record<string, unknown>), shortened: true };
     if (JSON.stringify(shrunk).length <= budget) return shrunk;
   }
-  return { shortened: true, note: "The result was too large to show. Ask for less (a single Task, fewer items).", keys: Object.keys(value) };
+  return { shortened: true, note: "The result was too large to show. Ask for less (a single Task, fewer items).", keys: Object.keys(value).slice(0, 40) };
 }
 
 /** A result the tool returns when it refuses on a hard limit. The model reads `refused` and `reason`. */
@@ -145,7 +164,7 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, conte
       else if (spec.mutating && context.settings.dryRun) {
         // Dry-run runs the tool's real checks and reads; only commands that change something are intercepted.
         const intercepted: string[] = [];
-        result = await spec.run(input, { ...context, run: dryRunner(context.run, intercepted) });
+        result = await spec.run(input, { ...context, run: dryRunner(context.run, intercepted), store: readOnlyStore(context.store) });
         result = { dryRun: true, ...result, ...(intercepted.length === 0 ? {} : { wouldRun: intercepted }) };
       }
       else result = await spec.run(input, context);

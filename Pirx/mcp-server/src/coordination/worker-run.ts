@@ -70,13 +70,15 @@ worker.stdout.on("data", (chunk: Buffer) => {
   }
 });
 worker.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); log.write(`${JSON.stringify({ pirx: "stderr", text: chunk.toString("utf8") })}\n`); });
-const timer = setTimeout(() => { log.write(`{"pirx":"timeout"}\n`); worker.kill("SIGTERM"); }, job.timeoutMs);
+let timedOut = false;
+const timer = setTimeout(() => { timedOut = true; log.write(`{"pirx":"timeout"}\n`); worker.kill("SIGTERM"); }, job.timeoutMs);
 worker.on("close", (code, signal) => {
   clearTimeout(timer);
   const resultText = typeof resultEvent?.result === "string" ? resultEvent.result : undefined;
   if (resultText !== undefined && USAGE_LIMIT.test(resultText)) limitMessage = resultText;
   finish({
-    outcome: limitMessage !== undefined ? "usage_limit" : code === 0 && resultEvent?.is_error !== true ? "finished" : "failed",
+    outcome: limitMessage !== undefined ? "usage_limit" : timedOut ? "timeout" : code === 0 && resultEvent?.is_error !== true ? "finished" : "failed",
+    ...(timedOut ? { note: `The run was stopped after its time limit of ${Math.round(job.timeoutMs / 60_000)} min. Check the worktree before resuming.` } : {}),
     exitCode: code, ...(signal === null ? {} : { signal }),
     workerReport: resultText ?? lastAssistantText,
     ...(limitMessage === undefined ? {} : { usageLimitMessage: limitMessage, note: "The message names when the limit resets. Resume after that time." }),

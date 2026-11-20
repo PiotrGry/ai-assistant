@@ -40,6 +40,16 @@ export function workerToolArguments(worktree: string, testCommands: readonly str
     "--permission-mode", "dontAsk", "--disable-slash-commands", "--output-format", "stream-json", "--verbose"];
 }
 
+/**
+ * One process argument holds at most 128 KiB on Linux, and the instruction travels as one. A longer
+ * one failed at spawn with an unrelated error; refuse it first, with room for the preface and UTF-8.
+ */
+export const MAX_INSTRUCTION_CHARACTERS = 30_000;
+
+export function tooLong(text: string, what: string): Record<string, unknown> | undefined {
+  return text.length > MAX_INSTRUCTION_CHARACTERS ? refuse(`The ${what} is too long (${text.length} characters; the limit is ${MAX_INSTRUCTION_CHARACTERS}). Say what to do and how to check it; the worker reads the Issue and the code itself.`) : undefined;
+}
+
 const WORKER_PREFACE = `You are the code worker for Pirx. Pirx coordinates; you only change code in this worktree.
 - Work only on the instruction below. Run the repository's tests before you finish.
 - Commit your change with git commit -m. Do not push: Pirx pushes and opens the pull request.
@@ -172,6 +182,7 @@ export function registerWorkerTools(server: McpServer, context: CoordinationCont
     task: (input) => taskKey(input.repository, input.issue),
     run: async (input, context_) => {
       const repo = repositoryOrRefusal(context_.settings, input.repository); if (isRefusal(repo)) return repo;
+      const long = tooLong(input.instruction, "instruction"); if (long !== undefined) return long;
       const task = taskKey(input.repository, input.issue);
       const live = liveLock(context_); if (live !== undefined) return refuse("Another worker is running. Only one worker runs at a time.", { worker: workerFacts(context_.store) });
       const existing = await locateWorkspace(context_.run, context_.store, repo, input.issue);
@@ -199,6 +210,7 @@ export function registerWorkerTools(server: McpServer, context: CoordinationCont
     task: (input) => taskKey(input.repository, input.issue),
     run: async (input, context_) => {
       const repo = repositoryOrRefusal(context_.settings, input.repository); if (isRefusal(repo)) return repo;
+      const long = tooLong(input.instruction, "instruction"); if (long !== undefined) return long;
       const task = taskKey(input.repository, input.issue);
       const live = liveLock(context_); if (live !== undefined) return refuse("Another worker is running. Only one worker runs at a time.", { worker: workerFacts(context_.store) });
       const workspace = await locateWorkspace(context_.run, context_.store, repo, input.issue);
