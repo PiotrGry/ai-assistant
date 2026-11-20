@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CoordinationStore, type JournalEntry } from "./store.js";
-import { runTick, tickSucceeded } from "./tick-cli.js";
+import { runTick, runtimeCommit, tickSucceeded } from "./tick-cli.js";
 
 /**
  * Coordination evals (docs/control-center-refactor.md, T7). Each case replays a real situation:
@@ -16,7 +16,7 @@ import { runTick, tickSucceeded } from "./tick-cli.js";
  */
 
 interface Rule { readonly tool: string; readonly [field: string]: unknown }
-interface EvalCase { readonly description: string; readonly trigger: string; readonly pass: { readonly anyOf: readonly Rule[]; readonly forbid: readonly Rule[] } }
+interface EvalCase { readonly description: string; readonly trigger: string; readonly prompt?: string; readonly pass: { readonly anyOf: readonly Rule[]; readonly forbid: readonly Rule[] } }
 
 export interface RunVerdict { readonly passed: boolean; readonly refused: string[]; readonly reason: string; readonly calls: string[]; readonly usedOpus: boolean; readonly answer: string; readonly durationMs: number }
 
@@ -62,7 +62,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
         const history = ((testCase as unknown as { tools?: { journal_read?: { entries?: Partial<JournalEntry>[] } } }).tools?.journal_read?.entries ?? []);
         for (const entry of history) seed.append({ ...(entry.task === undefined ? {} : { task: entry.task }), kind: entry.kind ?? "tool", name: entry.name ?? "note", ...(entry.input === undefined ? {} : { input: entry.input }), ...(entry.output === undefined ? {} : { output: entry.output }), ok: entry.ok ?? true });
         seed.close();
-        const tick = await runTick({ trigger: testCase.trigger, evalFixture: join(casesDir, file), storage });
+        const tick = await runTick({ trigger: testCase.trigger, ...(testCase.prompt === undefined ? {} : { prompt: testCase.prompt }), evalFixture: join(casesDir, file), storage });
         const store = new CoordinationStore(storage);
         const entries = store.journal({ tick: tick.tick, kind: "tool", limit: 500 });
         store.close();
@@ -79,7 +79,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
   const outDir = join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "pirx", "evals");
   mkdirSync(outDir, { recursive: true });
   const outFile = join(outDir, `${new Date().toISOString().replace(/[:.]/gu, "-")}.json`);
-  writeFileSync(outFile, JSON.stringify({ at: new Date().toISOString(), model, runs, gate, summary, results }, null, 1));
+  writeFileSync(outFile, JSON.stringify({ at: new Date().toISOString(), model, commit: runtimeCommit(), cases: files.length, only: only ?? null, runs, gate, summary, results }, null, 1));
   process.stdout.write(`Saved ${outFile}\n`);
   process.exit(gate ? 0 : 1);
 }

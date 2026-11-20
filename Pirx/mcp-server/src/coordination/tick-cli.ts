@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,8 @@ export interface TickOptions {
   readonly trigger: string;
   readonly dryRun?: boolean;
   readonly evalFixture?: string;
+  /** Replaces the tick prompt, e.g. an operator question for a chat-path eval. */
+  readonly prompt?: string;
   readonly storage?: string;
   readonly environment?: NodeJS.ProcessEnv;
 }
@@ -41,6 +43,14 @@ export function tickSucceeded(exitCode: number | null, answer: string): boolean 
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pirxRoot = resolve(here, "..", "..", "..");
+
+/** The commit this runtime was built from: the runtime-<sha> directory name, or git in a checkout. */
+export function runtimeCommit(): string | null {
+  const fromDir = /runtime-([0-9a-f]{7,40})/u.exec(pirxRoot)?.[1];
+  if (fromDir !== undefined) return fromDir;
+  const head = spawnSync("git", ["rev-parse", "--short=7", "HEAD"], { cwd: pirxRoot, encoding: "utf8" });
+  return head.status === 0 ? head.stdout.trim() : null;
+}
 
 export function extractAnswer(output: string): string {
   const start = output.lastIndexOf("\nPirx: ");
@@ -69,7 +79,7 @@ export async function runTick(options: TickOptions): Promise<TickResult> {
 }
 
 async function runGuardedTick(options: TickOptions, environment: NodeJS.ProcessEnv, tick: string, storage: string): Promise<TickResult> {
-  const prompt = `${readFileSync(join(pirxRoot, "agent", "prompts", "tick.md"), "utf8")}\n\nCzas: ${new Date().toISOString()}\nZdarzenia, które Cię obudziły:\n${options.trigger}\n`;
+  const prompt = options.prompt ?? `${readFileSync(join(pirxRoot, "agent", "prompts", "tick.md"), "utf8")}\n\nCzas: ${new Date().toISOString()}\nZdarzenia, które Cię obudziły:\n${options.trigger}\n`;
   const childEnvironment: NodeJS.ProcessEnv = {
     ...environment,
     PIRX_TOOL_PROFILE: "coordination",
@@ -101,7 +111,7 @@ async function runGuardedTick(options: TickOptions, environment: NodeJS.ProcessE
   try {
     const toolCalls = store.journal({ tick, kind: "tool", limit: 500 }).length;
     const succeeded = tickSucceeded(output.code, answer);
-    store.append({ tick, kind: "tick", name: "tick", input: { trigger: options.trigger, model: environment.OLLAMA_MODEL ?? null, ...(options.dryRun === true ? { dryRun: true } : {}), ...(options.evalFixture === undefined ? {} : { eval: options.evalFixture }) }, output: { answer, toolCalls, exitCode: output.code, durationMs: Date.now() - startedAt, ...(succeeded ? {} : { outputTail: output.text.slice(-3000) }) }, ok: succeeded });
+    store.append({ tick, kind: "tick", name: "tick", input: { trigger: options.trigger, model: environment.OLLAMA_MODEL ?? null, runtime: pirxRoot, commit: runtimeCommit(), ...(options.dryRun === true ? { dryRun: true } : {}), ...(options.evalFixture === undefined ? {} : { eval: options.evalFixture }) }, output: { answer, toolCalls, exitCode: output.code, durationMs: Date.now() - startedAt, ...(succeeded ? {} : { outputTail: output.text.slice(-3000) }) }, ok: succeeded });
     return { tick, exitCode: output.code, answer, toolCalls, durationMs: Date.now() - startedAt, succeeded };
   } finally { store.close(); }
 }

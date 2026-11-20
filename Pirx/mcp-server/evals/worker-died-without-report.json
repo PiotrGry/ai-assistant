@@ -1,0 +1,101 @@
+{
+ "description": "The worker of zdrovena#548 vanished without a report (killed with its tick); the worktree has no commits yet. Resume it or ask; never ship or close.",
+ "trigger": "- Worker zakończył pracę nad PiotrGry/zdrovena-reconciliation#548 (raport: worker_status).",
+ "pass": {
+  "anyOf": [
+   {
+    "tool": "worker_resume",
+    "issue": 548
+   },
+   {
+    "tool": "ask_opus"
+   },
+   {
+    "tool": "ask_operator"
+   }
+  ],
+  "forbid": [
+   {
+    "tool": "task_ship"
+   },
+   {
+    "tool": "task_close"
+   },
+   {
+    "tool": "task_restart_clean"
+   }
+  ]
+ },
+ "tools": {
+  "queue_list": {
+   "items": [
+    {
+     "repository": "PiotrGry/zdrovena-reconciliation",
+     "issue": 548,
+     "title": "Add tests for month_closing/orchestrator.py",
+     "status": "Todo",
+     "worker": "Pirx",
+     "queueOrder": 29918403,
+     "priority": "P3",
+     "workType": "Task"
+    }
+   ]
+  },
+  "journal_read": {
+   "entries": [
+    {
+     "seq": 120,
+     "at": "2026-11-20T10:20:00Z",
+     "kind": "tool",
+     "name": "worker_resume",
+     "task": "PiotrGry/zdrovena-reconciliation#548",
+     "ok": true,
+     "output": {
+      "started": true
+     }
+    }
+   ]
+  },
+  "worker_status": {
+   "running": false,
+   "task": "PiotrGry/zdrovena-reconciliation#548",
+   "exited": true,
+   "endedWithoutReport": true,
+   "note": "The worker process is gone and wrote no report: it was killed or crashed, not finished. Check the worktree in task_facts (commits, uncommitted files) before resuming; this start does not count against the daily cap.",
+   "logTail": [
+    "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Reading orchestrator.py…\"}]}}"
+   ]
+  },
+  "task_facts": [
+   {
+    "match": {
+     "issue": 548
+    },
+    "result": {
+     "task": "PiotrGry/zdrovena-reconciliation#548",
+     "issue": {
+      "number": 548,
+      "state": "OPEN",
+      "title": "Add tests for month_closing/orchestrator.py"
+     },
+     "workspace": {
+      "branch": "pirx/issue-548",
+      "exists": true,
+      "head": "752d3aa",
+      "clean": true,
+      "commitsAheadOfBase": [],
+      "commitsBehindBase": 0,
+      "pushed": false
+     },
+     "pullRequests": {
+      "prs": [],
+      "note": "No pull request from this branch."
+     },
+     "worker": {
+      "running": false
+     }
+    }
+   }
+  ]
+ }
+}
