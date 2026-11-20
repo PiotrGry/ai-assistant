@@ -219,18 +219,23 @@ test("issue_create: one open Pirx proposal at a time, and every Issue Pirx creat
   } finally { await h.close(); }
 });
 
-test("watcher guard: a guard left by a dead process is taken over; a live holder keeps it", async () => {
-  const { takeGuard } = await import("../src/coordination/watch-cli.js");
+test("tick guard: a guard left by a dead process is taken over; a live holder keeps it", async () => {
+  const { takeGuard, guardHeldByOther, releaseGuard } = await import("../src/coordination/proc.js");
+  const { spawn } = await import("node:child_process");
   const root = await mkdtemp(join(tmpdir(), "pirx-guard-"));
+  const holder = spawn("sleep", ["30"]);
   try {
     const guard = join(root, "pirx-tick.lock");
     await writeFile(guard, "");
     assert.equal(takeGuard(guard), true);
+    releaseGuard(guard);
     await writeFile(guard, "2147483000");
     assert.equal(takeGuard(guard), true);
-    await writeFile(guard, String(process.pid));
+    releaseGuard(guard);
+    await writeFile(guard, String(holder.pid));
+    assert.equal(guardHeldByOther(guard), true);
     assert.equal(takeGuard(guard), false);
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { holder.kill(); await rm(root, { recursive: true, force: true }); }
 });
 
 test("issue_create kind=bug: own label, no duplicate title, and the improvement limit does not block it", async () => {
@@ -331,4 +336,61 @@ test("worker runner: writes its pid, a report when it finishes, and a report whe
     assert.equal(stopped.outcome, "killed");
     assert.equal(stopped.workerReport, "working");
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("watcher: one CI run is one state change, not one per check", async () => {
+  const { prState } = await import("../src/coordination/watch-cli.js");
+  assert.equal(prState({ mergeStateStatus: "BLOCKED", statusCheckRollup: [{ status: "IN_PROGRESS" }, { conclusion: "SUCCESS" }] }), "pending/blocked");
+  assert.equal(prState({ mergeStateStatus: "BLOCKED", statusCheckRollup: [{ status: "QUEUED" }, { status: "IN_PROGRESS" }] }), "pending/blocked");
+  assert.equal(prState({ mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }, { conclusion: "SKIPPED" }] }), "green/clean");
+  assert.equal(prState({ mergeStateStatus: "BLOCKED", statusCheckRollup: [{ conclusion: "FAILURE" }, { status: "IN_PROGRESS" }] }), "red/blocked");
+});
+
+test("watcher: a failed tick leaves its events for the next run; the idle queue wakes a tick; the timer ignores failed ticks", async () => {
+  const { collectEvents, settleEvents, MAX_FAILED_TICKS_PER_EVENT } = await import("../src/coordination/watch-cli.js");
+  const { loadCoordinationSettings } = await import("../src/coordination/settings.js");
+  let queue = [{ content: { repository: REPO, number: 1, type: "Issue" }, worker: "Pirx", status: "Todo", "queue Order": 1 }];
+  const h = await harness();
+  const run: Runner = async (file, args) => ({ ok: true, code: 0, stdout: file === "gh" && args[0] === "pr" ? "[]" : JSON.stringify({ items: queue }), stderr: "", command: "" });
+  const settings = loadCoordinationSettings({ HOME: h.root, PIRX_ORCHESTRATOR_CONFIG: join(h.root, "orchestrator.json") });
+  try {
+    (await collectEvents(h.store, settings, run, 60)).commit();
+    queue = [...queue, { content: { repository: REPO, number: 2, type: "Issue" }, worker: "Pirx", status: "Todo", "queue Order": 2 }];
+    const first = await collectEvents(h.store, settings, run, 60);
+    assert.ok(first.events.some((event) => event.includes("kolejka")));
+    settleEvents(h.store, first, false);
+    const again = await collectEvents(h.store, settings, run, 60);
+    assert.ok(again.events.some((event) => event.includes("kolejka")), "the queue change is still reported after a failed tick");
+    assert.equal(again.events.filter((event) => event.includes("worker nie pracuje")).length, 0, "the idle nudge is rate-limited");
+    for (let index = 1; index < MAX_FAILED_TICKS_PER_EVENT; index += 1) settleEvents(h.store, await collectEvents(h.store, settings, run, 60), false);
+    assert.equal((await collectEvents(h.store, settings, run, 60)).events.some((event) => event.includes("kolejka")), false, "after three failures the cursor moves on");
+    h.store.append({ kind: "tick", name: "tick", ok: false });
+    assert.ok((await collectEvents(h.store, settings, run, 60)).events.some((event) => event.includes("Obchód okresowy")), "a failed tick does not reset the timer");
+    h.store.append({ kind: "tick", name: "tick", ok: true });
+    assert.equal((await collectEvents(h.store, settings, run, 60)).events.some((event) => event.includes("Obchód okresowy")), false);
+  } finally { await h.close(); }
+});
+
+test("tick guard: while a tick runs, a second tick does nothing and the chat cannot run mutating tools", async () => {
+  const { spawn } = await import("node:child_process");
+  const { runTick } = await import("../src/coordination/tick-cli.js");
+  const h = await harness();
+  const holder = spawn("sleep", ["30"]);
+  try {
+    await writeFile(join(h.root, "pirx-tick.lock"), String(holder.pid));
+    const skipped = await runTick({ trigger: "x", storage: h.store.path, environment: { ...process.env } });
+    assert.equal(skipped.skipped, true);
+    const refused = await call(h, "issue_comment", { repository: REPO, issue: 1, body: "x" });
+    assert.match(String(refused.reason), /A tick is running/u);
+    assert.equal((await call(h, "journal_read", {})).refused, undefined, "read tools still work");
+  } finally { holder.kill(); await h.close(); }
+});
+
+test("tick result: a limit notice or a failure notice is not a decision", async () => {
+  const { tickSucceeded } = await import("../src/coordination/tick-cli.js");
+  assert.equal(tickSucceeded(0, "Decyzja: nic"), true);
+  assert.equal(tickSucceeded(0, "Osiągnięto limit 30 rund wywołań narzędzi."), false);
+  assert.equal(tickSucceeded(0, "Nie udało się zakończyć odpowiedzi po wykonaniu części operacji."), false);
+  assert.equal(tickSucceeded(1, "Decyzja: nic"), false);
+  assert.equal(tickSucceeded(0, "  "), false);
 });

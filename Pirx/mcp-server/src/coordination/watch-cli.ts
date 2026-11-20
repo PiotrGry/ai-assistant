@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { pidAlive } from "./facts.js";
+import { guardHeldByOther, pidAlive, tickGuardPath } from "./proc.js";
+
+export { takeGuard } from "./proc.js";
 import { jsonOf, runCommand, type Runner } from "./shell.js";
 import { loadCoordinationSettings, type CoordinationSettings } from "./settings.js";
 import { CoordinationStore, defaultStoragePath } from "./store.js";
@@ -22,33 +23,42 @@ export function issueOfBranch(branch: string): number | undefined {
   return match === null ? undefined : Number(match[1]);
 }
 
-/** One tick at a time. The guard file holds the pid; a guard left by a dead process is taken over. */
-export function takeGuard(path: string): boolean {
-  try { writeFileSync(path, String(process.pid), { flag: "wx" }); return true; } catch { /* exists */ }
-  const holder = Number(readFileSync(path, "utf8").trim());
-  if (Number.isSafeInteger(holder) && holder > 0 && pidAlive(holder)) return false;
-  rmSync(path, { force: true });
-  try { writeFileSync(path, String(process.pid), { flag: "wx" }); return true; } catch { return false; }
-}
-
 export const IDLE_NUDGE_MINUTES = 15;
 
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
 
-export async function collectEvents(store: CoordinationStore, settings: CoordinationSettings, run: Runner, timerMinutes: number): Promise<string[]> {
+/** Overall state of a pull request, so one CI run with many checks is one change, not many. */
+export function prState(pr: { mergeStateStatus?: string; statusCheckRollup?: { conclusion?: string; status?: string; state?: string }[] }): string {
+  const checks = (pr.statusCheckRollup ?? []).map((check) => String(check.conclusion ?? check.state ?? check.status ?? "").toUpperCase());
+  const ci = checks.some((value) => ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(value)) ? "red"
+    : checks.some((value) => ["", "PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED", "WAITING", "REQUESTED"].includes(value)) ? "pending" : "green";
+  return `${ci}/${String(pr.mergeStateStatus ?? "UNKNOWN").toLowerCase()}`;
+}
+
+export interface CollectedEvents {
+  readonly events: string[];
+  /** Stores the cursors of these events. Call it only after a tick handled them. */
+  commit(): void;
+}
+
+export const MAX_FAILED_TICKS_PER_EVENT = 3;
+
+export async function collectEvents(store: CoordinationStore, settings: CoordinationSettings, run: Runner, timerMinutes: number): Promise<CollectedEvents> {
   const events: string[] = [];
+  const pending: [string, string][] = [];
   const lock = store.lock();
-  if (lock !== undefined && !pidAlive(lock.pid) && store.watchValue("worker_report") !== lock.reportPath) {
+  const working = lock !== undefined && pidAlive(lock.pid, lock.pidStart);
+  if (lock !== undefined && !working && store.watchValue("worker_report") !== lock.reportPath) {
     events.push(`Worker zakończył pracę nad ${lock.task} (raport: worker_status).`);
-    store.setWatchValue("worker_report", lock.reportPath);
+    pending.push(["worker_report", lock.reportPath]);
   }
   for (const repo of settings.repositories) {
     const prs = jsonOf(await run("gh", ["pr", "list", "-R", repo.repository, "--state", "open", "--json", "number,headRefName,headRefOid,mergeStateStatus,statusCheckRollup"])) as { number: number; headRefName: string; headRefOid: string; mergeStateStatus: string; statusCheckRollup?: { conclusion?: string; status?: string; state?: string }[] }[] | undefined;
     if (prs === undefined) continue;
-    const pirx = prs.filter((pr) => pr.headRefName.startsWith("pirx/")).map((pr) => ({ pr: pr.number, branch: pr.headRefName, issue: issueOfBranch(pr.headRefName), head: pr.headRefOid, merge: pr.mergeStateStatus, checks: (pr.statusCheckRollup ?? []).map((check) => check.conclusion ?? check.state ?? check.status ?? "") }));
-    const key = `prs:${repo.repository}`; const value = digest(pirx);
-    if (store.watchValue(key) !== undefined && store.watchValue(key) !== value) events.push(`Zmienił się stan PR albo CI w ${repo.repository}: ${pirx.map((pr) => `PR #${pr.pr} (${pr.issue === undefined ? "zadanie nieznane" : `zadanie #${pr.issue}`}, gałąź ${pr.branch})`).join(", ") || "brak otwartych PR z gałęzi pirx/*"}.`);
-    store.setWatchValue(key, value);
+    const pirx = prs.filter((pr) => pr.headRefName.startsWith("pirx/")).map((pr) => ({ pr: pr.number, branch: pr.headRefName, issue: issueOfBranch(pr.headRefName), head: pr.headRefOid, state: prState(pr) }));
+    const key = `prs:${repo.repository}`; const value = digest(pirx.map((pr) => [pr.pr, pr.head, pr.state]));
+    if (store.watchValue(key) !== undefined && store.watchValue(key) !== value) events.push(`Zmienił się stan PR w ${repo.repository}: ${pirx.map((pr) => `PR #${pr.pr} (${pr.issue === undefined ? "zadanie nieznane" : `zadanie #${pr.issue}`}, gałąź ${pr.branch}, CI/merge: ${pr.state})`).join(", ") || "brak otwartych PR z gałęzi pirx/*"}.`);
+    pending.push([key, value]);
   }
   if (settings.projectOwner !== undefined && settings.projectNumber !== undefined) {
     const items = jsonOf(await run("gh", ["project", "item-list", String(settings.projectNumber), "--owner", settings.projectOwner, "--format", "json", "--limit", "500"], { timeoutMs: 60_000 })) as { items?: Record<string, unknown>[] } | undefined;
@@ -56,10 +66,8 @@ export async function collectEvents(store: CoordinationStore, settings: Coordina
       const queued = (items.items ?? []).filter((item) => item.worker === "Pirx" && item.status !== "Done").map((item) => [(item.content as { repository?: string; number?: number } | undefined)?.repository, (item.content as { number?: number } | undefined)?.number, item.status, item["queue Order"]]);
       const value = digest(queued);
       if (store.watchValue("queue") !== undefined && store.watchValue("queue") !== value) events.push("Zmieniła się kolejka zadań dla Pirxa.");
-      store.setWatchValue("queue", value);
+      pending.push(["queue", value]);
       // Queued work with an idle worker is itself a reason to wake up, at most every IDLE_NUDGE_MINUTES.
-      // Without it a tick that failed (or decided nothing) left the queue untouched until the hourly timer.
-      const working = lock !== undefined && pidAlive(lock.pid);
       const lastNudge = Date.parse(store.watchValue("idle_nudge") ?? "1970-01-01T00:00:00.000Z");
       if (queued.length > 0 && !working && Date.parse(store.now()) - lastNudge >= IDLE_NUDGE_MINUTES * 60_000) {
         events.push(`W kolejce czeka ${queued.length} zadań dla Pirxa, a worker nie pracuje.`);
@@ -67,28 +75,37 @@ export async function collectEvents(store: CoordinationStore, settings: Coordina
       }
     }
   }
-  const last = store.journal({ kind: "tick", limit: 1 })[0];
-  if (last === undefined || Date.parse(store.now()) - Date.parse(last.at) >= timerMinutes * 60_000) events.push(`Obchód okresowy (minęło ${last === undefined ? "?" : Math.round((Date.parse(store.now()) - Date.parse(last.at)) / 60_000)} min od ostatniego ticka).`);
-  return events;
+  // The timer counts from the last tick that ended with a decision; failed ticks do not reset it.
+  const last = store.journal({ kind: "tick", limit: 50 }).filter((entry) => entry.ok).at(-1);
+  if (last === undefined || Date.parse(store.now()) - Date.parse(last.at) >= timerMinutes * 60_000) events.push(`Obchód okresowy (minęło ${last === undefined ? "?" : Math.round((Date.parse(store.now()) - Date.parse(last.at)) / 60_000)} min od ostatniego udanego ticka).`);
+  return { events, commit: () => { for (const [name, value] of pending) store.setWatchValue(name, value); } };
+}
+
+/** After a tick: commit the cursors when it succeeded, or after too many failures in a row (the events stay visible through the idle nudge and the timer). */
+export function settleEvents(store: CoordinationStore, collected: CollectedEvents, succeeded: boolean): void {
+  const failures = succeeded ? 0 : Number(store.watchValue("failed_ticks") ?? "0") + 1;
+  if (succeeded || failures >= MAX_FAILED_TICKS_PER_EVENT) { collected.commit(); store.setWatchValue("failed_ticks", "0"); }
+  else store.setWatchValue("failed_ticks", String(failures));
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const environment = process.env;
   const settings = loadCoordinationSettings(environment);
   const storage = defaultStoragePath(environment);
-  const guard = join(dirname(storage), "pirx-tick.lock");
-  if (!takeGuard(guard)) { process.stdout.write("A tick is already running.\n"); process.exit(0); }
+  if (guardHeldByOther(tickGuardPath(storage))) { process.stdout.write("A tick is already running.\n"); process.exit(0); }
+  const store = new CoordinationStore(storage);
+  const collected = await collectEvents(store, settings, runCommand, Number(environment.PIRX_TICK_TIMER_MINUTES ?? 60));
   let code = 0;
-  try {
-    const store = new CoordinationStore(storage);
-    const events = await collectEvents(store, settings, runCommand, Number(environment.PIRX_TICK_TIMER_MINUTES ?? 60));
-    store.close();
-    if (events.length === 0) process.stdout.write("No events.\n");
+  if (collected.events.length === 0) { collected.commit(); process.stdout.write("No events.\n"); }
+  else {
+    const result = await runTick({ trigger: collected.events.map((event) => `- ${event}`).join("\n"), dryRun: settings.dryRun, storage });
+    if (result.skipped === true) process.stdout.write("A tick is already running.\n");
     else {
-      const result = await runTick({ trigger: events.map((event) => `- ${event}`).join("\n"), dryRun: settings.dryRun, storage });
-      process.stdout.write(`${result.tick} (${Math.round(result.durationMs / 1000)} s, ${result.toolCalls} tool calls)\n${result.answer}\n`);
-      code = result.exitCode === 0 ? 0 : 1;
+      settleEvents(store, collected, result.succeeded);
+      process.stdout.write(`${result.tick} (${Math.round(result.durationMs / 1000)} s, ${result.toolCalls} tool calls, ${result.succeeded ? "decided" : "FAILED"})\n${result.answer}\n`);
+      code = result.succeeded ? 0 : 1;
     }
-  } finally { rmSync(guard, { force: true }); }
+  }
+  store.close();
   process.exit(code);
 }

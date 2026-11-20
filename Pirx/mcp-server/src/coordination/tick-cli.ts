@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { releaseGuard, takeGuard, tickGuardPath } from "./proc.js";
 import { CoordinationStore, defaultStoragePath } from "./store.js";
 
 /**
@@ -27,6 +28,15 @@ export interface TickResult {
   readonly answer: string;
   readonly toolCalls: number;
   readonly durationMs: number;
+  /** The tick ended with a decision, not an error, a limit or an empty answer. */
+  readonly succeeded: boolean;
+  /** Another tick held the guard; this one did nothing. */
+  readonly skipped?: boolean;
+}
+
+/** A tick succeeded when the agent exited cleanly and gave an answer that is not a limit or failure notice. */
+export function tickSucceeded(exitCode: number | null, answer: string): boolean {
+  return exitCode === 0 && answer.trim().length > 0 && !/^(Osiągnięto limit|Nie udało się zakończyć)/u.test(answer.trim());
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -52,6 +62,13 @@ export async function runTick(options: TickOptions): Promise<TickResult> {
   const environment = options.environment ?? process.env;
   const tick = `tick-${new Date().toISOString()}`;
   const storage = options.storage ?? defaultStoragePath(environment);
+  // One tick at a time, however it was started (watcher, `pnpm tick`, a second manual run).
+  const guard = tickGuardPath(storage);
+  if (!takeGuard(guard)) return { tick, exitCode: null, answer: "Another tick is running.", toolCalls: 0, durationMs: 0, succeeded: false, skipped: true };
+  try { return await runGuardedTick(options, environment, tick, storage); } finally { releaseGuard(guard); }
+}
+
+async function runGuardedTick(options: TickOptions, environment: NodeJS.ProcessEnv, tick: string, storage: string): Promise<TickResult> {
   const prompt = `${readFileSync(join(pirxRoot, "agent", "prompts", "tick.md"), "utf8")}\n\nCzas: ${new Date().toISOString()}\nZdarzenia, które Cię obudziły:\n${options.trigger}\n`;
   const childEnvironment: NodeJS.ProcessEnv = {
     ...environment,
@@ -83,8 +100,9 @@ export async function runTick(options: TickOptions): Promise<TickResult> {
   const store = new CoordinationStore(storage);
   try {
     const toolCalls = store.journal({ tick, kind: "tool", limit: 500 }).length;
-    store.append({ tick, kind: "tick", name: "tick", input: { trigger: options.trigger, model: environment.OLLAMA_MODEL ?? null, ...(options.dryRun === true ? { dryRun: true } : {}), ...(options.evalFixture === undefined ? {} : { eval: options.evalFixture }) }, output: { answer, toolCalls, exitCode: output.code, durationMs: Date.now() - startedAt, ...(output.code === 0 ? {} : { outputTail: output.text.slice(-3000) }) }, ok: output.code === 0 });
-    return { tick, exitCode: output.code, answer, toolCalls, durationMs: Date.now() - startedAt };
+    const succeeded = tickSucceeded(output.code, answer);
+    store.append({ tick, kind: "tick", name: "tick", input: { trigger: options.trigger, model: environment.OLLAMA_MODEL ?? null, ...(options.dryRun === true ? { dryRun: true } : {}), ...(options.evalFixture === undefined ? {} : { eval: options.evalFixture }) }, output: { answer, toolCalls, exitCode: output.code, durationMs: Date.now() - startedAt, ...(succeeded ? {} : { outputTail: output.text.slice(-3000) }) }, ok: succeeded });
+    return { tick, exitCode: output.code, answer, toolCalls, durationMs: Date.now() - startedAt, succeeded };
   } finally { store.close(); }
 }
 

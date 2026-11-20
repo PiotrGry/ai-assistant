@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
 import type { Runner } from "./shell.js";
+import { guardHeldByOther, tickGuardPath } from "./proc.js";
 import { stopped, type CoordinationSettings } from "./settings.js";
 import type { CoordinationStore } from "./store.js";
 
@@ -117,6 +118,7 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, conte
       if (repeated !== undefined) result = repeated;
       else if (spec.local === true) result = await spec.run(input, context);
       else if (context.settings.evalFixture !== undefined) result = fromFixture(context.settings.evalFixture, spec.name, input as Record<string, unknown>, spec.mutating);
+      else if (spec.mutating && context.settings.tick === undefined && guardHeldByOther(tickGuardPath(context.store.path))) result = refuse("A tick is running and may be acting on the same Tasks. Try again when it ends (usually 1–5 minutes); read tools work meanwhile.");
       else if (spec.mutating && stopped(context.settings)) result = refuse(`The stop switch is on (${context.settings.stopFile} exists). No mutating tool runs until the operator removes it.`);
       else if (spec.mutating && context.settings.dryRun) {
         // Dry-run runs the tool's real checks and reads; only commands that change something are intercepted.
