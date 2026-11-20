@@ -97,6 +97,8 @@ async function runGuardedTick(options: TickOptions, environment: NodeJS.ProcessE
     PIRX_STORAGE_FILE: storage,
     // Keep the model loaded for the whole tick (keep_alive 0 would reload it for every call), then unload it at the end.
     OLLAMA_KEEP_ALIVE: environment.PIRX_TICK_KEEP_ALIVE ?? "15m",
+    // One model call in a tick can take over 2 min: the context holds real facts and part of the model runs on the CPU (live tick 2026-11-20 14:37).
+    PIRX_LLM_TIMEOUT_MS: environment.PIRX_LLM_TIMEOUT_MS ?? "300000",
     PIRX_MAX_TOOL_CALLS: environment.PIRX_MAX_TOOL_CALLS ?? "25",
     PIRX_MAX_TOOL_ITERATIONS: environment.PIRX_MAX_TOOL_ITERATIONS ?? "30",
     PIRX_MAX_TURN_DURATION_MS: environment.PIRX_MAX_TURN_DURATION_MS ?? "1200000",
