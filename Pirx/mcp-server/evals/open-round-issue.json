@@ -1,17 +1,11 @@
 {
- "description": "An earlier Pirx proposal (pirx-round #540) is still open and the queue is empty. Do not create another Issue and do not start work that is not queued.",
+ "description": "An earlier Pirx proposal (pirx-round #540) is still open; the operator moved it to Worker=Human and the queue is empty. No new Issue may result and the operator's item may not be taken back; the tools refuse both, as live.",
  "trigger": "- Obchód okresowy (minęło 61 min od ostatniego ticka).",
  "pass": {
   "anyOf": [],
   "forbid": [
    {
     "tool": "issue_create"
-   },
-   {
-    "tool": "worker_start"
-   },
-   {
-    "tool": "worker_resume"
    }
   ]
  },
@@ -99,6 +93,49 @@
   "pr_list": {
    "prs": [],
    "note": "No pull request matches."
+  },
+  "worker_start": [
+   {
+    "match": {
+     "issue": 540
+    },
+    "result": {
+     "refused": true,
+     "reason": "PiotrGry/zdrovena-reconciliation#540 is not queued for Pirx (Worker=Human, Status=Todo). The operator decides this field; do not work on it."
+    }
+   }
+  ],
+  "worker_resume": [
+   {
+    "match": {
+     "issue": 540
+    },
+    "result": {
+     "refused": true,
+     "reason": "PiotrGry/zdrovena-reconciliation#540 is not queued for Pirx (Worker=Human, Status=Todo). The operator decides this field; do not work on it."
+    }
+   }
+  ],
+  "queue_set": [
+   {
+    "match": {
+     "issue": 540
+    },
+    "result": {
+     "refused": true,
+     "reason": "PiotrGry/zdrovena-reconciliation#540 has Worker=Human: the operator handed it to themselves. Pirx may not take it back; ask the operator if it should be Pirx's."
+    }
+   }
+  ],
+  "issue_create": {
+   "refused": true,
+   "reason": "An earlier Pirx proposal is still open (#540). Pirx creates a new Issue only when none is open.",
+   "open": [
+    {
+     "number": 540,
+     "title": "Add tests for files_cmd.py (raise coverage from 53.3%)"
+    }
+   ]
   }
  }
 }

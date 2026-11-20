@@ -7,7 +7,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
 import { isRefusal, locateWorkspace, pidAlive, repositoryOrRefusal, workerFacts } from "./facts.js";
-import { failure } from "./shell.js";
+import { failure, jsonOf } from "./shell.js";
 import { startOfDay, type CoordinatedRepository, type CoordinationSettings } from "./settings.js";
 import { taskKey } from "./store.js";
 import { defineTool, issueInput, refuse, repositoryInput, type CoordinationContext } from "./toolkit.js";
@@ -106,10 +106,26 @@ async function launch(context: CoordinationContext, repo: CoordinatedRepository,
   return { started: true, task, pid: child.pid, sessionId, worktree: cwd, logPath, reportPath, note: "The worker runs in the background. A tick wakes Pirx when it exits; read worker_status or task_facts then." };
 }
 
+/** The operator controls what Pirx may work on through the Project: only Worker=Pirx items that are not Done. */
+async function notQueuedForPirx(context: CoordinationContext, repository: string, issue: number): Promise<Record<string, unknown> | undefined> {
+  const { settings } = context;
+  if (settings.projectOwner === undefined || settings.projectNumber === undefined) return undefined;
+  const result = await context.run("gh", ["project", "item-list", String(settings.projectNumber), "--owner", settings.projectOwner, "--format", "json", "--limit", "500"], { timeoutMs: 60_000 });
+  const value = jsonOf(result) as { items?: Record<string, unknown>[] } | undefined;
+  if (value === undefined) return refuse("Cannot read the Project to check that this Issue is queued for Pirx.", failure(result));
+  const item = (value.items ?? []).find((entry) => {
+    const content = entry.content as { repository?: string; number?: number } | undefined;
+    return content?.repository?.toLowerCase() === repository.toLowerCase() && content.number === issue;
+  });
+  if (item === undefined) return refuse(`${repository}#${issue} is not on the Project. Only queued work may start; queue it with queue_set (Worker=Pirx) if it should be done.`);
+  if (item.worker !== "Pirx" || item.status === "Done") return refuse(`${repository}#${issue} is not queued for Pirx (Worker=${String(item.worker ?? "none")}, Status=${String(item.status ?? "none")}). The operator decides this field; do not work on it.`);
+  return undefined;
+}
+
 export function registerWorkerTools(server: McpServer, context: CoordinationContext): void {
   defineTool(server, context, {
     name: "worker_start",
-    description: "Start the code worker (Claude Code) on a Task in a new worktree and branch pirx/issue-<N>, from the current base branch. Pirx writes the instruction: what to do and how to know it is done. Refuses while another worker runs, when the Task already has a worktree (use worker_resume or task_restart_clean), or when today's start cap is reached.",
+    description: "Start the code worker (Claude Code) on a queued Task (Worker=Pirx on the Project) in a new worktree and branch pirx/issue-<N>, from the current base branch. Pirx writes the instruction: what to do and how to know it is done. Refuses while another worker runs, when the Task already has a worktree (use worker_resume or task_restart_clean), or when today's start cap is reached.",
     input: { repository: repositoryInput, issue: issueInput, instruction: z.string().min(1) },
     mutating: true,
     task: (input) => taskKey(input.repository, input.issue),
@@ -120,6 +136,7 @@ export function registerWorkerTools(server: McpServer, context: CoordinationCont
       const existing = await locateWorkspace(context_.run, context_.store, repo, input.issue);
       if (existing !== undefined && existsSync(existing.worktree)) return refuse(`${task} already has a worktree (${existing.worktree}, branch ${existing.branch}). Use worker_resume to continue it, or task_restart_clean to start over.`, { workspace: existing });
       const capped = capReached(context_, task); if (capped !== undefined) return capped;
+      const unqueued = await notQueuedForPirx(context_, repo.repository, input.issue); if (unqueued !== undefined) return unqueued;
       const branch = `pirx/issue-${input.issue}`;
       const worktree = join(context_.settings.worktreeParent, `${input.repository.replace("/", "-")}-${input.issue}`);
       const fetched = await context_.run("git", ["fetch", "--quiet", repo.remoteName, repo.baseBranch], { cwd: repo.repositoryRoot, timeoutMs: 120_000 });
@@ -146,6 +163,7 @@ export function registerWorkerTools(server: McpServer, context: CoordinationCont
       const workspace = await locateWorkspace(context_.run, context_.store, repo, input.issue);
       if (workspace === undefined || !existsSync(workspace.worktree)) return refuse(`${task} has no worktree. Use worker_start.`);
       const capped = capReached(context_, task); if (capped !== undefined) return capped;
+      const unqueued = await notQueuedForPirx(context_, repo.repository, input.issue); if (unqueued !== undefined) return unqueued;
       const own = context_.store.getTask(task);
       const previous = own?.sessionId;
       const sessionId = previous ?? randomUUID();

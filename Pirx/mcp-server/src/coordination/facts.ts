@@ -188,7 +188,7 @@ export function registerFactTools(server: McpServer, context: CoordinationContex
 
   defineTool(server, context, {
     name: "task_facts",
-    description: "Everything about one Task in one call: the Issue, Pirx's record of the Task, its worktree (HEAD, clean or not, commits ahead of and behind the base, pushed or not), its pull requests with merge state and checks, the worker, and Pirx's last journal entries for it.",
+    description: "Everything about one Task in one call, by its Issue number (not a pull request number; events name both): the Issue, Pirx's record of the Task, its worktree (HEAD, clean or not, commits ahead of and behind the base, pushed or not), its pull requests with merge state and checks, the worker, and Pirx's last journal entries for it.",
     input: { repository: repositoryInput, issue: issueInput },
     mutating: false,
     task: (input) => taskKey(input.repository, input.issue),
