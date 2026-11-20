@@ -198,6 +198,45 @@ The old daemon keeps serving zdrovena until T9. Do not add decision logic to it.
 
 T1 first. T2 before every tool task. T3, T4, T5 can run in that order or T3 in parallel with T4. T6 needs T2 to T5. T7 needs T6. T8 needs T7 at 5/5. T9, then T10.
 
+## Status (2026-11-20)
+
+| Task | State |
+|---|---|
+| T1 contract | Done (#350) |
+| T2–T6 tools, journal, tick, watcher | Done (#351, #352) |
+| T7 evals | Done. Gate passed: Qwen3.8 27B, every case 3/3, with no `ask_opus`; the tools refused 3 attempts (see below). |
+| T8 shadow run | Running since 2026-11-20 02:26 CET: `pirx-watch.timer` every 5 min, dry-run, journal in `pirx-shadow.sqlite`. The old `pirx-round.timer` is disabled. |
+| T9 switch-over | Not started; needs the operator (see below) |
+| T10 delete old orchestrator | After T9 |
+
+### What the evals taught (each fix went into a tool, not the prompt)
+
+1. PR events named only the PR, so the model looked a PR up as a Task. The watcher now names the Task and the branch.
+2. `keep_alive 0` reloaded the model for every call, so ticks took 5–6 min and model calls timed out. The model now stays loaded during a tick and is unloaded at its end; ticks take about 1 min.
+3. With an empty queue, the model started work the operator had set to `Worker=Human`. `worker_start` and `worker_resume` now accept only Issues queued for Pirx.
+4. Refused, it set the item back to `Worker=Pirx` itself. `queue_set` cannot take back a `Worker=Human` item.
+5. Refused again, it created a new `pirx-round` Issue. `issue_create` now labels every Issue `pirx-round` and allows only one open at a time.
+
+The pattern matches the hourly rounds of 2026-11-19: this model follows facts well, but not "do not" rules in a prompt. Every such rule must be a tool limit.
+
+### First shadow tick on the real queue
+
+| Task | Old daemon | Pirx (dry-run) |
+|---|---|---|
+| zdrovena#543 (label e-mail) | `blocked`: a transient `pip-audit` TLS timeout went to the worker, which could not fix it | `task_close`: PR #559 merged and on `main`; the tool verified it |
+| zdrovena#539 (tests for `allegro_auth_cmd`) | `blocked`: `binding_mismatch` after the worker's commit `f0f534b` | `task_ship`: push `f0f534b` and open the PR; all tool checks passed |
+
+The old daemon has been idle (`no_runnable_task`) since then.
+
+### Before T9 (operator)
+
+- Read a few hours of the shadow journal: `sqlite3 ~/.local/share/pirx/pirx-shadow.sqlite "select at, name, substr(output,1,300) from coord_journal where kind='tick'"`, or ask the chat (`pirx_explain`).
+- Switch over:
+  1. Stop `pirx-orchestrator`.
+  2. Remove `PIRX_COORDINATION_DRY_RUN` and `PIRX_STORAGE_FILE` from `pirx-watch.service`.
+  3. Restart the timer.
+- Roll back by doing the reverse. `~/.config/pirx/STOP` halts every mutating tool at once.
+
 ## Implementation notes
 
 - The coordination tools live in `mcp-server/src/coordination/` and are visible in the `coordination` tool profile (`PIRX_TOOL_PROFILE=coordination`). They use `git` and `gh` subprocesses and do not import `@pirx/orchestrator`.
