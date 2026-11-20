@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { issueOfBranch } from "./facts.js";
+import { issueOfBranch, projectItems } from "./facts.js";
 import { guardHeldByOther, pidAlive, tickGuardPath } from "./proc.js";
 
 export { issueOfBranch } from "./facts.js";
@@ -22,6 +22,7 @@ import { runTick } from "./tick-cli.js";
 
 
 export const IDLE_NUDGE_MINUTES = 15;
+export const PROJECT_WATCH_MINUTES = 14;
 
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
 
@@ -59,7 +60,8 @@ export async function collectEvents(store: CoordinationStore, settings: Coordina
     pending.push([key, value]);
   }
   if (settings.projectOwner !== undefined && settings.projectNumber !== undefined) {
-    const items = jsonOf(await run("gh", ["project", "item-list", String(settings.projectNumber), "--owner", settings.projectOwner, "--format", "json", "--limit", "500"], { timeoutMs: 60_000 })) as { items?: Record<string, unknown>[] } | undefined;
+    // The watcher reads the Project at most every PROJECT_WATCH_MINUTES; queue changes are rarely urgent, and the tick's own reads reuse this copy.
+    const items = jsonOf(await projectItems(run, store, settings, PROJECT_WATCH_MINUTES * 60_000)) as { items?: Record<string, unknown>[] } | undefined;
     if (items !== undefined) {
       const coordinated = new Set(settings.repositories.map((repo) => repo.repository.toLowerCase()));
       const all = (items.items ?? []).filter((item) => item.worker === "Pirx" && item.status !== "Done");

@@ -356,6 +356,7 @@ test("watcher: a failed tick leaves its events for the next run; the idle queue 
   try {
     (await collectEvents(h.store, settings, run, 60)).commit();
     queue = [...queue, { content: { repository: REPO, number: 2, type: "Issue" }, worker: "Pirx", status: "Todo", "queue Order": 2 }];
+    (await import("../src/coordination/facts.js")).forgetProjectItems(h.store); // the shared copy has aged out
     const first = await collectEvents(h.store, settings, run, 60);
     assert.ok(first.events.some((event) => event.includes("kolejka")));
     settleEvents(h.store, first, false);

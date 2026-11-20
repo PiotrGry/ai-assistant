@@ -508,6 +508,7 @@ test("watcher: queued work that is parked, or in a repository Pirx does not coor
     items = [{ content: { repository: REPO, number: 3 }, worker: "Pirx", status: "Todo" }, { content: { repository: "PiotrGry/elsewhere", number: 4 }, worker: "Pirx", status: "Todo" }];
     assert.equal(await nudged(), false, "only parked or foreign work is queued");
     items.push({ content: { repository: REPO, number: 8 }, worker: "Pirx", status: "Todo" });
+    (await import("../src/coordination/facts.js")).forgetProjectItems(h.store);
     assert.equal(await nudged(), true);
     assert.equal(await nudged(), false, "at most once per IDLE_NUDGE_MINUTES");
   } finally { await h.close(); }
@@ -617,4 +618,21 @@ test("eval fixtures: a case with `after` applies only once that tool has run in 
     await call(h, "worker_resume", { repository: REPO, issue: 548, instruction: "go on" });
     assert.equal((await call(h, "worker_status", {})).running, true);
   } finally { await h.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("Project reads: the watcher and the tools share one copy; queue_set drops it", async () => {
+  let reads = 0;
+  const items = JSON.stringify({ items: [{ id: "PVTI_1", content: { repository: REPO, number: 7, type: "Issue", url: `https://github.com/${REPO}/issues/7` }, worker: "Pirx", status: "Todo" }] });
+  const h = await harness((file, args) => {
+    if (file === "gh" && args[0] === "project" && args[1] === "item-list") { reads += 1; return ok(items); }
+    if (file === "gh" && args[0] === "project" && args[1] === "item-add") return ok(JSON.stringify({ id: "PVTI_1" }));
+    return undefined;
+  });
+  try {
+    await call(h, "queue_list", {}); await call(h, "queue_list", {});
+    assert.equal(reads, 1, "the second read within two minutes uses the shared copy");
+    await call(h, "queue_set", { repository: REPO, issue: 7, status: "Todo" });
+    await call(h, "queue_list", {});
+    assert.equal(reads, 2, "after a write the Project is read again");
+  } finally { await h.close(); }
 });

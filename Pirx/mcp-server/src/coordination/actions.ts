@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
-import { isRefusal, issueOfBranch, locateWorkspace, repositoryOrRefusal, workerFacts, workspaceFacts } from "./facts.js";
+import { forgetProjectItems, isRefusal, issueOfBranch, locateWorkspace, projectItems, repositoryOrRefusal, workerFacts, workspaceFacts } from "./facts.js";
 import { createHash } from "node:crypto";
 
 import { failure, jsonOf, type Runner } from "./shell.js";
@@ -206,12 +206,12 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
     input: { repository: repositoryInput, issue: issueInput, status: z.enum(["Todo", "Open", "In Progress", "Done"]).optional(), worker: z.enum(["Pirx", "Human"]).optional(), queueOrder: z.number().int().positive().optional(), priority: z.enum(["P0", "P1", "P2", "P3"]).optional(), workType: z.enum(["Task", "Bug", "Experiment"]).optional(), risk: z.enum(["Low", "Medium", "High", "Prod-sensitive"]).optional() },
     mutating: true,
     task: taskOf,
-    run: async (input, { run }) => {
+    run: async (input, { run, store }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
       const url = `https://github.com/${input.repository}/issues/${input.issue}`;
       if (input.worker === "Pirx") {
         // Worker=Human is the operator's decision (e.g. a paused task). Pirx may queue new items, not take back the operator's.
-        const listed = jsonOf(await run("gh", ["project", "item-list", String(settings.projectNumber), "--owner", settings.projectOwner!, "--format", "json", "--limit", "500"], { timeoutMs: 60_000 })) as { items?: Record<string, unknown>[] } | undefined;
+        const listed = jsonOf(await projectItems(run, store, settings)) as { items?: Record<string, unknown>[] } | undefined;
         const current = listed?.items?.find((entry) => (entry.content as { url?: string } | undefined)?.url === url);
         if (current?.worker !== "Pirx" && settings.tick !== undefined) {
           // In a tick nobody asked: Pirx may queue only the production bugs it filed. In the chat the operator asks, so anything may be queued.
@@ -220,6 +220,7 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
         }
         if (current?.worker === "Human") return refuse(`${input.repository}#${input.issue} has Worker=Human: the operator handed it to themselves. Pirx may not take it back; ask the operator if it should be Pirx's.`);
       }
+      forgetProjectItems(store);
       const found = await projectIds(run, settings);
       if (typeof found.projectId !== "string") return found as Record<string, unknown>;
       const ids = found as { projectId: string; fields: Record<string, { id: string; options: Record<string, string> }> };

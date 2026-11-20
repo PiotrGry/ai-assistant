@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
-import { isRefusal, locateWorkspace, pidAlive, processStart, repositoryOrRefusal, workerFacts } from "./facts.js";
+import { isRefusal, locateWorkspace, pidAlive, processStart, projectItems, repositoryOrRefusal, workerFacts } from "./facts.js";
 import { failure, jsonOf } from "./shell.js";
 import { startOfDay, type CoordinatedRepository, type CoordinationSettings } from "./settings.js";
 import { taskKey } from "./store.js";
@@ -161,7 +161,7 @@ async function launch(context: CoordinationContext, repo: CoordinatedRepository,
 async function notQueuedForPirx(context: CoordinationContext, repository: string, issue: number): Promise<Record<string, unknown> | undefined> {
   const { settings } = context;
   if (settings.projectOwner === undefined || settings.projectNumber === undefined) return undefined;
-  const result = await context.run("gh", ["project", "item-list", String(settings.projectNumber), "--owner", settings.projectOwner, "--format", "json", "--limit", "500"], { timeoutMs: 60_000 });
+  const result = await projectItems(context.run, context.store, settings);
   const value = jsonOf(result) as { items?: Record<string, unknown>[] } | undefined;
   if (value === undefined) return refuse("Cannot read the Project to check that this Issue is queued for Pirx.", failure(result));
   const item = (value.items ?? []).find((entry) => {

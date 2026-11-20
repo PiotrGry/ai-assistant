@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
 import { pidAlive } from "./proc.js";
-import { failure, jsonOf, type Runner } from "./shell.js";
+import { failure, jsonOf, type CommandResult, type Runner } from "./shell.js";
 
 export { pidAlive, processStart } from "./proc.js";
 import { findRepository, type CoordinatedRepository, type CoordinationSettings } from "./settings.js";
@@ -15,6 +15,26 @@ export function issueOfBranch(branch: string): number | undefined {
   const match = /^pirx\/(?:issue-|task-gh-)(\d+)(?:[-/]|$)/u.exec(branch);
   const issue = match === null ? undefined : Number(match[1]);
   return issue !== undefined && Number.isSafeInteger(issue) && issue > 0 ? issue : undefined;
+}
+
+/**
+ * The Project's items, shared by the watcher and the tools for `maxAgeMs`. Reading the whole Project is
+ * one of the most expensive GitHub GraphQL queries, and a tick used to read it three or four times on top
+ * of the watcher's read every 5 min; on 2026-11-20 GitHub started refusing it. Writes to the Project
+ * (queue_set) drop the shared copy.
+ */
+export const PROJECT_ITEMS_MAX_AGE_MS = 120_000;
+export async function projectItems(run: Runner, store: CoordinationStore, settings: CoordinationSettings, maxAgeMs = PROJECT_ITEMS_MAX_AGE_MS): Promise<CommandResult> {
+  const cached = store.watchValue("project_items");
+  const at = Date.parse(store.watchValue("project_items_at") ?? "");
+  if (cached !== undefined && Number.isFinite(at) && Date.parse(store.now()) - at < maxAgeMs) return { ok: true, code: 0, stdout: cached, stderr: "", command: "gh project item-list (shared copy)" };
+  const result = await run("gh", ["project", "item-list", String(settings.projectNumber), "--owner", settings.projectOwner!, "--format", "json", "--limit", "500"], { timeoutMs: 60_000 });
+  if (result.ok && jsonOf(result) !== undefined) { store.setWatchValue("project_items", result.stdout); store.setWatchValue("project_items_at", store.now()); }
+  return result;
+}
+
+export function forgetProjectItems(store: CoordinationStore): void {
+  store.setWatchValue("project_items_at", "1970-01-01T00:00:00.000Z");
 }
 
 export function tail(text: string, lines: number): string {
@@ -112,9 +132,9 @@ export function registerFactTools(server: McpServer, context: CoordinationContex
     description: "The work queue: open Issues of allowlisted repositories on the GitHub Project, with Status, Worker, Queue Order, Priority, Risk and Work Type, lowest Queue Order first. Only Worker=Pirx items are Pirx's to do.",
     input: { includeAll: z.boolean().optional().describe("Also list items whose Worker is not Pirx or whose Status is Done.") },
     mutating: false,
-    run: async (input, { run }) => {
+    run: async (input, { run, store }) => {
       if (settings.projectOwner === undefined || settings.projectNumber === undefined) return { error: "No GitHub Project is configured (githubProjectOwner/githubProjectNumber)." };
-      const result = await run("gh", ["project", "item-list", String(settings.projectNumber), "--owner", settings.projectOwner, "--format", "json", "--limit", "500"], { timeoutMs: 60_000 });
+      const result = await projectItems(run, store, settings);
       const value = jsonOf(result) as { items?: Record<string, unknown>[] } | undefined;
       if (value === undefined) return failure(result);
       const allowed = new Set(settings.repositories.map((item) => item.repository.toLowerCase()));
