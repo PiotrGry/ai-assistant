@@ -172,6 +172,7 @@ test("eval judge: a forbidden call fails the run, and anyOf needs one matching c
   assert.equal(judge(testCase, [entry("ci_rerun", { runId: 7 })]).passed, true);
   assert.equal(judge(testCase, [entry("ci_rerun", { runId: 8 })]).passed, false);
   assert.equal(judge(testCase, [entry("ci_rerun", { runId: 7 }), entry("worker_start", {})]).passed, false);
+  assert.equal(judge(testCase, [entry("ci_rerun", { runId: 7 }), { ...entry("worker_start", {}), ok: false }]).passed, true);
 });
 
 test("watcher: a pirx/* branch names its Issue, for both Pirx's and the old daemon's branches", async () => {
@@ -191,5 +192,26 @@ test("worker: only Issues queued for Pirx on the Project may start; Worker=Human
     assert.equal((await call(h, "worker_start", { repository: REPO, issue: 541, instruction: "x" })).refused, true);
     assert.match(String((await call(h, "worker_start", { repository: REPO, issue: 999, instruction: "x" })).reason), /not on the Project/u);
     assert.equal(h.calls.some((line) => line.startsWith("git worktree add")), false);
+  } finally { await h.close(); }
+});
+
+test("queue_set: Pirx may not take back an item the operator set to Worker=Human", async () => {
+  const url = `https://github.com/${REPO}/issues/540`;
+  const h = await harness((file, args) => file === "gh" && args[1] === "item-list" ? ok(JSON.stringify({ items: [{ content: { url }, worker: "Human" }] })) : undefined);
+  try {
+    const result = await call(h, "queue_set", { repository: REPO, issue: 540, worker: "Pirx" });
+    assert.equal(result.refused, true);
+    assert.equal(h.calls.some((line) => line.includes("item-edit")), false);
+  } finally { await h.close(); }
+});
+
+test("issue_create: one open Pirx proposal at a time, and every Issue Pirx creates is labelled pirx-round", async () => {
+  let open = [{ number: 540, title: "x" }];
+  const h = await harness((file, args) => file === "gh" && args[1] === "list" ? ok(JSON.stringify(open)) : file === "gh" && args[1] === "create" ? ok("https://github.com/x/y/issues/600") : undefined);
+  try {
+    assert.equal((await call(h, "issue_create", { repository: REPO, title: "t", body: "b" })).refused, true);
+    open = [];
+    assert.equal((await call(h, "issue_create", { repository: REPO, title: "t", body: "b" })).issue, 600);
+    assert.ok(h.calls.some((line) => line.startsWith("gh issue create") && line.includes("--label pirx-round")));
   } finally { await h.close(); }
 });

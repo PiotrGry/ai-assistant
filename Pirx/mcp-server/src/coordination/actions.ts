@@ -9,6 +9,9 @@ import { taskKey } from "./store.js";
 import { WORKER_ENV_ALLOWLIST } from "./worker.js";
 import { defineTool, issueInput, refuse, repositoryInput, type CoordinationContext } from "./toolkit.js";
 
+/** Every Issue Pirx creates carries this label, and only one may be open at a time. */
+const PROPOSAL_LABEL = "pirx-round";
+
 const PIRX_BRANCH = /^pirx\/(?!archive\/)[A-Za-z0-9._/-]+$/u;
 
 async function projectIds(run: Runner, settings: CoordinationSettings): Promise<{ projectId: string; fields: Record<string, { id: string; options: Record<string, string> }> } | Record<string, unknown>> {
@@ -181,10 +184,16 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
     task: taskOf,
     run: async (input, { run }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
+      const url = `https://github.com/${input.repository}/issues/${input.issue}`;
+      if (input.worker === "Pirx") {
+        // Worker=Human is the operator's decision (e.g. a paused task). Pirx may queue new items, not take back the operator's.
+        const listed = jsonOf(await run("gh", ["project", "item-list", String(settings.projectNumber), "--owner", settings.projectOwner!, "--format", "json", "--limit", "500"], { timeoutMs: 60_000 })) as { items?: Record<string, unknown>[] } | undefined;
+        const current = listed?.items?.find((entry) => (entry.content as { url?: string } | undefined)?.url === url);
+        if (current?.worker === "Human") return refuse(`${input.repository}#${input.issue} has Worker=Human: the operator handed it to themselves. Pirx may not take it back; ask the operator if it should be Pirx's.`);
+      }
       const found = await projectIds(run, settings);
       if (typeof found.projectId !== "string") return found as Record<string, unknown>;
       const ids = found as { projectId: string; fields: Record<string, { id: string; options: Record<string, string> }> };
-      const url = `https://github.com/${input.repository}/issues/${input.issue}`;
       const added = jsonOf(await run("gh", ["project", "item-add", String(settings.projectNumber), "--owner", settings.projectOwner!, "--url", url, "--format", "json"])) as { id?: string } | undefined;
       if (added?.id === undefined) return { error: `Could not add or find ${url} on the Project.` };
       const set: Record<string, unknown> = {};
@@ -207,13 +216,17 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
 
   defineTool(server, context, {
     name: "issue_create",
-    description: "Create an Issue in an allowlisted repository. Write it for the worker: ## Goal, ## Implementation scope, ## Acceptance criteria with checkboxes. Check issue_list and pr_list first, so it is not a duplicate.",
+    description: "Create an Issue in an allowlisted repository, labelled pirx-round. Refused while another pirx-round Issue is open. Write it for the worker: ## Goal, ## Implementation scope, ## Acceptance criteria with checkboxes. Check issue_list and pr_list first, so it is not a duplicate.",
     input: { repository: repositoryInput, title: z.string().min(1), body: z.string().min(1), labels: z.array(z.string()).optional() },
     mutating: true,
     run: async (input, { run }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
-      const args = ["issue", "create", "-R", input.repository, "--title", input.title, "--body", input.body];
-      for (const label of input.labels ?? []) args.push("--label", label);
+      // One open Pirx proposal at a time: prompt rules did not hold this (evals 2026-11-20, open-round-issue).
+      const open = jsonOf(await run("gh", ["issue", "list", "-R", input.repository, "--label", PROPOSAL_LABEL, "--state", "open", "--json", "number,title"])) as { number: number; title: string }[] | undefined;
+      if (open === undefined) return refuse(`Cannot check for open ${PROPOSAL_LABEL} Issues, so no new Issue is created.`);
+      if (open.length > 0) return refuse(`An earlier Pirx proposal is still open (${open.map((issue) => `#${issue.number}`).join(", ")}). Pirx creates a new Issue only when none is open.`, { open });
+      const args = ["issue", "create", "-R", input.repository, "--title", input.title, "--body", input.body, "--label", PROPOSAL_LABEL];
+      for (const label of input.labels ?? []) if (label !== PROPOSAL_LABEL) args.push("--label", label);
       const result = await run("gh", args);
       return result.ok ? { created: result.stdout.trim(), issue: Number(/\/issues\/(\d+)/u.exec(result.stdout)?.[1]) } : failure(result, "A missing label must be created first, or leave it out.");
     },
