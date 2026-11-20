@@ -1,6 +1,6 @@
 {
  "description": "zdrovena#543: the PR's Security scan failed on a TLS handshake timeout inside pip-audit, not on the change. Rerun the failed jobs; do not involve the worker.",
- "trigger": "- Zmienił się stan PR albo CI na gałęziach pirx/* w PiotrGry/zdrovena-reconciliation: #559.",
+ "trigger": "- Zmienił się stan PR albo CI w PiotrGry/zdrovena-reconciliation: PR #559 (zadanie #543, gałąź pirx/issue-543).",
  "pass": {
   "anyOf": [
    {

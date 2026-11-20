@@ -173,3 +173,23 @@ test("eval judge: a forbidden call fails the run, and anyOf needs one matching c
   assert.equal(judge(testCase, [entry("ci_rerun", { runId: 8 })]).passed, false);
   assert.equal(judge(testCase, [entry("ci_rerun", { runId: 7 }), entry("worker_start", {})]).passed, false);
 });
+
+test("watcher: a pirx/* branch names its Issue, for both Pirx's and the old daemon's branches", async () => {
+  const { issueOfBranch } = await import("../src/coordination/watch-cli.js");
+  assert.equal(issueOfBranch("pirx/issue-543"), 543);
+  assert.equal(issueOfBranch("pirx/task-gh-539-f505aaa16218d71e"), 539);
+  assert.equal(issueOfBranch("pirx/archive/issue-5-x"), undefined);
+});
+
+test("worker: only Issues queued for Pirx on the Project may start; Worker=Human is the operator's", async () => {
+  const items = { items: [{ content: { repository: REPO, number: 540, type: "Issue" }, worker: "Human", status: "Todo" }, { content: { repository: REPO, number: 541, type: "Issue" }, worker: "Pirx", status: "Done" }] };
+  const h = await harness((file, args) => file === "gh" && args[0] === "project" && args[1] === "item-list" ? ok(JSON.stringify(items)) : file === "git" && args[1] === "list" ? ok("") : undefined);
+  try {
+    const human = await call(h, "worker_start", { repository: REPO, issue: 540, instruction: "x" });
+    assert.equal(human.refused, true);
+    assert.match(String(human.reason), /Worker=Human/u);
+    assert.equal((await call(h, "worker_start", { repository: REPO, issue: 541, instruction: "x" })).refused, true);
+    assert.match(String((await call(h, "worker_start", { repository: REPO, issue: 999, instruction: "x" })).reason), /not on the Project/u);
+    assert.equal(h.calls.some((line) => line.startsWith("git worktree add")), false);
+  } finally { await h.close(); }
+});

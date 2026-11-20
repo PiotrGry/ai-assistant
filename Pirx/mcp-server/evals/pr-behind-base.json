@@ -1,6 +1,6 @@
 {
  "description": "zdrovena#542: the PR is green but behind develop, so the strict ruleset blocks the merge. Update the branch.",
- "trigger": "- Zmienił się stan PR albo CI na gałęziach pirx/* w PiotrGry/zdrovena-reconciliation: #556.",
+ "trigger": "- Zmienił się stan PR albo CI w PiotrGry/zdrovena-reconciliation: PR #556 (zadanie #542, gałąź pirx/issue-542).",
  "pass": {
   "anyOf": [
    {

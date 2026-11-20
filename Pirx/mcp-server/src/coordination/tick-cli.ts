@@ -40,6 +40,14 @@ export function extractAnswer(output: string): string {
   return (end < 0 ? rest : rest.slice(0, end)).trim();
 }
 
+/** Frees the GPU after a tick: every loaded Ollama model gets keep_alive 0. */
+export async function unloadModels(baseUrl: string): Promise<void> {
+  try {
+    const loaded = await (await fetch(`${baseUrl}/api/ps`)).json() as { models?: { name: string }[] };
+    for (const model of loaded.models ?? []) await fetch(`${baseUrl}/api/generate`, { method: "POST", body: JSON.stringify({ model: model.name, keep_alive: 0 }) });
+  } catch { /* Ollama down: nothing is loaded */ }
+}
+
 export async function runTick(options: TickOptions): Promise<TickResult> {
   const environment = options.environment ?? process.env;
   const tick = `tick-${new Date().toISOString()}`;
@@ -50,7 +58,8 @@ export async function runTick(options: TickOptions): Promise<TickResult> {
     PIRX_TOOL_PROFILE: "coordination",
     PIRX_TICK_ID: tick,
     PIRX_STORAGE_FILE: storage,
-    OLLAMA_KEEP_ALIVE: environment.PIRX_TICK_KEEP_ALIVE ?? "0",
+    // Keep the model loaded for the whole tick (keep_alive 0 would reload it for every call), then unload it at the end.
+    OLLAMA_KEEP_ALIVE: environment.PIRX_TICK_KEEP_ALIVE ?? "15m",
     PIRX_MAX_TOOL_CALLS: environment.PIRX_MAX_TOOL_CALLS ?? "25",
     PIRX_MAX_TOOL_ITERATIONS: environment.PIRX_MAX_TOOL_ITERATIONS ?? "30",
     PIRX_MAX_TURN_DURATION_MS: environment.PIRX_MAX_TURN_DURATION_MS ?? "1200000",
@@ -70,6 +79,7 @@ export async function runTick(options: TickOptions): Promise<TickResult> {
     child.stdin.end(prompt);
   });
   const answer = extractAnswer(output.text);
+  if (environment.PIRX_TICK_UNLOAD !== "0") await unloadModels(environment.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434");
   const store = new CoordinationStore(storage);
   try {
     const toolCalls = store.journal({ tick, kind: "tool", limit: 500 }).length;

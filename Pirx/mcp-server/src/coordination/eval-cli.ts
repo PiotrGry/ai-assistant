@@ -56,6 +56,11 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
       const scratch = mkdtempSync(join(tmpdir(), "pirx-eval-"));
       const storage = join(scratch, "eval.sqlite");
       try {
+        // The case's history becomes the eval journal, so journal_read shows what Pirx did before.
+        const seed = new CoordinationStore(storage);
+        const history = ((testCase as unknown as { tools?: { journal_read?: { entries?: Partial<JournalEntry>[] } } }).tools?.journal_read?.entries ?? []);
+        for (const entry of history) seed.append({ ...(entry.task === undefined ? {} : { task: entry.task }), kind: entry.kind ?? "tool", name: entry.name ?? "note", ...(entry.input === undefined ? {} : { input: entry.input }), ...(entry.output === undefined ? {} : { output: entry.output }), ok: entry.ok ?? true });
+        seed.close();
         const tick = await runTick({ trigger: testCase.trigger, evalFixture: join(casesDir, file), storage });
         const store = new CoordinationStore(storage);
         const entries = store.journal({ tick: tick.tick, kind: "tool", limit: 500 });

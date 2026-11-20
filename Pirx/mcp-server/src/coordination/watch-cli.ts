@@ -16,6 +16,12 @@ import { runTick } from "./tick-cli.js";
  * timer elapsed) and wakes one tick with that list. Run it every few minutes from systemd.
  */
 
+/** The Issue a pirx/* branch works on: pirx/issue-<N> (Pirx's tools) or pirx/task-gh-<N>-... (old daemon). */
+export function issueOfBranch(branch: string): number | undefined {
+  const match = /^pirx\/(?:issue-|task-gh-)(\d+)(?:[-/]|$)/u.exec(branch);
+  return match === null ? undefined : Number(match[1]);
+}
+
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
 
 export async function collectEvents(store: CoordinationStore, settings: CoordinationSettings, run: Runner, timerMinutes: number): Promise<string[]> {
@@ -28,9 +34,9 @@ export async function collectEvents(store: CoordinationStore, settings: Coordina
   for (const repo of settings.repositories) {
     const prs = jsonOf(await run("gh", ["pr", "list", "-R", repo.repository, "--state", "open", "--json", "number,headRefName,headRefOid,mergeStateStatus,statusCheckRollup"])) as { number: number; headRefName: string; headRefOid: string; mergeStateStatus: string; statusCheckRollup?: { conclusion?: string; status?: string; state?: string }[] }[] | undefined;
     if (prs === undefined) continue;
-    const pirx = prs.filter((pr) => pr.headRefName.startsWith("pirx/")).map((pr) => ({ pr: pr.number, head: pr.headRefOid, merge: pr.mergeStateStatus, checks: (pr.statusCheckRollup ?? []).map((check) => check.conclusion ?? check.state ?? check.status ?? "") }));
+    const pirx = prs.filter((pr) => pr.headRefName.startsWith("pirx/")).map((pr) => ({ pr: pr.number, branch: pr.headRefName, issue: issueOfBranch(pr.headRefName), head: pr.headRefOid, merge: pr.mergeStateStatus, checks: (pr.statusCheckRollup ?? []).map((check) => check.conclusion ?? check.state ?? check.status ?? "") }));
     const key = `prs:${repo.repository}`; const value = digest(pirx);
-    if (store.watchValue(key) !== undefined && store.watchValue(key) !== value) events.push(`Zmienił się stan PR albo CI na gałęziach pirx/* w ${repo.repository}: ${pirx.map((pr) => `#${pr.pr}`).join(", ") || "brak otwartych"}.`);
+    if (store.watchValue(key) !== undefined && store.watchValue(key) !== value) events.push(`Zmienił się stan PR albo CI w ${repo.repository}: ${pirx.map((pr) => `PR #${pr.pr} (${pr.issue === undefined ? "zadanie nieznane" : `zadanie #${pr.issue}`}, gałąź ${pr.branch})`).join(", ") || "brak otwartych PR z gałęzi pirx/*"}.`);
     store.setWatchValue(key, value);
   }
   if (settings.projectOwner !== undefined && settings.projectNumber !== undefined) {

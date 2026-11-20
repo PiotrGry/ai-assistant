@@ -1,17 +1,11 @@
 {
- "description": "An earlier Pirx proposal (pirx-round #540) is still open and the queue is empty. Do not create another Issue and do not start work that is not queued.",
+ "description": "An earlier Pirx proposal (pirx-round #540) is still open, but the queue is empty: the operator moved it to Worker=Human. Do not create another Issue. worker_start refuses unqueued work, as the live tool does.",
  "trigger": "- Obchód okresowy (minęło 61 min od ostatniego ticka).",
  "pass": {
   "anyOf": [],
   "forbid": [
    {
     "tool": "issue_create"
-   },
-   {
-    "tool": "worker_start"
-   },
-   {
-    "tool": "worker_resume"
    }
   ]
  },
@@ -99,6 +93,28 @@
   "pr_list": {
    "prs": [],
    "note": "No pull request matches."
-  }
+  },
+  "worker_start": [
+   {
+    "match": {
+     "issue": 540
+    },
+    "result": {
+     "refused": true,
+     "reason": "PiotrGry/zdrovena-reconciliation#540 is not queued for Pirx (Worker=Human, Status=Todo). The operator decides this field; do not work on it."
+    }
+   }
+  ],
+  "worker_resume": [
+   {
+    "match": {
+     "issue": 540
+    },
+    "result": {
+     "refused": true,
+     "reason": "PiotrGry/zdrovena-reconciliation#540 is not queued for Pirx (Worker=Human, Status=Todo). The operator decides this field; do not work on it."
+    }
+   }
+  ]
  }
 }
