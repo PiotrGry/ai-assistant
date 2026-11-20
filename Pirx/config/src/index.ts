@@ -8,7 +8,7 @@ export interface ProfileSettingDefinition {
   readonly forwardToMcp: boolean;
 }
 
-export const TOOL_PROFILES = ["personal", "development", "operations", "coordination", "all"] as const;
+export const TOOL_PROFILES = ["personal", "development", "operations", "coordination", "assistant", "all"] as const;
 export type ToolProfile = typeof TOOL_PROFILES[number];
 export type ToolScope = "common" | "personal" | "development" | "operations" | "coordination";
 
@@ -19,6 +19,8 @@ export const TOOL_PROFILE_SCOPES: Readonly<Record<ToolProfile, ReadonlySet<ToolS
   operations: new Set<ToolScope>(["common", "development", "operations"]),
   // The local model coordinating delivery (docs/control-center-refactor.md): only the thin coordination tools.
   coordination: new Set<ToolScope>(["common", "coordination"]),
+  // The operator's chat: calendar and notes plus the coordination tools, without the old daemon's tools.
+  assistant: new Set<ToolScope>(["common", "personal", "coordination"]),
   // Explicit operator opt-in: private Calendar/Obsidian data shares a session
   // with GitHub write tools, so untrusted Issue text can steer private data.
   all: new Set<ToolScope>(["common", "personal", "development", "operations", "coordination"]),
