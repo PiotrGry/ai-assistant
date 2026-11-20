@@ -2,13 +2,39 @@ import { existsSync, readFileSync } from "node:fs";
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
-import { failure, jsonOf, type Runner } from "./shell.js";
+import { pidAlive } from "./proc.js";
+import { failure, jsonOf, type CommandResult, type Runner } from "./shell.js";
+
+export { pidAlive, processStart } from "./proc.js";
 import { findRepository, type CoordinatedRepository, type CoordinationSettings } from "./settings.js";
 import { taskKey, type CoordinationStore } from "./store.js";
 import { defineTool, issueInput, refuse, repositoryInput, type CoordinationContext } from "./toolkit.js";
 
-export function pidAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+/** The Issue a pirx/* branch works on: pirx/issue-<N> (Pirx's tools) or pirx/task-gh-<N>-... (old daemon). Archived branches have none. */
+export function issueOfBranch(branch: string): number | undefined {
+  const match = /^pirx\/(?:issue-|task-gh-)(\d+)(?:[-/]|$)/u.exec(branch);
+  const issue = match === null ? undefined : Number(match[1]);
+  return issue !== undefined && Number.isSafeInteger(issue) && issue > 0 ? issue : undefined;
+}
+
+/**
+ * The Project's items, shared by the watcher and the tools for `maxAgeMs`. Reading the whole Project is
+ * one of the most expensive GitHub GraphQL queries, and a tick used to read it three or four times on top
+ * of the watcher's read every 5 min; on 2026-11-20 GitHub started refusing it. Writes to the Project
+ * (queue_set) drop the shared copy.
+ */
+export const PROJECT_ITEMS_MAX_AGE_MS = 120_000;
+export async function projectItems(run: Runner, store: CoordinationStore, settings: CoordinationSettings, maxAgeMs = PROJECT_ITEMS_MAX_AGE_MS): Promise<CommandResult> {
+  const cached = store.watchValue("project_items");
+  const at = Date.parse(store.watchValue("project_items_at") ?? "");
+  if (cached !== undefined && Number.isFinite(at) && Date.parse(store.now()) - at < maxAgeMs) return { ok: true, code: 0, stdout: cached, stderr: "", command: "gh project item-list (shared copy)" };
+  const result = await run("gh", ["project", "item-list", String(settings.projectNumber), "--owner", settings.projectOwner!, "--format", "json", "--limit", "500"], { timeoutMs: 60_000 });
+  if (result.ok && jsonOf(result) !== undefined) { store.setWatchValue("project_items", result.stdout); store.setWatchValue("project_items_at", store.now()); }
+  return result;
+}
+
+export function forgetProjectItems(store: CoordinationStore): void {
+  store.setWatchValue("project_items_at", "1970-01-01T00:00:00.000Z");
 }
 
 export function tail(text: string, lines: number): string {
@@ -34,11 +60,11 @@ export async function locateWorkspace(run: Runner, store: CoordinationStore, rep
   const listed = await run("git", ["worktree", "list", "--porcelain"], { cwd: repo.repositoryRoot });
   if (!listed.ok) return undefined;
   let path: string | undefined;
-  const pattern = new RegExp(`^refs/heads/(pirx/(?:[^ ]*[-/])?(?:gh-)?${issue}(?:[-/][^ ]*)?)$`, "u");
+
   for (const line of listed.stdout.split("\n")) {
     if (line.startsWith("worktree ")) path = line.slice(9);
-    const match = line.startsWith("branch ") && !line.startsWith("branch refs/heads/pirx/archive/") ? pattern.exec(line.slice(7)) : null;
-    if (match !== null && path !== undefined && existsSync(path)) return { branch: match[1]!, worktree: path, source: "found" };
+    const branch = line.startsWith("branch refs/heads/") ? line.slice("branch refs/heads/".length) : undefined;
+    if (branch !== undefined && issueOfBranch(branch) === issue && path !== undefined && existsSync(path)) return { branch, worktree: path, source: "found" };
   }
   return undefined;
 }
@@ -73,14 +99,29 @@ function parseReport(text: string): unknown {
 export function workerFacts(store: CoordinationStore, task?: string): Record<string, unknown> {
   const lock = store.lock();
   if (lock === undefined || (task !== undefined && lock.task !== task)) return { running: false };
-  const alive = pidAlive(lock.pid);
+  const alive = pidAlive(lock.pid, lock.pidStart);
   const report = readIfExists(lock.reportPath);
+  const hasReport = report !== undefined && report.trim() !== "";
   return {
     running: alive, task: lock.task, pid: lock.pid, startedAt: lock.startedAt, logPath: lock.logPath,
-    ...(alive ? {} : { exited: true, note: "The worker process has ended. Read its report, then decide; the next worker_start or worker_resume clears this lock." }),
-    ...(report === undefined || report.trim() === "" ? {} : { report: parseReport(report) }),
-    logTail: tail(readIfExists(lock.logPath) ?? "", 15),
+    ...(alive ? {} : hasReport
+      ? { exited: true, note: "The worker process has ended. Read its report, then decide; the next worker_start or worker_resume clears this lock." }
+      : { exited: true, endedWithoutReport: true, note: "The worker process is gone and wrote no report: it was killed or crashed, not finished. Check the worktree in task_facts (commits, uncommitted files) before resuming; this start does not count against the daily cap." }),
+    ...(hasReport ? { report: parseReport(report) } : {}),
+    // The log is raw stream-json; whole lines run to tens of kilobytes. The report carries the worker's own words.
+    logTail: tail(readIfExists(lock.logPath) ?? "", 6).split("\n").map((line) => line.length > 300 ? `${line.slice(0, 300)}… (${line.length} characters, full log at logPath)` : line),
   };
+}
+
+/** Counts per conclusion, and the name of every check that is not a success or a skip. */
+function summariseChecks(checks: Record<string, unknown>[] | undefined): Record<string, unknown> {
+  const counts: Record<string, number> = {}; const notGreen: Record<string, unknown>[] = [];
+  for (const check of checks ?? []) {
+    const conclusion = String(check.conclusion ?? check.state ?? check.status ?? "UNKNOWN");
+    counts[conclusion] = (counts[conclusion] ?? 0) + 1;
+    if (!["SUCCESS", "SKIPPED", "NEUTRAL"].includes(conclusion)) notGreen.push({ name: check.name ?? check.context, status: check.status, conclusion, workflow: check.workflowName });
+  }
+  return { counts, notGreen };
 }
 
 export function registerFactTools(server: McpServer, context: CoordinationContext): void {
@@ -91,9 +132,9 @@ export function registerFactTools(server: McpServer, context: CoordinationContex
     description: "The work queue: open Issues of allowlisted repositories on the GitHub Project, with Status, Worker, Queue Order, Priority, Risk and Work Type, lowest Queue Order first. Only Worker=Pirx items are Pirx's to do.",
     input: { includeAll: z.boolean().optional().describe("Also list items whose Worker is not Pirx or whose Status is Done.") },
     mutating: false,
-    run: async (input, { run }) => {
+    run: async (input, { run, store }) => {
       if (settings.projectOwner === undefined || settings.projectNumber === undefined) return { error: "No GitHub Project is configured (githubProjectOwner/githubProjectNumber)." };
-      const result = await run("gh", ["project", "item-list", String(settings.projectNumber), "--owner", settings.projectOwner, "--format", "json", "--limit", "500"], { timeoutMs: 60_000 });
+      const result = await projectItems(run, store, settings);
       const value = jsonOf(result) as { items?: Record<string, unknown>[] } | undefined;
       if (value === undefined) return failure(result);
       const allowed = new Set(settings.repositories.map((item) => item.repository.toLowerCase()));
@@ -206,7 +247,8 @@ export function registerFactTools(server: McpServer, context: CoordinationContex
         const list = jsonOf(prs) as Record<string, unknown>[] | undefined;
         facts.pullRequests = list === undefined ? failure(prs) : list.length === 0 ? { prs: [], note: "No pull request from this branch." } : list.map((pr) => ({
           ...pr,
-          statusCheckRollup: (pr.statusCheckRollup as Record<string, unknown>[] | undefined)?.map((check) => ({ name: check.name ?? check.context, status: check.status, conclusion: check.conclusion ?? check.state, workflow: check.workflowName })),
+          statusCheckRollup: undefined,
+          checks: summariseChecks(pr.statusCheckRollup as Record<string, unknown>[] | undefined),
         }));
       }
       facts.worker = workerFacts(store, key);

@@ -47,7 +47,24 @@ function positive(value: string | undefined, fallback: number): number {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+/**
+ * Pirx's own settings file, ~/.config/pirx/coordination.json (ai-assistant#371). Values here win over
+ * the environment; repositories and the Project still come from orchestrator.json until T10.
+ *   { "workerModel": "claude-opus-5-5", "opusModel": "claude-opus-5-5",
+ *     "caps": { "workerStartsPerTaskPerDay": 3, "ciRerunsPerRun": 2, "askOpusPerTaskPerDay": 3 } }
+ */
+function readCoordinationFile(environment: NodeJS.ProcessEnv): Record<string, unknown> {
+  const path = environment.PIRX_COORDINATION_CONFIG?.trim() || join(configHome(environment), "pirx", "coordination.json");
+  let text: string;
+  try { text = readFileSync(path, "utf8"); } catch { return {}; }
+  try { return JSON.parse(text) as Record<string, unknown>; } catch (error) { return { error: `${path} is not valid JSON (${(error as Error).message}); its values are ignored.` }; }
+}
+
 export function loadCoordinationSettings(environment: NodeJS.ProcessEnv): CoordinationSettings {
+  const own = readCoordinationFile(environment);
+  const ownCaps = (own.caps ?? {}) as Record<string, unknown>;
+  const fromFile = (value: unknown): string | undefined => (typeof value === "string" && value.trim() ? value.trim() : undefined);
+  const capFrom = (value: unknown): string | undefined => (typeof value === "number" ? String(value) : undefined);
   const configPath = environment.PIRX_ORCHESTRATOR_CONFIG?.trim() || join(configHome(environment), "pirx", "orchestrator.json");
   let raw: Record<string, unknown> = {};
   let configurationError: string | undefined;
@@ -85,15 +102,15 @@ export function loadCoordinationSettings(environment: NodeJS.ProcessEnv): Coordi
     ...(environment.PIRX_COORDINATION_EVAL?.trim() ? { evalFixture: environment.PIRX_COORDINATION_EVAL.trim() } : {}),
     ...(environment.PIRX_TICK_ID?.trim() ? { tick: environment.PIRX_TICK_ID.trim() } : {}),
     claudeExecutable: environment.PIRX_CLAUDE_EXECUTABLE?.trim() || "claude",
-    ...(environment.PIRX_WORKER_MODEL?.trim() ? { workerModel: environment.PIRX_WORKER_MODEL.trim() } : {}),
-    opusModel: environment.PIRX_OPUS_MODEL?.trim() || "claude-opus-5-5",
+    ...((fromFile(own.workerModel) ?? environment.PIRX_WORKER_MODEL?.trim()) ? { workerModel: fromFile(own.workerModel) ?? environment.PIRX_WORKER_MODEL!.trim() } : {}),
+    opusModel: fromFile(own.opusModel) ?? (environment.PIRX_OPUS_MODEL?.trim() || "claude-opus-5-5"),
     caps: {
-      workerStartsPerTaskPerDay: positive(environment.PIRX_CAP_WORKER_STARTS, 3),
-      ciRerunsPerRun: positive(environment.PIRX_CAP_CI_RERUNS, 2),
-      askOpusPerTaskPerDay: positive(environment.PIRX_CAP_ASK_OPUS, 3),
+      workerStartsPerTaskPerDay: positive(capFrom(ownCaps.workerStartsPerTaskPerDay) ?? environment.PIRX_CAP_WORKER_STARTS, 3),
+      ciRerunsPerRun: positive(capFrom(ownCaps.ciRerunsPerRun) ?? environment.PIRX_CAP_CI_RERUNS, 2),
+      askOpusPerTaskPerDay: positive(capFrom(ownCaps.askOpusPerTaskPerDay) ?? environment.PIRX_CAP_ASK_OPUS, 3),
       workerTimeoutMs: positive(environment.PIRX_WORKER_TIMEOUT_MS, 3 * 60 * 60 * 1000),
     },
-    ...(configurationError === undefined ? {} : { configurationError }),
+    ...(configurationError === undefined && typeof own.error !== "string" ? {} : { configurationError: [configurationError, own.error].filter((part) => typeof part === "string").join(" ") }),
   };
 }
 
@@ -106,6 +123,19 @@ export function stopped(settings: CoordinationSettings): boolean {
 }
 
 /** Start of the current UTC day, for the per-day caps. */
-export function startOfDay(now: string): string {
-  return `${now.slice(0, 10)}T00:00:00.000Z`;
+/**
+ * Start of the operator's day (midnight in `timeZone`) as a UTC ISO string, for the per-day caps.
+ * UTC midnight is 01:00 or 02:00 in Poland, so caps used to reset in the middle of the night.
+ */
+export function startOfDay(now: string, timeZone = process.env.PIRX_GOOGLE_CALENDAR_TIMEZONE?.trim() || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"): string {
+  try { new Intl.DateTimeFormat("en-US", { timeZone }); } catch { timeZone = "UTC"; }
+  if (timeZone === "") timeZone = "UTC";
+  const instant = new Date(now);
+  const localDate = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(instant);
+  const offsetAt = (when: Date): number => {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(when).map((part) => [part.type, part.value]));
+    return Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second)) - when.getTime();
+  };
+  const guess = Date.parse(`${localDate}T00:00:00.000Z`);
+  return new Date(guess - offsetAt(new Date(guess - offsetAt(new Date(guess))))).toISOString();
 }

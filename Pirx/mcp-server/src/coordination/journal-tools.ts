@@ -9,7 +9,14 @@ function keyOf(input: { repository?: string | undefined; issue?: number | undefi
   return input.repository !== undefined && input.issue !== undefined ? taskKey(input.repository, input.issue) : undefined;
 }
 
-function brief(entry: JournalEntry): Record<string, unknown> {
+/** Long inputs and outputs are summarised here; `journal_read` with `seq` returns one entry whole. */
+function short(value: unknown): unknown {
+  const text = JSON.stringify(value);
+  return text === undefined || text.length <= 400 ? value : `${text.slice(0, 400)}… (${text.length} characters; journal_read with seq shows all)`;
+}
+
+function brief(entry: JournalEntry, whole = false): Record<string, unknown> {
+  if (!whole) entry = { ...entry, ...(entry.input === undefined ? {} : { input: short(entry.input) }), ...(entry.output === undefined ? {} : { output: short(entry.output) }) };
   return { seq: entry.seq, at: entry.at, kind: entry.kind, name: entry.name, ok: entry.ok, ...(entry.tick === undefined ? {} : { tick: entry.tick }), ...(entry.task === undefined ? {} : { task: entry.task }), ...(entry.input === undefined ? {} : { input: entry.input }), ...(entry.output === undefined ? {} : { output: entry.output }) };
 }
 
@@ -17,13 +24,17 @@ export function registerJournalTools(server: McpServer, context: CoordinationCon
   defineTool(server, context, {
     name: "journal_read",
     description: "Read Pirx's journal: earlier decisions, notes, questions and tool calls, newest last. Filter by Task or kind. This is Pirx's memory between ticks.",
-    input: { ...optionalTask, kind: z.enum(["tool", "tick", "note", "question", "verdict"]).optional(), limit: z.number().int().min(1).max(200).optional() },
+    input: { ...optionalTask, kind: z.enum(["tool", "tick", "note", "question", "verdict"]).optional(), limit: z.number().int().min(1).max(200).optional(), seq: z.number().int().positive().optional().describe("Return this one entry in full.") },
     mutating: false,
     local: true,
     run: async (input, { store }) => {
       const task = keyOf(input);
-      const entries = store.journal({ ...(task === undefined ? {} : { task }), ...(input.kind === undefined ? {} : { kind: input.kind }), limit: input.limit ?? 30 });
-      return entries.length === 0 ? { entries: [], note: "The journal has no matching entries." } : { entries: entries.map(brief) };
+      if (input.seq !== undefined) {
+        const one = store.journal({ afterSeq: input.seq - 1, limit: 500 }).find((entry) => entry.seq === input.seq);
+        return one === undefined ? { found: false, note: `No journal entry ${input.seq}.` } : { entry: brief(one, true) };
+      }
+      const entries = store.journal({ ...(task === undefined ? {} : { task }), ...(input.kind === undefined ? {} : { kind: input.kind }), limit: input.limit ?? 20 });
+      return entries.length === 0 ? { entries: [], note: "The journal has no matching entries." } : { entries: entries.map((entry) => brief(entry)) };
     },
   });
 
@@ -68,7 +79,7 @@ export function registerJournalTools(server: McpServer, context: CoordinationCon
       const tickEntries = ticks.flatMap((tick) => store.journal({ tick, kind: "tick", limit: 5 }));
       const all = [...own, ...tickEntries].sort((a, b) => a.seq - b.seq).filter((entry, index, list) => index === 0 || entry.seq !== list[index - 1]!.seq);
       if (all.length === 0) return { task, timeline: [], note: "Pirx has not worked on this Task yet." };
-      return { task, current: store.getTask(task) ?? null, timeline: all.map(brief) };
+      return { task, current: store.getTask(task) ?? null, timeline: all.map((entry) => brief(entry)) };
     },
   });
 }

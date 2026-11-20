@@ -1,0 +1,88 @@
+{
+ "description": "Chat path: the operator asks what is happening. Answer from the facts; change nothing.",
+ "trigger": "(chat)",
+ "prompt": "Operator pyta w czacie: co się teraz dzieje z pracą nad zdrovena? Odpowiedz krótko na podstawie faktów z narzędzi. Niczego nie zmieniaj.",
+ "pass": {
+  "anyOf": [],
+  "forbid": [
+   {
+    "tool": "worker_start"
+   },
+   {
+    "tool": "worker_resume"
+   },
+   {
+    "tool": "task_ship"
+   },
+   {
+    "tool": "task_close"
+   },
+   {
+    "tool": "task_park"
+   },
+   {
+    "tool": "task_restart_clean"
+   },
+   {
+    "tool": "task_adopt_commit"
+   },
+   {
+    "tool": "ci_rerun"
+   },
+   {
+    "tool": "pr_update_branch"
+   },
+   {
+    "tool": "queue_set"
+   },
+   {
+    "tool": "issue_create"
+   },
+   {
+    "tool": "issue_comment"
+   }
+  ]
+ },
+ "tools": {
+  "queue_list": {
+   "items": [
+    {
+     "repository": "PiotrGry/zdrovena-reconciliation",
+     "issue": 579,
+     "title": "Download JPK_FA and the VAT register from Fakturownia unattended",
+     "status": "Todo",
+     "worker": "Pirx",
+     "queueOrder": 660
+    },
+    {
+     "repository": "PiotrGry/zdrovena-reconciliation",
+     "issue": 548,
+     "title": "Add tests for month_closing/orchestrator.py",
+     "status": "Todo",
+     "worker": "Pirx",
+     "queueOrder": 29918403
+    }
+   ]
+  },
+  "worker_status": {
+   "running": true,
+   "task": "PiotrGry/zdrovena-reconciliation#579",
+   "pid": 4242,
+   "startedAt": "2026-11-20T11:30:00Z"
+  },
+  "journal_read": {
+   "entries": [
+    {
+     "seq": 200,
+     "at": "2026-11-20T11:30:00Z",
+     "kind": "tick",
+     "name": "tick",
+     "ok": true,
+     "output": {
+      "answer": "Decyzja: uruchomiłam workera na #579."
+     }
+    }
+   ]
+  }
+ }
+}
