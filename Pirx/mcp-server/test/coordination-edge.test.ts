@@ -636,3 +636,41 @@ test("Project reads: the watcher and the tools share one copy; queue_set drops i
     assert.equal(reads, 2, "after a write the Project is read again");
   } finally { await h.close(); }
 });
+
+// ── The operator takes a Task back ─────────────────────────────────────────
+
+test("Worker=Human: in a tick Pirx neither ships nor closes the Task; in the chat the operator may", async () => {
+  const human = (file: string, args: readonly string[]) => file === "gh" && args[0] === "project" && args[1] === "item-list" ? ok(JSON.stringify({ items: [{ content: { repository: REPO, number: 7, type: "Issue" }, worker: "Human", status: "Todo" }] })) : undefined;
+  const tick = await harness(first(human, gitState({})), { PIRX_TICK_ID: "tick-1" });
+  try {
+    workspace(tick, 7);
+    assert.match(String((await call(tick, "task_ship", { repository: REPO, issue: 7, title: "t", body: "b" })).reason), /Worker=Human/u);
+    assert.match(String((await call(tick, "task_close", { repository: REPO, issue: 7, evidence: "done", pr: 9 })).reason), /Worker=Human/u);
+    assert.equal(tick.ran("git push"), false);
+    assert.equal(tick.ran("gh issue close"), false);
+  } finally { await tick.close(); }
+  const chat = await harness(first(human, gitState({})));
+  try {
+    workspace(chat, 7);
+    await call(chat, "task_ship", { repository: REPO, issue: 7, title: "t", body: "b" });
+    assert.equal(chat.ran("git push"), true, "the operator asked in the chat");
+  } finally { await chat.close(); }
+});
+
+test("task_restart_clean leaves no workspace behind, so worker_start may begin again", async () => {
+  let stopAtAdd = false;
+  const h = await harness(first(queued(548), (file, args) => file === "git" && args[0] === "worktree" && args[1] === "list" ? ok("") : file === "git" && args[0] === "worktree" && args[1] === "add" && stopAtAdd ? fail("fatal: stopped by the test") : undefined, gitState({ ahead: 0 })));
+  try {
+    workspace(h, 548);
+    const restarted = await call(h, "task_restart_clean", { repository: REPO, issue: 548, reason: "clean start" });
+    assert.ok(restarted.archived !== undefined, JSON.stringify(restarted));
+    const task = h.store.getTask(`${REPO}#548`)!;
+    assert.equal(task.worktree, "");
+    assert.match(String(task.note), /Archived at/u);
+    // Stop at `git worktree add`: reaching it shows the workspace check passed (a real launch needs a real worktree).
+    stopAtAdd = true;
+    const started = await call(h, "worker_start", { repository: REPO, issue: 548, instruction: "go" });
+    assert.doesNotMatch(JSON.stringify(started), /already has a worktree/u);
+    assert.match(String(started.stderr), /stopped by the test/u);
+  } finally { await h.close(); }
+});

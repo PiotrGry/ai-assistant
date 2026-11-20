@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 
 import { failure, jsonOf, type Runner } from "./shell.js";
 import { startOfDay, type CoordinationSettings } from "./settings.js";
-import { taskKey } from "./store.js";
+import { taskKey, type CoordinationStore } from "./store.js";
 import { tooLong, WORKER_ENV_ALLOWLIST } from "./worker.js";
 import { defineTool, issueInput, refuse, repositoryInput, type CoordinationContext } from "./toolkit.js";
 
@@ -16,6 +16,19 @@ const PROPOSAL_LABEL = "pirx-round";
 /** A production bug Pirx found itself. It may queue these in a tick; improvements wait for the operator. */
 const BUG_LABEL = "pirx-bug";
 const MAX_OPEN_BUGS = 5;
+
+/**
+ * Worker=Human means the operator took the Task back. In a tick Pirx then neither ships nor closes it,
+ * even when a worker already finished it: zdrovena#579 was shipped and auto-merged on 2026-11-20 while
+ * the operator was redesigning it. In the chat the operator asks, so this does not apply there.
+ */
+async function operatorTookBack(run: Runner, store: CoordinationStore, settings: CoordinationSettings, repository: string, issue: number): Promise<Record<string, unknown> | undefined> {
+  if (settings.projectOwner === undefined || settings.projectNumber === undefined) return undefined;
+  const listed = jsonOf(await projectItems(run, store, settings, 0)) as { items?: Record<string, unknown>[] } | undefined;
+  if (listed === undefined) return refuse("Cannot read the Project to check that the operator still leaves this Task to Pirx.");
+  const item = (listed.items ?? []).find((entry) => { const content = entry.content as { repository?: string; number?: number } | undefined; return content?.repository?.toLowerCase() === repository.toLowerCase() && content.number === issue; });
+  return item?.worker === "Human" ? refuse(`${repository}#${issue} has Worker=Human: the operator took it back. Do not ship or close it; leave it to the operator.`) : undefined;
+}
 
 /** The same error reworded is the same bug: numbers, ids, quotes and case are dropped before hashing. */
 export function bugFingerprint(text: string): string {
@@ -50,6 +63,8 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
     task: taskOf,
     run: async (input, { run, store }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
+      // In a tick, ship only work the operator still leaves to Pirx: Worker=Human stops a Task in flight (zdrovena#579, 2026-11-20).
+      const tookBack = settings.tick === undefined ? undefined : await operatorTookBack(run, store, settings, repo.repository, input.issue); if (tookBack !== undefined) return tookBack;
       const workspace = await locateWorkspace(run, store, repo, input.issue);
       if (workspace === undefined || !existsSync(workspace.worktree)) return refuse("This Task has no worktree; nothing to ship.");
       if (!PIRX_BRANCH.test(workspace.branch)) return refuse(`Only pirx/* branches are shipped; this one is ${workspace.branch}.`);
@@ -133,7 +148,8 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
       const archivedBranch = `pirx/archive/${workspace.branch.replace(/^pirx\//u, "")}-${stamp}`;
       const renamed = await run("git", ["branch", "-m", workspace.branch, archivedBranch], { cwd: archivedPath });
       if (!renamed.ok) return { moved: archivedPath, ...failure(renamed) };
-      store.upsertTask({ repository: repo.repository, issue: input.issue, branch: archivedBranch, worktree: archivedPath, state: "active", note: `Restarted clean: ${input.reason}` });
+      // The Task no longer has a workspace: the archived one is kept for reference only, so worker_start may begin again (#548, 2026-11-20).
+      store.upsertTask({ repository: repo.repository, issue: input.issue, branch: "", worktree: "", state: "active", note: `Restarted clean: ${input.reason}. Archived at ${archivedPath} (${archivedBranch}).` });
       return { archived: { worktree: archivedPath, branch: archivedBranch }, note: "worker_start can now begin from the current base." };
     },
   });
@@ -161,6 +177,7 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
     task: taskOf,
     run: async (input, { run, store }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
+      const tookBack = settings.tick === undefined ? undefined : await operatorTookBack(run, store, settings, repo.repository, input.issue); if (tookBack !== undefined) return tookBack;
       const workspace = await locateWorkspace(run, store, repo, input.issue);
       let prs: { number: number; mergeCommit?: { oid: string } | null; state: string }[] | undefined;
       if (input.pr !== undefined) {
