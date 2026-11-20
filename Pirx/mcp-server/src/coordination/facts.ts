@@ -10,6 +10,12 @@ import { findRepository, type CoordinatedRepository, type CoordinationSettings }
 import { taskKey, type CoordinationStore } from "./store.js";
 import { defineTool, issueInput, refuse, repositoryInput, type CoordinationContext } from "./toolkit.js";
 
+/** The Issue a pirx/* branch works on: pirx/issue-<N> (Pirx's tools) or pirx/task-gh-<N>-... (old daemon). Archived branches have none. */
+export function issueOfBranch(branch: string): number | undefined {
+  const match = /^pirx\/(?:issue-|task-gh-)(\d+)(?:[-/]|$)/u.exec(branch);
+  return match === null ? undefined : Number(match[1]);
+}
+
 export function tail(text: string, lines: number): string {
   const all = text.split("\n");
   return all.slice(Math.max(0, all.length - lines)).join("\n");
@@ -33,11 +39,11 @@ export async function locateWorkspace(run: Runner, store: CoordinationStore, rep
   const listed = await run("git", ["worktree", "list", "--porcelain"], { cwd: repo.repositoryRoot });
   if (!listed.ok) return undefined;
   let path: string | undefined;
-  const pattern = new RegExp(`^refs/heads/(pirx/(?:[^ ]*[-/])?(?:gh-)?${issue}(?:[-/][^ ]*)?)$`, "u");
+
   for (const line of listed.stdout.split("\n")) {
     if (line.startsWith("worktree ")) path = line.slice(9);
-    const match = line.startsWith("branch ") && !line.startsWith("branch refs/heads/pirx/archive/") ? pattern.exec(line.slice(7)) : null;
-    if (match !== null && path !== undefined && existsSync(path)) return { branch: match[1]!, worktree: path, source: "found" };
+    const branch = line.startsWith("branch refs/heads/") ? line.slice("branch refs/heads/".length) : undefined;
+    if (branch !== undefined && issueOfBranch(branch) === issue && path !== undefined && existsSync(path)) return { branch, worktree: path, source: "found" };
   }
   return undefined;
 }

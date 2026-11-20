@@ -106,6 +106,17 @@ export function stopped(settings: CoordinationSettings): boolean {
 }
 
 /** Start of the current UTC day, for the per-day caps. */
-export function startOfDay(now: string): string {
-  return `${now.slice(0, 10)}T00:00:00.000Z`;
+/**
+ * Start of the operator's day (midnight in `timeZone`) as a UTC ISO string, for the per-day caps.
+ * UTC midnight is 01:00 or 02:00 in Poland, so caps used to reset in the middle of the night.
+ */
+export function startOfDay(now: string, timeZone = process.env.PIRX_GOOGLE_CALENDAR_TIMEZONE?.trim() || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"): string {
+  const instant = new Date(now);
+  const localDate = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(instant);
+  const offsetAt = (when: Date): number => {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(when).map((part) => [part.type, part.value]));
+    return Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second)) - when.getTime();
+  };
+  const guess = Date.parse(`${localDate}T00:00:00.000Z`);
+  return new Date(guess - offsetAt(new Date(guess - offsetAt(new Date(guess))))).toISOString();
 }

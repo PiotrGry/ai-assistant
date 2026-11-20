@@ -2,7 +2,9 @@ import { existsSync } from "node:fs";
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
-import { isRefusal, locateWorkspace, repositoryOrRefusal, workerFacts, workspaceFacts } from "./facts.js";
+import { isRefusal, issueOfBranch, locateWorkspace, repositoryOrRefusal, workerFacts, workspaceFacts } from "./facts.js";
+import { createHash } from "node:crypto";
+
 import { failure, jsonOf, type Runner } from "./shell.js";
 import { startOfDay, type CoordinationSettings } from "./settings.js";
 import { taskKey } from "./store.js";
@@ -14,6 +16,12 @@ const PROPOSAL_LABEL = "pirx-round";
 /** A production bug Pirx found itself. It may queue these in a tick; improvements wait for the operator. */
 const BUG_LABEL = "pirx-bug";
 const MAX_OPEN_BUGS = 5;
+
+/** The same error reworded is the same bug: numbers, ids, quotes and case are dropped before hashing. */
+export function bugFingerprint(text: string): string {
+  const stem = text.toLowerCase().replace(/[0-9a-f]{8,}/gu, "#").replace(/\d+/gu, "#").replace(/['"`]/gu, "").replace(/[^a-z#|:/._ -]+/gu, " ").replace(/\s+/gu, " ").trim();
+  return createHash("sha256").update(stem).digest("hex").slice(0, 16);
+}
 
 const PIRX_BRANCH = /^pirx\/(?!archive\/)[A-Za-z0-9._/-]+$/u;
 
@@ -82,7 +90,7 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
     task: (input) => input.issue === undefined ? undefined : taskKey(input.repository, input.issue),
     run: async (input, { run, store }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
-      const used = store.countCalls("ci_rerun", "1970-01-01T00:00:00.000Z", { inputContains: `"runId":${input.runId}` });
+      const used = store.journal({ kind: "tool", limit: 500 }).filter((entry) => entry.name === "ci_rerun" && entry.ok && (entry.input as { runId?: number } | undefined)?.runId === input.runId).length;
       if (used >= settings.caps.ciRerunsPerRun) return refuse(`Run ${input.runId} was already rerun ${used} times; the cap is ${settings.caps.ciRerunsPerRun}. The failure is probably real: read the log and decide.`);
       const result = await run("gh", ["run", "rerun", String(input.runId), "--failed", "-R", input.repository]);
       return result.ok ? { rerun: true, runId: input.runId, note: "Check ci_status again when the run finishes." } : failure(result);
@@ -155,7 +163,17 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
       const workspace = await locateWorkspace(run, store, repo, input.issue);
       let prs: { number: number; mergeCommit?: { oid: string } | null; state: string }[] | undefined;
-      if (input.pr !== undefined) prs = [jsonOf(await run("gh", ["pr", "view", String(input.pr), "-R", input.repository, "--json", "number,state,mergeCommit"])) as { number: number; state: string; mergeCommit?: { oid: string } | null }];
+      if (input.pr !== undefined) {
+        const pr = jsonOf(await run("gh", ["pr", "view", String(input.pr), "-R", input.repository, "--json", "number,state,mergeCommit,title,body,headRefName,closingIssuesReferences"])) as { number: number; state: string; mergeCommit?: { oid: string } | null; title?: string; body?: string; headRefName?: string; closingIssuesReferences?: { number: number }[] } | undefined;
+        if (pr === undefined) return refuse(`Cannot read PR #${input.pr}.`);
+        // The PR must belong to this Issue: it closes it, names it, or comes from its branch. Any merged number is not enough.
+        const mentions = new RegExp(`(^|[^0-9])#${input.issue}([^0-9]|$)`, "u");
+        const related = (pr.closingIssuesReferences ?? []).some((issue) => issue.number === input.issue)
+          || mentions.test(`${pr.title ?? ""} ${pr.body ?? ""}`)
+          || (pr.headRefName !== undefined && (pr.headRefName === workspace?.branch || issueOfBranch(pr.headRefName) === input.issue));
+        if (!related) return refuse(`PR #${pr.number} does not close or mention #${input.issue} and is not from its branch. Give the PR that carries this change.`, { pr: { number: pr.number, title: pr.title, branch: pr.headRefName } });
+        prs = [pr];
+      }
       else if (workspace !== undefined) prs = jsonOf(await run("gh", ["pr", "list", "-R", input.repository, "--head", workspace.branch, "--state", "merged", "--json", "number,state,mergeCommit"])) as typeof prs;
       const merged = prs?.find((pr) => pr?.state === "MERGED" && pr.mergeCommit?.oid !== undefined);
       if (merged === undefined) return refuse("No merged pull request carries this change. Give the pr that fixed it, or ship and merge first.", { prs });
@@ -225,17 +243,18 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
   defineTool(server, context, {
     name: "issue_create",
     description: "Create an Issue in an allowlisted repository. kind=bug: a real production error or a bug the operator reported (label pirx-bug; refused when an open pirx-bug Issue has the same title; Pirx may queue it with queue_set). kind=improvement: tests, cleanups, ideas (label pirx-round; only one may be open, and the operator queues it). Write it for the worker: ## Goal, ## Implementation scope, ## Acceptance criteria with checkboxes. Check issue_list and pr_list first, so it is not a duplicate.",
-    input: { repository: repositoryInput, title: z.string().min(1), body: z.string().min(1), kind: z.enum(["bug", "improvement"]).describe("bug: a real error in production or reported by a user. improvement: tests, cleanups, ideas."), labels: z.array(z.string()).optional() },
+    input: { repository: repositoryInput, title: z.string().min(1), body: z.string().min(1), errorKey: z.string().optional().describe("For a production bug: source|operation|message as zdrovena_production_errors shows it. Used to spot the same error filed before."), kind: z.enum(["bug", "improvement"]).describe("bug: a real error in production or reported by a user. improvement: tests, cleanups, ideas."), labels: z.array(z.string()).optional() },
     mutating: true,
     run: async (input, { run }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
       if (input.kind === "bug") {
-        const bugs = jsonOf(await run("gh", ["issue", "list", "-R", input.repository, "--label", BUG_LABEL, "--state", "open", "--json", "number,title"])) as { number: number; title: string }[] | undefined;
+        const bugs = jsonOf(await run("gh", ["issue", "list", "-R", input.repository, "--label", BUG_LABEL, "--state", "open", "--json", "number,title,body"])) as { number: number; title: string; body?: string }[] | undefined;
         if (bugs === undefined) return refuse(`Cannot check for open ${BUG_LABEL} Issues, so no new Issue is created.`);
-        const same = bugs.find((issue) => issue.title.trim().toLowerCase() === input.title.trim().toLowerCase());
-        if (same !== undefined) return refuse(`This bug is already filed as #${same.number}.`, { open: bugs });
+        const fingerprint = bugFingerprint(input.errorKey ?? input.title);
+        const same = bugs.find((issue) => (issue.body ?? "").includes(`pirx-bug-fingerprint: ${fingerprint}`) || bugFingerprint(issue.title) === bugFingerprint(input.title));
+        if (same !== undefined) return refuse(`This bug is already filed as #${same.number}.`, { open: bugs.map((issue) => ({ number: issue.number, title: issue.title })) });
         if (bugs.length >= MAX_OPEN_BUGS) return refuse(`${bugs.length} Pirx bug Issues are already open; the cap is ${MAX_OPEN_BUGS}. Work on those first.`, { open: bugs });
-        const bugArgs = ["issue", "create", "-R", input.repository, "--title", input.title, "--body", input.body, "--label", BUG_LABEL];
+        const bugArgs = ["issue", "create", "-R", input.repository, "--title", input.title, "--body", `${input.body}\n\n<!-- pirx-bug-fingerprint: ${fingerprint} -->`, "--label", BUG_LABEL];
         for (const label of input.labels ?? []) if (label !== BUG_LABEL && label !== PROPOSAL_LABEL) bugArgs.push("--label", label);
         const filed = await run("gh", bugArgs);
         return filed.ok ? { created: filed.stdout.trim(), issue: Number(/\/issues\/(\d+)/u.exec(filed.stdout)?.[1]), kind: "bug", note: "Queue it with queue_set (worker Pirx) if it should be fixed now." } : failure(filed, "A missing label must be created first, or leave it out.");

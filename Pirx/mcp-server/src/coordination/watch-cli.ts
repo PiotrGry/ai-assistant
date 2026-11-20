@@ -3,7 +3,10 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { issueOfBranch } from "./facts.js";
 import { guardHeldByOther, pidAlive, tickGuardPath } from "./proc.js";
+
+export { issueOfBranch } from "./facts.js";
 
 export { takeGuard } from "./proc.js";
 import { jsonOf, runCommand, type Runner } from "./shell.js";
@@ -17,11 +20,6 @@ import { runTick } from "./tick-cli.js";
  * timer elapsed) and wakes one tick with that list. Run it every few minutes from systemd.
  */
 
-/** The Issue a pirx/* branch works on: pirx/issue-<N> (Pirx's tools) or pirx/task-gh-<N>-... (old daemon). */
-export function issueOfBranch(branch: string): number | undefined {
-  const match = /^pirx\/(?:issue-|task-gh-)(\d+)(?:[-/]|$)/u.exec(branch);
-  return match === null ? undefined : Number(match[1]);
-}
 
 export const IDLE_NUDGE_MINUTES = 15;
 

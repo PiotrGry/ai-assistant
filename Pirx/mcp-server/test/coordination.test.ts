@@ -137,7 +137,7 @@ test("ci_rerun: a run is rerun at most the capped number of times", async () => 
 
 test("task_ship: only pirx/* branches, never forced; task_close only after the change reached the target branch", async () => {
   const h = await harness((file, args) => {
-    if (file === "gh" && args[0] === "pr" && args[1] === "view") return ok(JSON.stringify({ number: 9, state: "MERGED", mergeCommit: { oid: "abc1234" }, headRefName: "feature/x" }));
+    if (file === "gh" && args[0] === "pr" && args[1] === "view") return ok(JSON.stringify({ number: 9, state: "MERGED", mergeCommit: { oid: "abc1234" }, headRefName: "feature/x", body: "Fixes #5." }));
     if (file === "git" && args[0] === "merge-base") return fail("");
     if (file === "git" && args[0] === "worktree" && args[1] === "list") return ok("");
     return undefined;
@@ -406,4 +406,69 @@ test("result budget: long text and lists are shortened, the JSON stays whole, an
   assert.equal(fitted.shortened, true);
   assert.doesNotThrow(() => JSON.parse(text));
   assert.match(text, /characters, shortened/u);
+});
+
+test("task_close: a merged PR that does not belong to the Issue is refused", async () => {
+  const pr = (fields: Record<string, unknown>) => ok(JSON.stringify({ number: 9, state: "MERGED", mergeCommit: { oid: "abc1234" }, title: "unrelated", body: "", headRefName: "fix/other", closingIssuesReferences: [], ...fields }));
+  let current = pr({});
+  const h = await harness((file, args) => file === "gh" && args[1] === "view" ? current : file === "git" && args[0] === "worktree" ? ok("") : file === "git" && args[0] === "merge-base" ? ok("") : undefined);
+  try {
+    const refused = await call(h, "task_close", { repository: REPO, issue: 5, evidence: "done", pr: 9 });
+    assert.match(String(refused.reason), /does not close or mention #5/u);
+    current = pr({ body: "Fixes #5." });
+    assert.equal((await call(h, "task_close", { repository: REPO, issue: 5, evidence: "done", pr: 9 })).closed, true);
+    current = pr({ body: "See #55 and #500." });
+    assert.equal((await call(h, "task_close", { repository: REPO, issue: 5, evidence: "done", pr: 9 })).refused, true, "#55 is not #5");
+    current = pr({ headRefName: "pirx/issue-5" });
+    assert.equal((await call(h, "task_close", { repository: REPO, issue: 5, evidence: "done", pr: 9 })).closed, true);
+  } finally { await h.close(); }
+});
+
+test("ci_rerun cap: run 445 does not count against run 44", async () => {
+  const h = await harness(undefined, { PIRX_CAP_CI_RERUNS: "1" });
+  try {
+    assert.equal((await call(h, "ci_rerun", { repository: REPO, runId: 445 })).rerun, true);
+    assert.equal((await call(h, "ci_rerun", { repository: REPO, runId: 44 })).rerun, true);
+    assert.equal((await call(h, "ci_rerun", { repository: REPO, runId: 44 })).refused, true);
+  } finally { await h.close(); }
+});
+
+test("workspace: only pirx/issue-<N> and pirx/task-gh-<N>-... belong to Issue N", async () => {
+  const { locateWorkspace, issueOfBranch } = await import("../src/coordination/facts.js");
+  assert.equal(issueOfBranch("pirx/issue-1-54"), 1);
+  assert.equal(issueOfBranch("pirx/archive/issue-54-x"), undefined);
+  assert.equal(issueOfBranch("pirx/feature-54"), undefined);
+  const h = await harness();
+  try {
+    const listing = `worktree ${h.root}\nHEAD aaa\nbranch refs/heads/pirx/issue-1-54\n\nworktree ${h.root}\nHEAD bbb\nbranch refs/heads/pirx/task-gh-54-abc\n`;
+    const run: Runner = async () => ok(listing);
+    const { loadCoordinationSettings } = await import("../src/coordination/settings.js");
+    const repo = loadCoordinationSettings({ HOME: h.root, PIRX_ORCHESTRATOR_CONFIG: join(h.root, "orchestrator.json") }).repositories[0]!;
+    assert.equal((await locateWorkspace(run, h.store, repo, 54))?.branch, "pirx/task-gh-54-abc");
+  } finally { await h.close(); }
+});
+
+test("daily caps start at the operator's midnight, not UTC midnight", async () => {
+  const { startOfDay } = await import("../src/coordination/settings.js");
+  assert.equal(startOfDay("2026-11-20T00:30:00.000Z", "Europe/Warsaw"), "2026-11-19T23:00:00.000Z");
+  assert.equal(startOfDay("2026-11-19T22:30:00.000Z", "Europe/Warsaw"), "2026-11-18T23:00:00.000Z");
+  assert.equal(startOfDay("2026-07-01T10:00:00.000Z", "Europe/Warsaw"), "2026-06-30T22:00:00.000Z");
+  assert.equal(startOfDay("2026-11-20T10:00:00.000Z", "UTC"), "2026-11-20T00:00:00.000Z");
+});
+
+test("bug Issues: the same error reworded or with other numbers is one bug", async () => {
+  const { bugFingerprint } = await import("../src/coordination/actions.js");
+  assert.equal(bugFingerprint("exception|POST /api/shipping/labels/batch|KeyError: 'courier_shipments' at line 120"), bugFingerprint("exception|POST /api/shipping/labels/batch|KeyError: \"courier_shipments\" at line 98"));
+  assert.notEqual(bugFingerprint("exception|POST /a|KeyError"), bugFingerprint("exception|POST /b|KeyError"));
+  let bugs: { number: number; title: string; body?: string }[] = [];
+  const h = await harness((file, args) => file === "gh" && args[1] === "list" ? ok(JSON.stringify(bugs)) : file === "gh" && args[1] === "create" ? ok("https://github.com/x/y/issues/801") : undefined);
+  try {
+    const key = "exception|POST /api/x|KeyError: 'a'";
+    assert.equal((await call(h, "issue_create", { repository: REPO, title: "KeyError in batch labels", body: "b", kind: "bug", errorKey: key })).issue, 801);
+    const created = h.calls.find((line) => line.startsWith("gh issue create"))!;
+    const fingerprint = /pirx-bug-fingerprint: ([0-9a-f]{16})/u.exec(created)![1];
+    bugs = [{ number: 801, title: "KeyError in batch labels", body: `b\n<!-- pirx-bug-fingerprint: ${fingerprint} -->` }];
+    const again = await call(h, "issue_create", { repository: REPO, title: "Batch label endpoint crashes", body: "b", kind: "bug", errorKey: key });
+    assert.match(String(again.reason), /already filed as #801/u);
+  } finally { await h.close(); }
 });
