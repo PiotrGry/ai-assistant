@@ -215,3 +215,17 @@ test("issue_create: one open Pirx proposal at a time, and every Issue Pirx creat
     assert.ok(h.calls.some((line) => line.startsWith("gh issue create") && line.includes("--label pirx-round")));
   } finally { await h.close(); }
 });
+
+test("watcher guard: a guard left by a dead process is taken over; a live holder keeps it", async () => {
+  const { takeGuard } = await import("../src/coordination/watch-cli.js");
+  const root = await mkdtemp(join(tmpdir(), "pirx-guard-"));
+  try {
+    const guard = join(root, "pirx-tick.lock");
+    await writeFile(guard, "");
+    assert.equal(takeGuard(guard), true);
+    await writeFile(guard, "2147483000");
+    assert.equal(takeGuard(guard), true);
+    await writeFile(guard, String(process.pid));
+    assert.equal(takeGuard(guard), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
