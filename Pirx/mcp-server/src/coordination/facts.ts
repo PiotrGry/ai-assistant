@@ -2,14 +2,13 @@ import { existsSync, readFileSync } from "node:fs";
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
+import { pidAlive } from "./proc.js";
 import { failure, jsonOf, type Runner } from "./shell.js";
+
+export { pidAlive, processStart } from "./proc.js";
 import { findRepository, type CoordinatedRepository, type CoordinationSettings } from "./settings.js";
 import { taskKey, type CoordinationStore } from "./store.js";
 import { defineTool, issueInput, refuse, repositoryInput, type CoordinationContext } from "./toolkit.js";
-
-export function pidAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
 
 export function tail(text: string, lines: number): string {
   const all = text.split("\n");
@@ -73,12 +72,15 @@ function parseReport(text: string): unknown {
 export function workerFacts(store: CoordinationStore, task?: string): Record<string, unknown> {
   const lock = store.lock();
   if (lock === undefined || (task !== undefined && lock.task !== task)) return { running: false };
-  const alive = pidAlive(lock.pid);
+  const alive = pidAlive(lock.pid, lock.pidStart);
   const report = readIfExists(lock.reportPath);
+  const hasReport = report !== undefined && report.trim() !== "";
   return {
     running: alive, task: lock.task, pid: lock.pid, startedAt: lock.startedAt, logPath: lock.logPath,
-    ...(alive ? {} : { exited: true, note: "The worker process has ended. Read its report, then decide; the next worker_start or worker_resume clears this lock." }),
-    ...(report === undefined || report.trim() === "" ? {} : { report: parseReport(report) }),
+    ...(alive ? {} : hasReport
+      ? { exited: true, note: "The worker process has ended. Read its report, then decide; the next worker_start or worker_resume clears this lock." }
+      : { exited: true, endedWithoutReport: true, note: "The worker process is gone and wrote no report: it was killed or crashed, not finished. Check the worktree in task_facts (commits, uncommitted files) before resuming; this start does not count against the daily cap." }),
+    ...(hasReport ? { report: parseReport(report) } : {}),
     // The log is raw stream-json; whole lines run to tens of kilobytes. The report carries the worker's own words.
     logTail: tail(readIfExists(lock.logPath) ?? "", 6).split("\n").map((line) => line.length > 300 ? `${line.slice(0, 300)}… (${line.length} characters, full log at logPath)` : line),
   };

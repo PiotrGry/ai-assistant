@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { McpServer } from "@modelcontextprotocol/server";
@@ -26,7 +27,7 @@ async function harness(responses: (file: string, args: readonly string[]) => Com
   const calls: string[] = [];
   const run: Runner = async (file, args) => { calls.push([file, ...args].join(" ")); return responses(file, args) ?? ok(""); };
   const store = new CoordinationStore(join(root, "pirx.sqlite"));
-  const environment = { HOME: root, PIRX_ORCHESTRATOR_CONFIG: join(root, "orchestrator.json"), PIRX_STOP_FILE: join(root, "STOP"), PIRX_WORKER_LOG_DIR: join(root, "logs"), PIRX_WORKTREE_PARENT: join(root, "wt"), ...extraEnv };
+  const environment = { HOME: root, PIRX_WORKER_SYSTEMD: "0", PIRX_CLAUDE_EXECUTABLE: "/bin/false", PIRX_ORCHESTRATOR_CONFIG: join(root, "orchestrator.json"), PIRX_STOP_FILE: join(root, "STOP"), PIRX_WORKER_LOG_DIR: join(root, "logs"), PIRX_WORKTREE_PARENT: join(root, "wt"), ...extraEnv };
   const server = new McpServer({ name: "test", version: "1" });
   registerCoordinationTools(server, environment, { run, store });
   const [a, b] = InMemoryTransport.createLinkedPair();
@@ -103,7 +104,9 @@ test("worker: a dead worker's lock is cleared, and the per-day start cap refuses
   const h = await harness((file, args) => file === "git" && args[0] === "worktree" && args[1] === "list" ? ok("") : undefined, { PIRX_CAP_WORKER_STARTS: "2" });
   try {
     h.store.acquire({ task: `${REPO}#1`, pid: 2_147_483_000, startedAt: h.store.now(), logPath: "/dev/null", reportPath: "/dev/null" });
-    for (let index = 0; index < 2; index += 1) h.store.append({ task: `${REPO}#3`, kind: "tool", name: "worker_start", input: {}, ok: true });
+    const report = join(h.root, "done.report.json");
+    await writeFile(report, "{}");
+    for (let index = 0; index < 2; index += 1) h.store.append({ task: `${REPO}#3`, kind: "tool", name: "worker_start", input: {}, output: { started: true, reportPath: report }, ok: true });
     const result = await call(h, "worker_start", { repository: REPO, issue: 3, instruction: "again" });
     assert.equal(result.refused, true);
     assert.match(String(result.reason), /cap is 2/u);
@@ -264,4 +267,68 @@ test("a read tool runs at most six times in one tick, then tells the model to de
     assert.equal(seventh.refused, true);
     assert.match(String(seventh.reason), /decide with what you have/u);
   } finally { await h.close(); }
+});
+
+
+test("process identity: pid 0 and a reused pid are not alive; the recorded process is", async () => {
+  const { pidAlive, processStart } = await import("../src/coordination/proc.js");
+  assert.equal(pidAlive(0), false);
+  assert.equal(pidAlive(-1), false);
+  assert.equal(pidAlive(2_147_483_000), false);
+  const start = processStart(process.pid);
+  assert.ok(start !== undefined && start.length > 0);
+  assert.equal(pidAlive(process.pid, start), true);
+  assert.equal(pidAlive(process.pid, "1"), false, "same pid, different start time: a reused pid");
+});
+
+test("worker lock: a lock left with pid 0 or a reused pid does not block a start", async () => {
+  const h = await harness((file, args) => file === "gh" && args[1] === "item-list" ? ok(JSON.stringify({ items: [] })) : file === "git" && args[1] === "list" ? ok("") : undefined);
+  try {
+    h.store.acquire({ task: `${REPO}#1`, pid: 0, startedAt: h.store.now(), logPath: "/dev/null", reportPath: "/dev/null" });
+    const result = await call(h, "worker_start", { repository: REPO, issue: 2, instruction: "x" });
+    assert.doesNotMatch(String(result.reason), /one worker/iu);
+    assert.equal(h.store.lock(), undefined);
+    h.store.acquire({ task: `${REPO}#1`, pid: process.pid, pidStart: "1", startedAt: h.store.now(), logPath: "/dev/null", reportPath: "/dev/null" });
+    assert.doesNotMatch(String((await call(h, "worker_start", { repository: REPO, issue: 2, instruction: "x" })).reason), /one worker/iu);
+  } finally { await h.close(); }
+});
+
+test("worker cap: runs that vanished without a report do not count, but a ceiling of twice the cap holds", async () => {
+  const h = await harness((file, args) => file === "git" && args[1] === "list" ? ok("") : file === "gh" && args[1] === "item-list" ? ok(JSON.stringify({ items: [] })) : undefined, { PIRX_CAP_WORKER_STARTS: "2" });
+  try {
+    for (let index = 0; index < 3; index += 1) h.store.append({ task: `${REPO}#4`, kind: "tool", name: "worker_start", input: {}, output: { started: true, reportPath: join(h.root, `lost-${index}.report.json`) }, ok: true });
+    const allowed = await call(h, "worker_start", { repository: REPO, issue: 4, instruction: "x" });
+    assert.doesNotMatch(String(allowed.reason ?? ""), /cap|ceiling/u, "three lost starts are below the ceiling of four and do not count");
+    h.store.append({ task: `${REPO}#4`, kind: "tool", name: "worker_start", input: {}, output: { started: true, reportPath: join(h.root, "lost-3.report.json") }, ok: true });
+    assert.match(String((await call(h, "worker_start", { repository: REPO, issue: 4, instruction: "x" })).reason), /ceiling is 4/u);
+  } finally { await h.close(); }
+});
+
+test("worker runner: writes its pid, a report when it finishes, and a report when it is stopped", async () => {
+  const { spawn } = await import("node:child_process");
+  const { readFile, chmod } = await import("node:fs/promises");
+  const { existsSync } = await import("node:fs");
+  const root = await mkdtemp(join(tmpdir(), "pirx-runner-"));
+  const runner = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "coordination", "worker-run.js");
+  const fake = join(root, "fake-claude.sh");
+  await writeFile(fake, `#!/bin/sh\necho '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}'\nsleep "$1"\necho '{"type":"result","result":"done: committed abc","is_error":false,"num_turns":2}'\n`);
+  await chmod(fake, 0o755);
+  const job = (name: string, seconds: string) => ({ task: `${REPO}#9`, cwd: root, setupCommands: [], executable: fake, args: [seconds], prompt: "x", env: { PATH: process.env.PATH ?? "" }, logPath: join(root, `${name}.jsonl`), reportPath: join(root, `${name}.report.json`), timeoutMs: 60_000, storagePath: join(root, "x.sqlite"), sessionId: "s" });
+  const run = async (name: string, seconds: string, stopAfterMs?: number): Promise<Record<string, unknown>> => {
+    const jobPath = join(root, `${name}.job.json`);
+    await writeFile(jobPath, JSON.stringify(job(name, seconds)));
+    const child = spawn(process.execPath, [runner, jobPath], { stdio: "ignore" });
+    if (stopAfterMs !== undefined) { await new Promise((resolve) => setTimeout(resolve, stopAfterMs)); child.kill("SIGTERM"); }
+    await new Promise((resolve) => child.on("close", resolve));
+    assert.ok(existsSync(`${jobPath}.pid`), "pid file");
+    return JSON.parse(await readFile(join(root, `${name}.report.json`), "utf8")) as Record<string, unknown>;
+  };
+  try {
+    const finished = await run("ok", "0");
+    assert.equal(finished.outcome, "finished");
+    assert.equal(finished.workerReport, "done: committed abc");
+    const stopped = await run("stopped", "30", 1500);
+    assert.equal(stopped.outcome, "killed");
+    assert.equal(stopped.workerReport, "working");
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

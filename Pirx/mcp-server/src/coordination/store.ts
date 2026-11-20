@@ -39,6 +39,8 @@ export interface JournalEntry {
 export interface WorkerLock {
   readonly task: string;
   readonly pid: number;
+  /** Kernel start time of `pid` (from /proc), so a reused pid is not mistaken for the worker. */
+  readonly pidStart?: string;
   readonly startedAt: string;
   readonly logPath: string;
   readonly reportPath: string;
@@ -86,6 +88,8 @@ export class CoordinationStore {
         started_at TEXT NOT NULL, log_path TEXT NOT NULL, report_path TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS coord_watch (name TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
     `);
+    const lockColumns = (this.#db.prepare("PRAGMA table_info(coord_lock)").all() as { name: string }[]).map((column) => column.name);
+    if (!lockColumns.includes("pid_start")) this.#db.exec("ALTER TABLE coord_lock ADD COLUMN pid_start TEXT");
   }
 
   public close(): void { this.#db.close(); }
@@ -150,17 +154,17 @@ export class CoordinationStore {
   // ── lock ───────────────────────────────────────────────────────────────
   public lock(): WorkerLock | undefined {
     const row = this.#db.prepare("SELECT * FROM coord_lock WHERE id = 1").get() as Record<string, unknown> | undefined;
-    return row === undefined ? undefined : { task: String(row.task), pid: Number(row.pid), startedAt: String(row.started_at), logPath: String(row.log_path), reportPath: String(row.report_path) };
+    return row === undefined ? undefined : { task: String(row.task), pid: Number(row.pid), ...(typeof row.pid_start === "string" ? { pidStart: row.pid_start } : {}), startedAt: String(row.started_at), logPath: String(row.log_path), reportPath: String(row.report_path) };
   }
 
   /** Takes the lock only when it is free. Returns false while another worker holds it. */
   public acquire(lock: WorkerLock): boolean {
-    const result = this.#db.prepare("INSERT OR IGNORE INTO coord_lock (id, task, pid, started_at, log_path, report_path) VALUES (1, ?, ?, ?, ?, ?)")
-      .run(lock.task, lock.pid, lock.startedAt, lock.logPath, lock.reportPath);
+    const result = this.#db.prepare("INSERT OR IGNORE INTO coord_lock (id, task, pid, pid_start, started_at, log_path, report_path) VALUES (1, ?, ?, ?, ?, ?, ?)")
+      .run(lock.task, lock.pid, lock.pidStart ?? null, lock.startedAt, lock.logPath, lock.reportPath);
     return Number(result.changes) === 1;
   }
 
-  public setLockPid(pid: number): void { this.#db.prepare("UPDATE coord_lock SET pid = ? WHERE id = 1").run(pid); }
+  public setLockPid(pid: number, pidStart?: string): void { this.#db.prepare("UPDATE coord_lock SET pid = ?, pid_start = ? WHERE id = 1").run(pid, pidStart ?? null); }
   public release(): void { this.#db.prepare("DELETE FROM coord_lock WHERE id = 1").run(); }
 
   // ── watcher cursor ─────────────────────────────────────────────────────
