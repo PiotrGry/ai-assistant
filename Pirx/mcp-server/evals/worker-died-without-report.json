@@ -56,16 +56,41 @@
     }
    ]
   },
-  "worker_status": {
-   "running": false,
-   "task": "PiotrGry/zdrovena-reconciliation#548",
-   "exited": true,
-   "endedWithoutReport": true,
-   "note": "The worker process is gone and wrote no report: it was killed or crashed, not finished. Check the worktree in task_facts (commits, uncommitted files) before resuming; this start does not count against the daily cap.",
-   "logTail": [
-    "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Reading orchestrator.py…\"}]}}"
-   ]
-  },
+  "worker_status": [
+   {
+    "after": "worker_resume",
+    "result": {
+     "running": true,
+     "task": "PiotrGry/zdrovena-reconciliation#548",
+     "pid": 5151,
+     "startedAt": "2026-11-20T10:40:00Z",
+     "logTail": [
+      "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Reading month_closing/orchestrator.py\"}]}}"
+     ]
+    }
+   },
+   {
+    "after": "worker_start",
+    "result": {
+     "running": true,
+     "task": "PiotrGry/zdrovena-reconciliation#548",
+     "pid": 5152,
+     "startedAt": "2026-11-20T10:40:00Z"
+    }
+   },
+   {
+    "result": {
+     "running": false,
+     "task": "PiotrGry/zdrovena-reconciliation#548",
+     "exited": true,
+     "endedWithoutReport": true,
+     "note": "The worker process is gone and wrote no report: it was killed or crashed, not finished. Check the worktree in task_facts (commits, uncommitted files) before resuming; this start does not count against the daily cap.",
+     "logTail": [
+      "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Reading orchestrator.py…\"}]}}"
+     ]
+    }
+   }
+  ],
   "task_facts": [
    {
     "match": {
@@ -96,6 +121,13 @@
      }
     }
    }
-  ]
+  ],
+  "worker_resume": {
+   "started": true,
+   "task": "PiotrGry/zdrovena-reconciliation#548",
+   "pid": 5151,
+   "via": "systemd",
+   "note": "Recorded (eval)."
+  }
  }
 }

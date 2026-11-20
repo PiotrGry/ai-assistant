@@ -606,3 +606,15 @@ test("eval fixtures: every app tool result matches that tool's output schema", a
   }
   assert.ok(checked >= 2, `checked ${checked} fixtures`);
 });
+
+test("eval fixtures: a case with `after` applies only once that tool has run in the tick", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-edge-fixture-"));
+  const fixture = join(root, "case.json");
+  await writeFile(fixture, JSON.stringify({ tools: { worker_status: [{ after: "worker_resume", result: { running: true } }, { result: { running: false, endedWithoutReport: true } }] } }));
+  const h = await harness(undefined, { PIRX_COORDINATION_EVAL: fixture, PIRX_TICK_ID: "tick-1" });
+  try {
+    assert.equal((await call(h, "worker_status", {})).running, false);
+    await call(h, "worker_resume", { repository: REPO, issue: 548, instruction: "go on" });
+    assert.equal((await call(h, "worker_status", {})).running, true);
+  } finally { await h.close(); await rm(root, { recursive: true, force: true }); }
+});

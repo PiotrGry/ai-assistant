@@ -95,7 +95,8 @@ export function refuse(reason: string, facts: Record<string, unknown> = {}): Rec
   return { refused: true, reason, ...facts };
 }
 
-interface FixtureCase { readonly match?: Record<string, unknown>; readonly result: Record<string, unknown> }
+/** `after`: the case applies only once that tool has run in this tick, so facts can change after an action (a resumed worker is running). */
+interface FixtureCase { readonly match?: Record<string, unknown>; readonly after?: string; readonly result: Record<string, unknown> }
 type Fixture = { readonly tools?: Record<string, Record<string, unknown> | readonly FixtureCase[]> };
 
 let fixtureCache: { path: string; value: Fixture } | undefined;
@@ -110,10 +111,11 @@ function matches(input: Record<string, unknown>, match: Record<string, unknown> 
 }
 
 /** Eval mode: facts come from the case file, and mutating calls are only recorded. */
-function fromFixture(path: string, name: string, input: Record<string, unknown>, mutating: boolean): Record<string, unknown> {
-  const entry = fixture(path).tools?.[name];
+function fromFixture(context: CoordinationContext, name: string, input: Record<string, unknown>, mutating: boolean): Record<string, unknown> {
+  const entry = fixture(context.settings.evalFixture!).tools?.[name];
   if (Array.isArray(entry)) {
-    const found = (entry as readonly FixtureCase[]).find((item) => matches(input, item.match));
+    const called = new Set(context.store.journal({ ...(context.settings.tick === undefined ? {} : { tick: context.settings.tick }), kind: "tool", limit: 500 }).map((item) => item.name));
+    const found = (entry as readonly FixtureCase[]).find((item) => matches(input, item.match) && (item.after === undefined || called.has(item.after)));
     if (found !== undefined) return found.result;
   } else if (entry !== undefined) return entry as Record<string, unknown>;
   return mutating ? { done: true, note: "Recorded (eval)." } : { results: [], note: "Nothing found. That is a complete answer; calling again with other arguments will not change it." };
@@ -139,7 +141,7 @@ export function journaledServer(server: McpServer, context: CoordinationContext)
       const tick = context.settings.tick === undefined ? {} : { tick: context.settings.tick };
       const repeated = tooManyReads(context, name);
       if (repeated !== undefined || context.settings.evalFixture !== undefined) {
-        const result = repeated ?? fromFixture(context.settings.evalFixture!, name, (input ?? {}) as Record<string, unknown>, false);
+        const result = repeated ?? fromFixture(context, name, (input ?? {}) as Record<string, unknown>, false);
         context.store.append({ ...tick, kind: "tool", name, input, output: result, ok: repeated === undefined });
         return { content: [{ type: "text" as const, text: JSON.stringify(result) }], structuredContent: result, ...(repeated === undefined ? {} : { isError: true }) };
       }
@@ -164,7 +166,7 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, conte
       const repeated = spec.mutating || spec.local === true ? undefined : tooManyReads(context, spec.name);
       if (repeated !== undefined) result = repeated;
       else if (spec.local === true) result = await spec.run(input, context);
-      else if (context.settings.evalFixture !== undefined) result = fromFixture(context.settings.evalFixture, spec.name, input as Record<string, unknown>, spec.mutating);
+      else if (context.settings.evalFixture !== undefined) result = fromFixture(context, spec.name, input as Record<string, unknown>, spec.mutating);
       else if (spec.mutating && context.settings.tick === undefined && guardHeldByOther(tickGuardPath(context.store.path))) result = refuse("A tick is running and may be acting on the same Tasks. Try again when it ends (usually 1–5 minutes); read tools work meanwhile.");
       else if (spec.mutating && stopped(context.settings)) result = refuse(`The stop switch is on (${context.settings.stopFile} exists). No mutating tool runs until the operator removes it.`);
       else if (spec.mutating && context.settings.dryRun) {
