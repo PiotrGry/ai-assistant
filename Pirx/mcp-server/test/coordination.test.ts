@@ -472,3 +472,30 @@ test("bug Issues: the same error reworded or with other numbers is one bug", asy
     assert.match(String(again.reason), /already filed as #801/u);
   } finally { await h.close(); }
 });
+
+test("settings: coordination.json fixes the worker model and caps, over the environment", async () => {
+  const { loadCoordinationSettings } = await import("../src/coordination/settings.js");
+  const root = await mkdtemp(join(tmpdir(), "pirx-settings-"));
+  try {
+    await writeFile(join(root, "coordination.json"), JSON.stringify({ workerModel: "claude-opus-5-5", caps: { workerStartsPerTaskPerDay: 4 } }));
+    const settings = loadCoordinationSettings({ HOME: root, PIRX_COORDINATION_CONFIG: join(root, "coordination.json"), PIRX_WORKER_MODEL: "other", PIRX_CAP_WORKER_STARTS: "9" });
+    assert.equal(settings.workerModel, "claude-opus-5-5");
+    assert.equal(settings.caps.workerStartsPerTaskPerDay, 4);
+    assert.equal(settings.caps.ciRerunsPerRun, 2);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("journal retention: old tool calls go, ticks and notes stay", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pirx-retention-"));
+  const file = join(root, "pirx.sqlite");
+  try {
+    const old = new CoordinationStore(file, () => "2026-01-01T00:00:00.000Z");
+    old.append({ kind: "tool", name: "task_facts", ok: true });
+    old.append({ kind: "tick", name: "tick", ok: true });
+    old.append({ kind: "note", name: "note", ok: true });
+    old.close();
+    const reopened = new CoordinationStore(file);
+    assert.deepEqual(reopened.journal().map((entry) => entry.kind), ["tick", "note"]);
+    reopened.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

@@ -88,6 +88,10 @@ export class CoordinationStore {
         started_at TEXT NOT NULL, log_path TEXT NOT NULL, report_path TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS coord_watch (name TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
     `);
+    // Retention (ai-assistant#371): tool calls older than the retention window are dropped; ticks,
+    // notes, questions and verdicts are kept, because they are Pirx's memory and the eval material.
+    const retentionDays = Number(process.env.PIRX_JOURNAL_RETENTION_DAYS ?? 30);
+    if (Number.isFinite(retentionDays) && retentionDays > 0) this.#db.prepare("DELETE FROM coord_journal WHERE kind = 'tool' AND at < ?").run(new Date(Date.now() - retentionDays * 86_400_000).toISOString());
     const lockColumns = (this.#db.prepare("PRAGMA table_info(coord_lock)").all() as { name: string }[]).map((column) => column.name);
     if (!lockColumns.includes("pid_start")) this.#db.exec("ALTER TABLE coord_lock ADD COLUMN pid_start TEXT");
   }

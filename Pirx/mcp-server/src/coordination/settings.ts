@@ -47,7 +47,22 @@ function positive(value: string | undefined, fallback: number): number {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+/**
+ * Pirx's own settings file, ~/.config/pirx/coordination.json (ai-assistant#371). Values here win over
+ * the environment; repositories and the Project still come from orchestrator.json until T10.
+ *   { "workerModel": "claude-opus-5-5", "opusModel": "claude-opus-5-5",
+ *     "caps": { "workerStartsPerTaskPerDay": 3, "ciRerunsPerRun": 2, "askOpusPerTaskPerDay": 3 } }
+ */
+function readCoordinationFile(environment: NodeJS.ProcessEnv): Record<string, unknown> {
+  const path = environment.PIRX_COORDINATION_CONFIG?.trim() || join(configHome(environment), "pirx", "coordination.json");
+  try { return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>; } catch { return {}; }
+}
+
 export function loadCoordinationSettings(environment: NodeJS.ProcessEnv): CoordinationSettings {
+  const own = readCoordinationFile(environment);
+  const ownCaps = (own.caps ?? {}) as Record<string, unknown>;
+  const fromFile = (value: unknown): string | undefined => (typeof value === "string" && value.trim() ? value.trim() : undefined);
+  const capFrom = (value: unknown): string | undefined => (typeof value === "number" ? String(value) : undefined);
   const configPath = environment.PIRX_ORCHESTRATOR_CONFIG?.trim() || join(configHome(environment), "pirx", "orchestrator.json");
   let raw: Record<string, unknown> = {};
   let configurationError: string | undefined;
@@ -85,12 +100,12 @@ export function loadCoordinationSettings(environment: NodeJS.ProcessEnv): Coordi
     ...(environment.PIRX_COORDINATION_EVAL?.trim() ? { evalFixture: environment.PIRX_COORDINATION_EVAL.trim() } : {}),
     ...(environment.PIRX_TICK_ID?.trim() ? { tick: environment.PIRX_TICK_ID.trim() } : {}),
     claudeExecutable: environment.PIRX_CLAUDE_EXECUTABLE?.trim() || "claude",
-    ...(environment.PIRX_WORKER_MODEL?.trim() ? { workerModel: environment.PIRX_WORKER_MODEL.trim() } : {}),
-    opusModel: environment.PIRX_OPUS_MODEL?.trim() || "claude-opus-5-5",
+    ...((fromFile(own.workerModel) ?? environment.PIRX_WORKER_MODEL?.trim()) ? { workerModel: fromFile(own.workerModel) ?? environment.PIRX_WORKER_MODEL!.trim() } : {}),
+    opusModel: fromFile(own.opusModel) ?? (environment.PIRX_OPUS_MODEL?.trim() || "claude-opus-5-5"),
     caps: {
-      workerStartsPerTaskPerDay: positive(environment.PIRX_CAP_WORKER_STARTS, 3),
-      ciRerunsPerRun: positive(environment.PIRX_CAP_CI_RERUNS, 2),
-      askOpusPerTaskPerDay: positive(environment.PIRX_CAP_ASK_OPUS, 3),
+      workerStartsPerTaskPerDay: positive(capFrom(ownCaps.workerStartsPerTaskPerDay) ?? environment.PIRX_CAP_WORKER_STARTS, 3),
+      ciRerunsPerRun: positive(capFrom(ownCaps.ciRerunsPerRun) ?? environment.PIRX_CAP_CI_RERUNS, 2),
+      askOpusPerTaskPerDay: positive(capFrom(ownCaps.askOpusPerTaskPerDay) ?? environment.PIRX_CAP_ASK_OPUS, 3),
       workerTimeoutMs: positive(environment.PIRX_WORKER_TIMEOUT_MS, 3 * 60 * 60 * 1000),
     },
     ...(configurationError === undefined ? {} : { configurationError }),

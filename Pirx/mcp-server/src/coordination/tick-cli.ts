@@ -60,12 +60,22 @@ export function extractAnswer(output: string): string {
   return (end < 0 ? rest : rest.slice(0, end)).trim();
 }
 
-/** Frees the GPU after a tick: every loaded Ollama model gets keep_alive 0. */
-export async function unloadModels(baseUrl: string): Promise<void> {
+export async function loadedModels(baseUrl: string): Promise<string[]> {
   try {
     const loaded = await (await fetch(`${baseUrl}/api/ps`)).json() as { models?: { name: string }[] };
-    for (const model of loaded.models ?? []) await fetch(`${baseUrl}/api/generate`, { method: "POST", body: JSON.stringify({ model: model.name, keep_alive: 0 }) });
-  } catch { /* Ollama down: nothing is loaded */ }
+    return (loaded.models ?? []).map((model) => model.name);
+  } catch { return []; /* Ollama down: nothing is loaded */ }
+}
+
+/**
+ * Frees the GPU after a tick, but only of models the tick loaded itself. A model that was already
+ * loaded (an open chat) stays, so the chat's next answer does not wait for a reload.
+ */
+export async function unloadModels(baseUrl: string, keep: readonly string[] = []): Promise<void> {
+  for (const name of await loadedModels(baseUrl)) {
+    if (keep.includes(name)) continue;
+    try { await fetch(`${baseUrl}/api/generate`, { method: "POST", body: JSON.stringify({ model: name, keep_alive: 0 }) }); } catch { /* gone */ }
+  }
 }
 
 export async function runTick(options: TickOptions): Promise<TickResult> {
@@ -97,6 +107,8 @@ async function runGuardedTick(options: TickOptions, environment: NodeJS.ProcessE
     ...(options.evalFixture === undefined ? {} : { PIRX_COORDINATION_EVAL: options.evalFixture }),
   };
   const startedAt = Date.now();
+  const ollama = environment.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
+  const loadedBefore = await loadedModels(ollama);
   const output = await new Promise<{ code: number | null; text: string }>((resolveRun) => {
     const child = spawn(process.execPath, ["--enable-source-maps", join(pirxRoot, "agent", "dist", "index.js"), "--once"], { cwd: pirxRoot, env: childEnvironment, stdio: ["pipe", "pipe", "pipe"] });
     let text = "";
@@ -106,7 +118,7 @@ async function runGuardedTick(options: TickOptions, environment: NodeJS.ProcessE
     child.stdin.end(prompt);
   });
   const answer = extractAnswer(output.text);
-  if (environment.PIRX_TICK_UNLOAD !== "0") await unloadModels(environment.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434");
+  if (environment.PIRX_TICK_UNLOAD !== "0") await unloadModels(ollama, loadedBefore);
   const store = new CoordinationStore(storage);
   try {
     const toolCalls = store.journal({ tick, kind: "tool", limit: 500 }).length;
