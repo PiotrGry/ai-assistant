@@ -81,7 +81,7 @@ test("dry-run: mutating tools report what they would do and run nothing", async 
 test("allowlist: a repository outside the configuration is refused", async () => {
   const h = await harness();
   try {
-    const result = await call(h, "issue_create", { repository: "someone/else", title: "t", body: "b" });
+    const result = await call(h, "issue_create", { repository: "someone/else", title: "t", body: "b", kind: "improvement" });
     assert.equal(result.refused, true);
     assert.equal(h.calls.length, 0);
   } finally { await h.close(); }
@@ -209,9 +209,9 @@ test("issue_create: one open Pirx proposal at a time, and every Issue Pirx creat
   let open = [{ number: 540, title: "x" }];
   const h = await harness((file, args) => file === "gh" && args[1] === "list" ? ok(JSON.stringify(open)) : file === "gh" && args[1] === "create" ? ok("https://github.com/x/y/issues/600") : undefined);
   try {
-    assert.equal((await call(h, "issue_create", { repository: REPO, title: "t", body: "b" })).refused, true);
+    assert.equal((await call(h, "issue_create", { repository: REPO, title: "t", body: "b", kind: "improvement" })).refused, true);
     open = [];
-    assert.equal((await call(h, "issue_create", { repository: REPO, title: "t", body: "b" })).issue, 600);
+    assert.equal((await call(h, "issue_create", { repository: REPO, title: "t", body: "b", kind: "improvement" })).issue, 600);
     assert.ok(h.calls.some((line) => line.startsWith("gh issue create") && line.includes("--label pirx-round")));
   } finally { await h.close(); }
 });
@@ -228,4 +228,40 @@ test("watcher guard: a guard left by a dead process is taken over; a live holder
     await writeFile(guard, String(process.pid));
     assert.equal(takeGuard(guard), false);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("issue_create kind=bug: own label, no duplicate title, and the improvement limit does not block it", async () => {
+  let bugs: { number: number; title: string }[] = [];
+  const h = await harness((file, args) => {
+    if (file === "gh" && args[0] === "issue" && args[1] === "list") return ok(JSON.stringify(args.includes("pirx-bug") ? bugs : [{ number: 540, title: "open improvement" }]));
+    if (file === "gh" && args[0] === "issue" && args[1] === "create") return ok("https://github.com/x/y/issues/700");
+    return undefined;
+  });
+  try {
+    assert.equal((await call(h, "issue_create", { repository: REPO, title: "KeyError in labels", body: "b", kind: "bug" })).issue, 700);
+    assert.ok(h.calls.some((line) => line.startsWith("gh issue create") && line.includes("--label pirx-bug") && !line.includes("pirx-round")));
+    bugs = [{ number: 700, title: "keyerror in labels" }];
+    assert.match(String((await call(h, "issue_create", { repository: REPO, title: "KeyError in labels", body: "b", kind: "bug" })).reason), /already filed as #700/u);
+    assert.equal((await call(h, "issue_create", { repository: REPO, title: "tests", body: "b", kind: "improvement" })).refused, true);
+  } finally { await h.close(); }
+});
+
+test("queue_set in a tick: Pirx queues its own production bugs, not improvements; in the chat anything", async () => {
+  const respond = (label: string) => (file: string, args: readonly string[]) => file === "gh" && args[1] === "item-list" ? ok(JSON.stringify({ items: [] })) : file === "gh" && args[0] === "issue" && args[1] === "view" ? ok(JSON.stringify({ labels: [{ name: label }] })) : file === "gh" && args[1] === "item-add" ? ok(JSON.stringify({ id: "item" })) : file === "gh" && args[1] === "view" ? ok(JSON.stringify({ id: "project" })) : file === "gh" && args[1] === "field-list" ? ok(JSON.stringify({ fields: [{ id: "f", name: "Worker", options: [{ id: "o", name: "Pirx" }] }] })) : undefined;
+  const improvement = await harness(respond("pirx-round"), { PIRX_TICK_ID: "tick-1" });
+  try { assert.equal((await call(improvement, "queue_set", { repository: REPO, issue: 9, worker: "Pirx" })).refused, true); } finally { await improvement.close(); }
+  const bug = await harness(respond("pirx-bug"), { PIRX_TICK_ID: "tick-1" });
+  try { assert.deepEqual((await call(bug, "queue_set", { repository: REPO, issue: 9, worker: "Pirx" })).set, { Worker: "Pirx" }); } finally { await bug.close(); }
+  const chat = await harness(respond("pirx-round"));
+  try { assert.deepEqual((await call(chat, "queue_set", { repository: REPO, issue: 9, worker: "Pirx" })).set, { Worker: "Pirx" }); } finally { await chat.close(); }
+});
+
+test("a read tool runs at most six times in one tick, then tells the model to decide", async () => {
+  const h = await harness((file, args) => file === "gh" && args[0] === "pr" ? ok("[]") : undefined, { PIRX_TICK_ID: "tick-loop" });
+  try {
+    for (let index = 0; index < 6; index += 1) assert.equal((await call(h, "pr_list", { repository: REPO, search: `q${index}` })).refused, undefined);
+    const seventh = await call(h, "pr_list", { repository: REPO, search: "again" });
+    assert.equal(seventh.refused, true);
+    assert.match(String(seventh.reason), /decide with what you have/u);
+  } finally { await h.close(); }
 });

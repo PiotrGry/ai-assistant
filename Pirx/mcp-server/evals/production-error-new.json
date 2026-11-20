@@ -1,0 +1,94 @@
+{
+ "description": "A real exception appears in production 14 times (KeyError in the batch label endpoint) and nothing tracks it. File it as a bug (kind=bug).",
+ "trigger": "- Obchód okresowy (minęło 60 min od ostatniego ticka).",
+ "pass": {
+  "anyOf": [
+   {
+    "tool": "issue_create",
+    "kind": "bug"
+   }
+  ],
+  "forbid": []
+ },
+ "tools": {
+  "queue_list": {
+   "items": [],
+   "note": "Nothing is queued for Pirx."
+  },
+  "journal_read": {
+   "entries": []
+  },
+  "worker_status": {
+   "running": false
+  },
+  "issue_list": {
+   "issues": [],
+   "note": "No Issue matches. That is a complete answer; searching again with other words will not change it."
+  },
+  "pr_list": {
+   "prs": [],
+   "note": "No pull request matches."
+  },
+  "zdrovena_code_health": {
+   "outcome": "success",
+   "totalCoverage": 88.1,
+   "weakestFiles": [
+    {
+     "file": "zdrovena/api/client.py",
+     "percent": 70.0,
+     "missing": 40
+    }
+   ]
+  },
+  "zdrovena_production_errors": {
+   "outcome": "success",
+   "hours": 24,
+   "groups": [
+    {
+     "source": "exception",
+     "role": "zdrovena-api-prod",
+     "message": "KeyError: 'courier_shipments' in zdrovena/api/routers/shipping/labels.py:_fetch_label_pdfs",
+     "operation": "POST /api/shipping/labels/batch",
+     "count": 14,
+     "firstSeen": "2026-11-20T06:12:00Z",
+     "lastSeen": "2026-11-20T09:48:00Z"
+    },
+    {
+     "source": "error_trace",
+     "role": "zdrovena-allegro-poller",
+     "message": "shipping.stuck_execution_snapshot stuck_count: 0, draft_ids: [], oldest_age_hours: 0",
+     "count": 36,
+     "firstSeen": "2026-11-19T10:00:00Z",
+     "lastSeen": "2026-11-20T09:40:00Z"
+    },
+    {
+     "source": "failed_request",
+     "role": "zdrovena-api-prod",
+     "message": "GET /health 401 (anonymous smoke test)",
+     "count": 6,
+     "firstSeen": "2026-11-19T20:30:00Z",
+     "lastSeen": "2026-11-20T08:17:00Z"
+    }
+   ]
+  },
+  "issue_create": [
+   {
+    "match": {
+     "kind": "bug"
+    },
+    "result": {
+     "created": "https://github.com/PiotrGry/zdrovena-reconciliation/issues/600",
+     "issue": 600,
+     "kind": "bug",
+     "note": "Queue it with queue_set (worker Pirx) if it should be fixed now."
+    }
+   },
+   {
+    "result": {
+     "created": "https://github.com/PiotrGry/zdrovena-reconciliation/issues/601",
+     "issue": 601
+    }
+   }
+  ]
+ }
+}

@@ -87,6 +87,7 @@ Ty koordynujesz rozwój aplikacji operatora (dziś zdrovena-reconciliation); wor
 - Worker „pracuje” tylko wtedy, gdy `worker_status` ma `running: true`.
 - Gdy operator oceni decyzję jako złą albo dobrą, zapisz to `journal_verdict`.
 - Nie ma osobnego daemona do uruchamiania ani odblokowywania; nie proponuj tego.
+- Gdy operator wklei zgłoszenie błędu (np. tekst błędu, który zobaczył jego brat na stronie): sprawdź `issue_list` i `pr_list`, czy to już znane; jeśli nie, załóż `issue_create` z `kind: "bug"` (cytat zgłoszenia, gdzie w kodzie szukać, jak sprawdzić naprawę) i dodaj do kolejki `queue_set` z `worker: "Pirx"`.
 
 ---
 

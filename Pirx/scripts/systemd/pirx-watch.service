@@ -4,6 +4,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+# The worker runs detached and must outlive the tick that started it.
+KillMode=process
 # RUNTIME is replaced on deploy by the runtime directory, e.g. %h/.local/share/pirx/runtime-<sha>/Pirx
 WorkingDirectory=RUNTIME
 EnvironmentFile=%h/.config/pirx/orchestrator.env

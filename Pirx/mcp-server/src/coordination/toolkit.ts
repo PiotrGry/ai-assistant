@@ -68,7 +68,37 @@ function fromFixture(path: string, name: string, input: Record<string, unknown>,
     const found = (entry as readonly FixtureCase[]).find((item) => matches(input, item.match));
     if (found !== undefined) return found.result;
   } else if (entry !== undefined) return entry as Record<string, unknown>;
-  return mutating ? { done: true, note: "Recorded (eval)." } : { found: false, note: `No facts for ${name} with these arguments.` };
+  return mutating ? { done: true, note: "Recorded (eval)." } : { results: [], note: "Nothing found. That is a complete answer; calling again with other arguments will not change it." };
+}
+
+/** How often one read tool may run in a single tick. The local model otherwise loops on searches (evals 2026-11-19 and 2026-11-20). */
+export const MAX_READS_PER_TOOL_PER_TICK = 6;
+
+function tooManyReads(context: CoordinationContext, name: string): Record<string, unknown> | undefined {
+  const tick = context.settings.tick;
+  if (tick === undefined) return undefined;
+  const calls = context.store.journal({ tick, kind: "tool", limit: 500 }).filter((entry) => entry.name === name).length;
+  return calls >= MAX_READS_PER_TOOL_PER_TICK ? refuse(`${name} already ran ${calls} times in this tick. More calls will not add facts: decide with what you have.`) : undefined;
+}
+
+/**
+ * Wraps tools registered elsewhere (production errors, code health) so that they are journaled
+ * and answer from the case file in eval mode, like every coordination tool.
+ */
+export function journaledServer(server: McpServer, context: CoordinationContext): McpServer {
+  return { registerTool: (name: string, config: unknown, handler: (input: unknown, extra: unknown) => Promise<{ structuredContent?: unknown; isError?: boolean }>) =>
+    (server.registerTool as unknown as (n: string, c: unknown, h: unknown) => unknown)(name, config, async (input: unknown, extra: unknown) => {
+      const tick = context.settings.tick === undefined ? {} : { tick: context.settings.tick };
+      const repeated = tooManyReads(context, name);
+      if (repeated !== undefined || context.settings.evalFixture !== undefined) {
+        const result = repeated ?? fromFixture(context.settings.evalFixture!, name, (input ?? {}) as Record<string, unknown>, false);
+        context.store.append({ ...tick, kind: "tool", name, input, output: result, ok: repeated === undefined });
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }], structuredContent: result, ...(repeated === undefined ? {} : { isError: true }) };
+      }
+      const response = await handler(input, extra);
+      context.store.append({ ...tick, kind: "tool", name, input, output: response.structuredContent, ok: response.isError !== true });
+      return response;
+    }) } as unknown as McpServer;
 }
 
 export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, context: CoordinationContext, spec: ToolSpec<Shape>): void {
@@ -83,7 +113,9 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, conte
     let result: Record<string, unknown>;
     let ok = true;
     try {
-      if (spec.local === true) result = await spec.run(input, context);
+      const repeated = spec.mutating || spec.local === true ? undefined : tooManyReads(context, spec.name);
+      if (repeated !== undefined) result = repeated;
+      else if (spec.local === true) result = await spec.run(input, context);
       else if (context.settings.evalFixture !== undefined) result = fromFixture(context.settings.evalFixture, spec.name, input as Record<string, unknown>, spec.mutating);
       else if (spec.mutating && stopped(context.settings)) result = refuse(`The stop switch is on (${context.settings.stopFile} exists). No mutating tool runs until the operator removes it.`);
       else if (spec.mutating && context.settings.dryRun) {
@@ -99,7 +131,8 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, conte
       result = { error: error instanceof Error ? error.message : String(error) };
     }
     context.store.append({ ...(context.settings.tick === undefined ? {} : { tick: context.settings.tick }), ...(task === undefined ? {} : { task }), kind: "tool", name: spec.name, input, output: result, ok });
-    return { content: [{ type: "text" as const, text: JSON.stringify(result) }], structuredContent: result, ...(ok ? {} : { isError: true }) };
+    // A refusal is a definite answer, not a failed call: the chat must not report it as "outcome uncertain".
+    return { content: [{ type: "text" as const, text: JSON.stringify(result) }], structuredContent: result, ...(ok || result.refused === true ? {} : { isError: true }) };
   });
 }
 

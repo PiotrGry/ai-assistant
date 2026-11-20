@@ -31,6 +31,8 @@ export function takeGuard(path: string): boolean {
   try { writeFileSync(path, String(process.pid), { flag: "wx" }); return true; } catch { return false; }
 }
 
+export const IDLE_NUDGE_MINUTES = 15;
+
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
 
 export async function collectEvents(store: CoordinationStore, settings: CoordinationSettings, run: Runner, timerMinutes: number): Promise<string[]> {
@@ -55,6 +57,14 @@ export async function collectEvents(store: CoordinationStore, settings: Coordina
       const value = digest(queued);
       if (store.watchValue("queue") !== undefined && store.watchValue("queue") !== value) events.push("Zmieniła się kolejka zadań dla Pirxa.");
       store.setWatchValue("queue", value);
+      // Queued work with an idle worker is itself a reason to wake up, at most every IDLE_NUDGE_MINUTES.
+      // Without it a tick that failed (or decided nothing) left the queue untouched until the hourly timer.
+      const working = lock !== undefined && pidAlive(lock.pid);
+      const lastNudge = Date.parse(store.watchValue("idle_nudge") ?? "1970-01-01T00:00:00.000Z");
+      if (queued.length > 0 && !working && Date.parse(store.now()) - lastNudge >= IDLE_NUDGE_MINUTES * 60_000) {
+        events.push(`W kolejce czeka ${queued.length} zadań dla Pirxa, a worker nie pracuje.`);
+        store.setWatchValue("idle_nudge", store.now());
+      }
     }
   }
   const last = store.journal({ kind: "tick", limit: 1 })[0];

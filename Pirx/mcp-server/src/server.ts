@@ -44,6 +44,7 @@ import { registerOrchestratorLogTool, SystemdOrchestratorLogsPort, type Orchestr
 import { AzureCliProductionErrorsPort, registerProductionErrorsTool, type ProductionErrorsPort } from "./tools/production-errors.js";
 import { registerCodeHealthTool } from "./tools/code-health.js";
 import { registerCoordinationTools } from "./coordination/register.js";
+import { journaledServer } from "./coordination/toolkit.js";
 import { SingleUseHostAuthorization } from "./authorization.js";
 import { CodexCliRunner } from "@pirx/orchestrator";
 import {
@@ -120,10 +121,11 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
     registerTaskHistory(server, config.orchestratorDatabasePath, config.orchestratorConfigurationError, checkBinding);
   }
   if (coordinationTools) {
-    registerCoordinationTools(server, environment);
+    const coordination = registerCoordinationTools(server, environment);
     if (!operationsTools) {
-      registerCodeHealthTool(server, environment.PIRX_CODE_HEALTH_REPORT ?? join(environment.XDG_DATA_HOME ?? join(environment.HOME ?? homedir(), ".local", "share"), "pirx", "health", "zdrovena.json"));
-      registerProductionErrorsTool(server, options.productionErrorsPort ?? new AzureCliProductionErrorsPort({ environment, ...(environment.PIRX_APP_INSIGHTS_APP === undefined ? {} : { app: environment.PIRX_APP_INSIGHTS_APP }), ...(environment.PIRX_APP_INSIGHTS_RESOURCE_GROUP === undefined ? {} : { resourceGroup: environment.PIRX_APP_INSIGHTS_RESOURCE_GROUP }) }));
+      const journaled = journaledServer(server, coordination);
+      registerCodeHealthTool(journaled, environment.PIRX_CODE_HEALTH_REPORT ?? join(environment.XDG_DATA_HOME ?? join(environment.HOME ?? homedir(), ".local", "share"), "pirx", "health", "zdrovena.json"));
+      registerProductionErrorsTool(journaled, options.productionErrorsPort ?? new AzureCliProductionErrorsPort({ environment, ...(environment.PIRX_APP_INSIGHTS_APP === undefined ? {} : { app: environment.PIRX_APP_INSIGHTS_APP }), ...(environment.PIRX_APP_INSIGHTS_RESOURCE_GROUP === undefined ? {} : { resourceGroup: environment.PIRX_APP_INSIGHTS_RESOURCE_GROUP }) }));
     }
   }
   if (operationsTools) {

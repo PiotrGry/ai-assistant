@@ -79,8 +79,20 @@ export function workerFacts(store: CoordinationStore, task?: string): Record<str
     running: alive, task: lock.task, pid: lock.pid, startedAt: lock.startedAt, logPath: lock.logPath,
     ...(alive ? {} : { exited: true, note: "The worker process has ended. Read its report, then decide; the next worker_start or worker_resume clears this lock." }),
     ...(report === undefined || report.trim() === "" ? {} : { report: parseReport(report) }),
-    logTail: tail(readIfExists(lock.logPath) ?? "", 15),
+    // The log is raw stream-json; whole lines run to tens of kilobytes. The report carries the worker's own words.
+    logTail: tail(readIfExists(lock.logPath) ?? "", 6).split("\n").map((line) => line.length > 300 ? `${line.slice(0, 300)}… (${line.length} characters, full log at logPath)` : line),
   };
+}
+
+/** Counts per conclusion, and the name of every check that is not a success or a skip. */
+function summariseChecks(checks: Record<string, unknown>[] | undefined): Record<string, unknown> {
+  const counts: Record<string, number> = {}; const notGreen: Record<string, unknown>[] = [];
+  for (const check of checks ?? []) {
+    const conclusion = String(check.conclusion ?? check.state ?? check.status ?? "UNKNOWN");
+    counts[conclusion] = (counts[conclusion] ?? 0) + 1;
+    if (!["SUCCESS", "SKIPPED", "NEUTRAL"].includes(conclusion)) notGreen.push({ name: check.name ?? check.context, status: check.status, conclusion, workflow: check.workflowName });
+  }
+  return { counts, notGreen };
 }
 
 export function registerFactTools(server: McpServer, context: CoordinationContext): void {
@@ -206,7 +218,8 @@ export function registerFactTools(server: McpServer, context: CoordinationContex
         const list = jsonOf(prs) as Record<string, unknown>[] | undefined;
         facts.pullRequests = list === undefined ? failure(prs) : list.length === 0 ? { prs: [], note: "No pull request from this branch." } : list.map((pr) => ({
           ...pr,
-          statusCheckRollup: (pr.statusCheckRollup as Record<string, unknown>[] | undefined)?.map((check) => ({ name: check.name ?? check.context, status: check.status, conclusion: check.conclusion ?? check.state, workflow: check.workflowName })),
+          statusCheckRollup: undefined,
+          checks: summariseChecks(pr.statusCheckRollup as Record<string, unknown>[] | undefined),
         }));
       }
       facts.worker = workerFacts(store, key);

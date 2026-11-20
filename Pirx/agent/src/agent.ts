@@ -452,6 +452,7 @@ export class PirxAgent {
     const timestamp = this.#now().toISOString();
     const gpuBefore = await readGpuStats();
     const repeatedToolCalls = new Map<string, number>();
+    let blockedRepeats = 0;
     const mutationsByTool = new Map<string, number>();
     let operationSequence = 0;
     const totals: Totals = {
@@ -777,8 +778,12 @@ export class PirxAgent {
               role: "tool",
               tool_name: name,
               content:
-                "Przerwano identyczną operację narzędzia z powodu wykrycia pętli powtarzających się wywołań.",
+                "Przerwano identyczną operację narzędzia z powodu wykrycia pętli powtarzających się wywołań. Odpowiedz teraz na podstawie tego, co już wiesz.",
             });
+            // Telling the model once is not enough: it kept repeating until the iteration limit and never answered.
+            // After the second blocked repeat the turn's tool budget is spent, so the next step is the final answer.
+            blockedRepeats += 1;
+            if (blockedRepeats >= 2) toolRequests = maximumCalls;
             continue;
           }
 

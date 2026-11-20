@@ -11,6 +11,9 @@ import { defineTool, issueInput, refuse, repositoryInput, type CoordinationConte
 
 /** Every Issue Pirx creates carries this label, and only one may be open at a time. */
 const PROPOSAL_LABEL = "pirx-round";
+/** A production bug Pirx found itself. It may queue these in a tick; improvements wait for the operator. */
+const BUG_LABEL = "pirx-bug";
+const MAX_OPEN_BUGS = 5;
 
 const PIRX_BRANCH = /^pirx\/(?!archive\/)[A-Za-z0-9._/-]+$/u;
 
@@ -189,6 +192,11 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
         // Worker=Human is the operator's decision (e.g. a paused task). Pirx may queue new items, not take back the operator's.
         const listed = jsonOf(await run("gh", ["project", "item-list", String(settings.projectNumber), "--owner", settings.projectOwner!, "--format", "json", "--limit", "500"], { timeoutMs: 60_000 })) as { items?: Record<string, unknown>[] } | undefined;
         const current = listed?.items?.find((entry) => (entry.content as { url?: string } | undefined)?.url === url);
+        if (current?.worker !== "Pirx" && settings.tick !== undefined) {
+          // In a tick nobody asked: Pirx may queue only the production bugs it filed. In the chat the operator asks, so anything may be queued.
+          const labels = jsonOf(await run("gh", ["issue", "view", String(input.issue), "-R", input.repository, "--json", "labels"])) as { labels?: { name: string }[] } | undefined;
+          if (labels?.labels?.some((label) => label.name === BUG_LABEL) !== true) return refuse(`In a tick Pirx queues only ${BUG_LABEL} Issues. ${input.repository}#${input.issue} is not one; the operator decides whether it is queued.`);
+        }
         if (current?.worker === "Human") return refuse(`${input.repository}#${input.issue} has Worker=Human: the operator handed it to themselves. Pirx may not take it back; ask the operator if it should be Pirx's.`);
       }
       const found = await projectIds(run, settings);
@@ -216,11 +224,22 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
 
   defineTool(server, context, {
     name: "issue_create",
-    description: "Create an Issue in an allowlisted repository, labelled pirx-round. Refused while another pirx-round Issue is open. Write it for the worker: ## Goal, ## Implementation scope, ## Acceptance criteria with checkboxes. Check issue_list and pr_list first, so it is not a duplicate.",
-    input: { repository: repositoryInput, title: z.string().min(1), body: z.string().min(1), labels: z.array(z.string()).optional() },
+    description: "Create an Issue in an allowlisted repository. kind=bug: a real production error or a bug the operator reported (label pirx-bug; refused when an open pirx-bug Issue has the same title; Pirx may queue it with queue_set). kind=improvement: tests, cleanups, ideas (label pirx-round; only one may be open, and the operator queues it). Write it for the worker: ## Goal, ## Implementation scope, ## Acceptance criteria with checkboxes. Check issue_list and pr_list first, so it is not a duplicate.",
+    input: { repository: repositoryInput, title: z.string().min(1), body: z.string().min(1), kind: z.enum(["bug", "improvement"]).describe("bug: a real error in production or reported by a user. improvement: tests, cleanups, ideas."), labels: z.array(z.string()).optional() },
     mutating: true,
     run: async (input, { run }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
+      if (input.kind === "bug") {
+        const bugs = jsonOf(await run("gh", ["issue", "list", "-R", input.repository, "--label", BUG_LABEL, "--state", "open", "--json", "number,title"])) as { number: number; title: string }[] | undefined;
+        if (bugs === undefined) return refuse(`Cannot check for open ${BUG_LABEL} Issues, so no new Issue is created.`);
+        const same = bugs.find((issue) => issue.title.trim().toLowerCase() === input.title.trim().toLowerCase());
+        if (same !== undefined) return refuse(`This bug is already filed as #${same.number}.`, { open: bugs });
+        if (bugs.length >= MAX_OPEN_BUGS) return refuse(`${bugs.length} Pirx bug Issues are already open; the cap is ${MAX_OPEN_BUGS}. Work on those first.`, { open: bugs });
+        const bugArgs = ["issue", "create", "-R", input.repository, "--title", input.title, "--body", input.body, "--label", BUG_LABEL];
+        for (const label of input.labels ?? []) if (label !== BUG_LABEL && label !== PROPOSAL_LABEL) bugArgs.push("--label", label);
+        const filed = await run("gh", bugArgs);
+        return filed.ok ? { created: filed.stdout.trim(), issue: Number(/\/issues\/(\d+)/u.exec(filed.stdout)?.[1]), kind: "bug", note: "Queue it with queue_set (worker Pirx) if it should be fixed now." } : failure(filed, "A missing label must be created first, or leave it out.");
+      }
       // One open Pirx proposal at a time: prompt rules did not hold this (evals 2026-11-20, open-round-issue).
       const open = jsonOf(await run("gh", ["issue", "list", "-R", input.repository, "--label", PROPOSAL_LABEL, "--state", "open", "--json", "number,title"])) as { number: number; title: string }[] | undefined;
       if (open === undefined) return refuse(`Cannot check for open ${PROPOSAL_LABEL} Issues, so no new Issue is created.`);
