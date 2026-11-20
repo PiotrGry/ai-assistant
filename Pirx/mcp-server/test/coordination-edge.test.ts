@@ -599,7 +599,7 @@ test("eval fixtures: every app tool result matches that tool's output schema", a
       if (schema === undefined) continue;
       for (const result of Array.isArray(fixture) ? fixture.map((item: { result: unknown }) => item.result) : [fixture]) {
         const parsed = schema.safeParse(result);
-        assert.equal(parsed.success, true, `${file} ${name}: ${JSON.stringify(parsed.error).slice(0, 300)}`);
+        assert.equal(parsed.success, true, `${file} ${name}: ${String(JSON.stringify(parsed.error)).slice(0, 300)}`);
         checked += 1;
       }
     }
