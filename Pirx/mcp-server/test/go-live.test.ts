@@ -47,7 +47,7 @@ function environment(): Env {
 const runtime = (env: Env, sha = env.sha) => join(env.data, `runtime-${sha}`, "Pirx");
 function testsPassed(env: Env, sha = env.sha): void { mkdirSync(runtime(env, sha), { recursive: true }); writeFileSync(join(runtime(env, sha), ".tests-passed"), ""); }
 function evalRun(env: Env, name: string, fields: Record<string, unknown>): void {
-  writeFileSync(join(env.data, "evals", `${name}.json`), JSON.stringify({ commit: env.sha, only: null, gate: true, ...fields }));
+  writeFileSync(join(env.data, "evals", `${name}.json`), JSON.stringify({ commit: env.sha, only: null, gate: true, runs: 3, ...fields }));
   // ls -t orders by mtime; the name is the order of writing here.
   const when = new Date(Date.parse("2026-11-20T10:00:00Z") + Number(name.replace(/\D/gu, "")) * 60_000);
   spawnSync("touch", ["-d", when.toISOString(), join(env.data, "evals", `${name}.json`)]);
@@ -152,5 +152,16 @@ test("go-live: status reports the STOP switch and the mode", () => {
     const result = env.run("status");
     assert.match(result.out, /STOP switch is ON/u);
     assert.match(result.out, /live, runtime 0000000/u);
+  } finally { rmSync(env.root, { recursive: true, force: true }); }
+});
+
+test("go-live: a quick eval run (fewer than 3 runs per case) never counts for live", () => {
+  const env = environment();
+  try {
+    testsPassed(env); shadowTicks(env, [true, true, true, true, true]);
+    evalRun(env, "e1", { runs: 1 });
+    assert.equal(env.run("live", env.sha).code, 1, "a quick pass is not the gate");
+    evalRun(env, "e2", { runs: 3 });
+    assert.equal(env.run("live", env.sha).code, 0);
   } finally { rmSync(env.root, { recursive: true, force: true }); }
 });

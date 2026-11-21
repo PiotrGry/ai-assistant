@@ -4,9 +4,11 @@
 #   scripts/go-live.sh build  <commit>   build ~/.local/share/pirx/runtime-<sha>, run unit and integration tests
 #   scripts/go-live.sh shadow <commit>   point the watcher at it in dry-run mode (journal: pirx-shadow.sqlite)
 #   scripts/go-live.sh live   <commit>   switch to live, only when all three conditions hold for this commit:
-#       1. an eval run of the full case set passed the gate (every case, every run)
+#       1. an eval run of the full case set with at least 3 runs per case passed the gate (every case, every run)
 #       2. the build step's tests passed
 #       3. the last SHADOW_TICKS shadow ticks of this runtime all ended with a decision
+#   scripts/go-live.sh eval   <commit> [--quick]   run the eval cases on that runtime's model: full = 3 runs each
+#                                        (~25 min, counts for live); --quick = 1 run each (~8 min, does not count)
 #   scripts/go-live.sh status            what runs now and what is missing for live
 #
 # Stop everything at once: touch ~/.config/pirx/STOP   (every mutating tool refuses)
@@ -27,7 +29,7 @@ eval_passed() {
   # The newest full eval run for this commit decides.
   local file
   file=$(ls -t "$data"/evals/*.json 2>/dev/null | while read -r f; do
-    if jq -e --arg c "$1" '.commit == $c and .only == null' "$f" >/dev/null 2>&1; then echo "$f"; break; fi
+    if jq -e --arg c "$1" '.commit == $c and .only == null and (.runs // 0) >= 3' "$f" >/dev/null 2>&1; then echo "$f"; break; fi
   done)
   [ -n "$file" ] && jq -e '.gate == true' "$file" >/dev/null
 }
@@ -44,7 +46,7 @@ report() {
   local sha=$1
   printf '%s\n' "Runtime $sha:"
   if tests_passed "$sha"; then echo "  tests:  passed"; else echo "  tests:  MISSING (scripts/go-live.sh build $sha)"; fi
-  if eval_passed "$sha"; then echo "  evals:  passed"; else echo "  evals:  MISSING (cd $(runtime_of "$sha") && pnpm eval --runs 3)"; fi
+  if eval_passed "$sha"; then echo "  evals:  passed"; else echo "  evals:  MISSING (scripts/go-live.sh eval $sha)"; fi
   if shadow_passed "$sha"; then echo "  shadow: $shadow_ticks ticks with a decision"; else echo "  shadow: MISSING ($shadow_ticks successful shadow ticks of this runtime; scripts/go-live.sh shadow $sha)"; fi
 }
 
@@ -87,6 +89,14 @@ case "$cmd" in
     sha=$(short "${2:?commit}")
     if tests_passed "$sha" && eval_passed "$sha" && shadow_passed "$sha"; then point_unit "$sha" live
     else report "$sha"; echo "Not switching to live."; exit 1; fi
+    ;;
+  eval)
+    sha=$(short "${2:?commit}"); runtime=$(runtime_of "$sha")
+    tests_passed "$sha" || { echo "Run: scripts/go-live.sh build $sha"; exit 1; }
+    runs=3; [ "${3:-}" = "--quick" ] && runs=1
+    model=$(jq -r '.OLLAMA_MODEL // empty' "${XDG_CONFIG_HOME:-$HOME/.config}/pirx/chat.json" 2>/dev/null)
+    echo "Evals of $sha, $runs run(s) per case, model ${model:-default}$( [ "$runs" -lt 3 ] && echo ' (quick: does not count for live)')."
+    cd "$runtime" && OLLAMA_MODEL="$model" node mcp-server/dist/coordination/eval-cli.js --runs "$runs"
     ;;
   status)
     current=$(grep -oE 'runtime-[0-9a-f]+' "$unit" | head -1 | sed 's/runtime-//')
