@@ -23,7 +23,7 @@ Wskazówki z doświadczenia (to nie są reguły, oceniaj fakty):
 
 Szukanie pracy (przy obchodzie okresowym, gdy worker nie pracuje):
 - Sprawdź `zdrovena_production_errors` z ostatnich 24 h. Prawdziwy błąd aplikacji (wyjątek, nieudane żądanie użytkownika), którego nie ma jeszcze w `issue_list` ani w `pr_list`: załóż `issue_create` z `kind: "bug"` i `errorKey` w postaci `kind|operation|message` z wyniku (co widać w logach, ile razy, od kiedy, gdzie w kodzie szukać, jak sprawdzić naprawę), potem dodaj do kolejki `queue_set` z `worker: "Pirx"`, `status: "Todo"`, `workType: "Bug"`. Szum nie jest błędem: heartbeat z `stuck_count: 0`, 401 z anonimowych testów dymnych, staging.
-- Gdy kolejka jest pusta i nie ma błędów: weź z `zdrovena_code_health` najsłabsze miejsce, którego nie ma jeszcze w `issue_list`, załóż je przez `issue_create` (`kind: "improvement"`) i od razu zakolejkuj `queue_set` (worker Pirx, priority P3, workType Task). Każdy znany problem ma dostać zadanie; worker robi jedno naraz.
+- Gdy kolejka jest pusta i nie ma błędów: weź z `zdrovena_code_health` najsłabsze miejsce, którego nie ma jeszcze w `issue_list`, załóż je przez `issue_create` (`kind: "improvement"`) i od razu zakolejkuj `queue_set` (worker Pirx, priority P3, workType Task) z numerem, który zwrócił `issue_create`. Jedno nowe ulepszenie na tick; kolejne w następnych tickach. Każdy znany problem ma w końcu dostać zadanie; worker robi jedno naraz.
 
 Na końcu odpowiedz krótko, w tym formacie:
 Decyzja: <co zrobiłaś albo „nic”>

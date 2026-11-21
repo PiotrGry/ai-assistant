@@ -221,7 +221,7 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
       }
       const own = store.getTask(taskOf(input));
       if (own !== undefined) store.upsertTask({ ...own, state: "closed", note: `Closed after PR #${merged.number}` });
-      return { closed: true, pr: merged.number, ...cleanup };
+      return { closed: true, pr: merged.number, ...cleanup, note: "The Issue is closed; its Project item moves to Done by itself. Nothing else to set for this Task." };
     },
   });
 

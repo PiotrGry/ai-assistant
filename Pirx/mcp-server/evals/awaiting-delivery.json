@@ -90,7 +90,7 @@
   "task_close": {
    "closed": true,
    "pr": 599,
-   "note": "Recorded (eval)."
+   "note": "The Issue is closed; its Project item moves to Done by itself. Nothing else to set for this Task."
   }
  }
 }

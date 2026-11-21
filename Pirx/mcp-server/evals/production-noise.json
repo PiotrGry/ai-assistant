@@ -64,6 +64,19 @@
      "kind": "failed_request"
     }
    ]
-  }
+  },
+  "issue_create": [
+   {
+    "match": {
+     "kind": "improvement"
+    },
+    "result": {
+     "created": "https://github.com/PiotrGry/zdrovena-reconciliation/issues/611",
+     "issue": 611,
+     "kind": "improvement",
+     "note": "Queue it with queue_set (worker Pirx) so the worker takes it."
+    }
+   }
+  ]
  }
 }
