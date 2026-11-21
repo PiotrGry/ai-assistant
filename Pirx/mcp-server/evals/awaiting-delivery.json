@@ -102,6 +102,39 @@
    "closed": true,
    "pr": 599,
    "note": "The Issue is closed; its Project item moves to Done by itself. Nothing else to set for this Task."
+  },
+  "ci_status": {
+   "checks": [
+    {
+     "name": "Fast gate / Quality Gate",
+     "bucket": "pass"
+    },
+    {
+     "name": "Fast gate / Security scan",
+     "bucket": "pass"
+    }
+   ],
+   "runs": [
+    {
+     "databaseId": 44700000001,
+     "workflowName": "Develop — Fast Gate",
+     "conclusion": "success",
+     "headSha": "afc139a"
+    }
+   ],
+   "note": "PR #599 is merged; its checks passed."
+  },
+  "pr_list": {
+   "prs": [
+    {
+     "pr": 599,
+     "title": "test(coverage): api/routers/close.py — issue #598",
+     "state": "MERGED",
+     "branch": "pirx/issue-598",
+     "base": "develop",
+     "mergedAt": "2026-11-20T18:40:00Z"
+    }
+   ]
   }
  }
 }
