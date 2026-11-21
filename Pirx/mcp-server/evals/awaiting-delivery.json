@@ -24,20 +24,31 @@
   ]
  },
  "tools": {
-  "queue_list": {
-   "items": [
-    {
-     "repository": "PiotrGry/zdrovena-reconciliation",
-     "issue": 598,
-     "title": "Add tests for api/routers/close.py (raise coverage from 70.7%)",
-     "status": "Todo",
-     "worker": "Pirx",
-     "queueOrder": 200,
-     "priority": "P3",
-     "workType": "Task"
+  "queue_list": [
+   {
+    "after": "task_close",
+    "result": {
+     "items": [],
+     "note": "Nothing is queued for Pirx."
     }
-   ]
-  },
+   },
+   {
+    "result": {
+     "items": [
+      {
+       "repository": "PiotrGry/zdrovena-reconciliation",
+       "issue": 598,
+       "title": "Add tests for api/routers/close.py (raise coverage from 70.7%)",
+       "status": "Todo",
+       "worker": "Pirx",
+       "queueOrder": 200,
+       "priority": "P3",
+       "workType": "Task"
+      }
+     ]
+    }
+   }
+  ],
   "worker_status": {
    "running": false
   },
