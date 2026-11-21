@@ -58,7 +58,8 @@
        "state": "OPEN",
        "labels": [
         "pirx-round"
-       ]
+       ],
+       "worker": "Human"
       }
      ]
     }
@@ -72,13 +73,15 @@
        "state": "OPEN",
        "labels": [
         "pirx-round"
-       ]
+       ],
+       "worker": "Human"
       },
       {
        "issue": 432,
        "title": "[CI/CD] Harden gates and enable continuous delivery",
        "state": "OPEN",
-       "labels": []
+       "labels": [],
+       "worker": "none"
       }
      ]
     }
@@ -138,7 +141,7 @@
     },
     "result": {
      "refused": true,
-     "reason": "PiotrGry/zdrovena-reconciliation#540 has Worker=Human: the operator handed it to themselves. Pirx may not take it back; ask the operator if it should be Pirx's."
+     "reason": "PiotrGry/zdrovena-reconciliation#540 has Worker=Human: it is the operator's and stays so. Leave it and go on in this tick with other work, e.g. the next known problem from zdrovena_code_health."
     }
    }
   ],

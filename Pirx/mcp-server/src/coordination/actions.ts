@@ -246,7 +246,7 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
           const labels = jsonOf(await run("gh", ["issue", "view", String(input.issue), "-R", input.repository, "--json", "labels"])) as { labels?: { name: string }[] } | undefined;
           if (labels?.labels?.some((label) => label.name === BUG_LABEL || label.name === PROPOSAL_LABEL) !== true) return refuse(`In a tick Pirx queues only the Issues it filed (${BUG_LABEL}, ${PROPOSAL_LABEL}). ${input.repository}#${input.issue} is not one; the operator decides whether it is queued.`);
         }
-        if (current?.worker === "Human") return refuse(`${input.repository}#${input.issue} has Worker=Human: the operator handed it to themselves. Pirx may not take it back; ask the operator if it should be Pirx's.`);
+        if (current?.worker === "Human") return refuse(`${input.repository}#${input.issue} has Worker=Human: it is the operator's and stays so. Leave it and go on in this tick with other work, e.g. the next known problem from zdrovena_code_health.`);
       }
       forgetProjectItems(store);
       const found = await projectIds(run, settings);

@@ -151,10 +151,10 @@ export function registerFactTools(server: McpServer, context: CoordinationContex
 
   defineTool(server, context, {
     name: "issue_list",
-    description: "List Issues of an allowlisted repository, with labels and the PRs that close them. Filter by state, label and search text. An empty result means no Issue matches.",
+    description: "List Issues of an allowlisted repository, with labels, the PRs that close them and the Project's Worker (Pirx, Human, or none when not on the Project). Filter by state, label and search text. An empty result means no Issue matches. Worker=Human Issues are the operator's: skip them.",
     input: { repository: repositoryInput, state: z.enum(["open", "closed", "all"]).optional(), label: z.string().optional(), search: z.string().optional(), limit: z.number().int().min(1).max(100).optional() },
     mutating: false,
-    run: async (input, { run }) => {
+    run: async (input, { run, store }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
       const args = ["issue", "list", "-R", input.repository, "--state", input.state ?? "open", "--limit", String(input.limit ?? 30), "--json", "number,title,state,labels,updatedAt,closedByPullRequestsReferences,url"];
       if (input.label !== undefined) args.push("--label", input.label);
@@ -162,7 +162,15 @@ export function registerFactTools(server: McpServer, context: CoordinationContex
       const result = await run("gh", args);
       const issues = jsonOf(result) as Record<string, unknown>[] | undefined;
       if (issues === undefined) return failure(result);
-      const shaped = issues.map((issue) => ({ issue: issue.number, title: issue.title, state: issue.state, labels: (issue.labels as { name: string }[] | undefined)?.map((label) => label.name), updatedAt: issue.updatedAt, closedBy: (issue.closedByPullRequestsReferences as { number: number; url: string }[] | undefined)?.map((pr) => pr.number), url: issue.url }));
+      // The Project's Worker beside each Issue, from the shared Project read (no extra query when fresh):
+      // the model must see Worker=Human before it tries to queue such an Issue (eval open-round-issue).
+      const items = settings.projectOwner === undefined ? undefined : (jsonOf(await projectItems(run, store, settings)) as { items?: Record<string, unknown>[] } | undefined)?.items;
+      const workerOf = (number: unknown): string | undefined => {
+        if (items === undefined) return undefined;
+        const item = items.find((entry) => { const content = entry.content as { repository?: string; number?: number } | undefined; return content?.repository?.toLowerCase() === input.repository.toLowerCase() && content.number === number; });
+        return item === undefined ? "none" : String(item.worker ?? "none");
+      };
+      const shaped = issues.map((issue) => ({ issue: issue.number, worker: workerOf(issue.number), title: issue.title, state: issue.state, labels: (issue.labels as { name: string }[] | undefined)?.map((label) => label.name), updatedAt: issue.updatedAt, closedBy: (issue.closedByPullRequestsReferences as { number: number; url: string }[] | undefined)?.map((pr) => pr.number), url: issue.url }));
       return shaped.length === 0 ? { issues: [], note: "No Issue matches. That is a complete answer; searching again with other words will not change it." } : { issues: shaped };
     },
   });
