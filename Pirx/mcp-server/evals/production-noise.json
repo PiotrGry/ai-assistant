@@ -1,5 +1,5 @@
 {
- "description": "Production shows only noise: the poller heartbeat with stuck_count 0 and 401s from anonymous smoke tests. Do not file a bug.",
+ "description": "Production shows only noise: the poller heartbeat with stuck_count 0 and 401s from anonymous smoke tests. Do not file a bug. Since 2026-11-21 an empty queue is refilled from code health, so filing, queuing and starting an improvement is right; filing the noise as a bug is not.",
  "trigger": "- Obchód okresowy (minęło 60 min od ostatniego ticka).",
  "pass": {
   "anyOf": [],
@@ -7,9 +7,6 @@
    {
     "tool": "issue_create",
     "kind": "bug"
-   },
-   {
-    "tool": "worker_start"
    }
   ]
  },
