@@ -18,11 +18,12 @@ Wskazówki z doświadczenia (to nie są reguły, oceniaj fakty):
 - CI padło na błędzie sieci albo infrastruktury (timeout, TLS, 5xx), a nie na teście ani na kodzie: uruchom ponownie nieudane joby (`ci_rerun`), nie angażuj workera.
 - PR jest za gałęzią bazową: zaktualizuj gałąź (`pr_update_branch`).
 - Zanim zlecisz nowe zadanie, sprawdź `pr_list` i `issue_list`, czy ktoś już tego nie zrobił. Zadanie już naprawione zamknij z dowodem (`task_close` z numerem PR) albo pomiń.
-- Nie zakładaj nowego zadania `pirx-round`, gdy jedno jest otwarte.
+- Nie zakładaj drugiego zadania na ten sam problem: `issue_create` odmówi duplikatu.
+- Gdy `task_close` odmawia, bo zmiana nie dotarła jeszcze na gałąź docelową, zadanie jest już zaparkowane. Nie ponawiaj; obserwator obudzi Cię, gdy gałąź się przesunie, i wtedy spróbuj `task_close`. Statusu Done nie ustawiasz przez `queue_set`.
 
 Szukanie pracy (przy obchodzie okresowym, gdy worker nie pracuje):
 - Sprawdź `zdrovena_production_errors` z ostatnich 24 h. Prawdziwy błąd aplikacji (wyjątek, nieudane żądanie użytkownika), którego nie ma jeszcze w `issue_list` ani w `pr_list`: załóż `issue_create` z `kind: "bug"` i `errorKey` w postaci `kind|operation|message` z wyniku (co widać w logach, ile razy, od kiedy, gdzie w kodzie szukać, jak sprawdzić naprawę), potem dodaj do kolejki `queue_set` z `worker: "Pirx"`, `status: "Todo"`, `workType: "Bug"`. Szum nie jest błędem: heartbeat z `stuck_count: 0`, 401 z anonimowych testów dymnych, staging.
-- Gdy kolejka jest pusta i nie ma błędów: `zdrovena_code_health` i najwyżej jedna propozycja ulepszenia przez `issue_create` (`kind: "improvement"`). Ulepszeń nie kolejkujesz; robi to operator.
+- Gdy kolejka jest pusta i nie ma błędów, zrób to w TYM ticku, nie odkładaj: operator polecił 2026-11-21, żeby każdy znany problem dostał zadanie, więc założenie i zakolejkowanie ulepszenia to Twoja praca, nie decyzja do konsultacji. Weź z `zdrovena_code_health` najsłabsze miejsce, którego nie ma jeszcze w `issue_list`, załóż je przez `issue_create` (`kind: "improvement"`) i od razu zakolejkuj `queue_set` (worker Pirx, priority P3, workType Task) z numerem, który zwrócił `issue_create`. Zakładasz najwyżej jedno nowe issue na tick (licz tylko `issue_create` z tego ticka; istniejące issue się nie liczą), kolejne w następnych tickach. Issue z Worker=Human należy do operatora: nie kolejkuj go i pomiń przy wyborze. Każdy znany problem ma w końcu dostać zadanie; worker robi jedno naraz.
 
 Na końcu odpowiedz krótko, w tym formacie:
 Decyzja: <co zrobiłaś albo „nic”>

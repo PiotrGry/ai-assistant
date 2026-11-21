@@ -208,14 +208,16 @@ test("queue_set: Pirx may not take back an item the operator set to Worker=Human
   } finally { await h.close(); }
 });
 
-test("issue_create: one open Pirx proposal at a time, and every Issue Pirx creates is labelled pirx-round", async () => {
-  let open = [{ number: 540, title: "x" }];
+test("issue_create: any number of open proposals, never the same one twice; each is labelled pirx-round", async () => {
+  // Operator, 2026-11-21: every known problem gets an Issue; only duplicates are refused.
+  let open = [{ number: 540, title: "Add tests for preflight.py" }];
   const h = await harness((file, args) => file === "gh" && args[1] === "list" ? ok(JSON.stringify(open)) : file === "gh" && args[1] === "create" ? ok("https://github.com/x/y/issues/600") : undefined);
   try {
-    assert.equal((await call(h, "issue_create", { repository: REPO, title: "t", body: "b", kind: "improvement" })).refused, true);
+    assert.equal((await call(h, "issue_create", { repository: REPO, title: "Add tests for storage.py", body: "b", kind: "improvement" })).issue, 600, "another open proposal does not block");
+    assert.ok(h.calls.some((line) => line.startsWith("gh issue create") && line.includes("--label pirx-round") && line.includes("pirx-round-fingerprint")));
+    assert.match(String((await call(h, "issue_create", { repository: REPO, title: "add tests for Preflight.py", body: "b", kind: "improvement" })).reason), /already filed as #540/u);
     open = [];
-    assert.equal((await call(h, "issue_create", { repository: REPO, title: "t", body: "b", kind: "improvement" })).issue, 600);
-    assert.ok(h.calls.some((line) => line.startsWith("gh issue create") && line.includes("--label pirx-round")));
+    assert.equal((await call(h, "issue_create", { repository: REPO, title: "Add tests for preflight.py", body: "b", kind: "improvement" })).issue, 600);
   } finally { await h.close(); }
 });
 
@@ -238,7 +240,7 @@ test("tick guard: a guard left by a dead process is taken over; a live holder ke
   } finally { holder.kill(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("issue_create kind=bug: own label, no duplicate title, and the improvement limit does not block it", async () => {
+test("issue_create kind=bug: own label, no duplicate title", async () => {
   let bugs: { number: number; title: string }[] = [];
   const h = await harness((file, args) => {
     if (file === "gh" && args[0] === "issue" && args[1] === "list") return ok(JSON.stringify(args.includes("pirx-bug") ? bugs : [{ number: 540, title: "open improvement" }]));
@@ -250,14 +252,16 @@ test("issue_create kind=bug: own label, no duplicate title, and the improvement 
     assert.ok(h.calls.some((line) => line.startsWith("gh issue create") && line.includes("--label pirx-bug") && !line.includes("pirx-round")));
     bugs = [{ number: 700, title: "keyerror in labels" }];
     assert.match(String((await call(h, "issue_create", { repository: REPO, title: "KeyError in labels", body: "b", kind: "bug" })).reason), /already filed as #700/u);
-    assert.equal((await call(h, "issue_create", { repository: REPO, title: "tests", body: "b", kind: "improvement" })).refused, true);
+    assert.equal((await call(h, "issue_create", { repository: REPO, title: "tests", body: "b", kind: "improvement" })).issue, 700, "an open improvement does not block another");
   } finally { await h.close(); }
 });
 
-test("queue_set in a tick: Pirx queues its own production bugs, not improvements; in the chat anything", async () => {
+test("queue_set in a tick: Pirx queues the Issues it filed (bugs and improvements), not others; in the chat anything", async () => {
   const respond = (label: string) => (file: string, args: readonly string[]) => file === "gh" && args[1] === "item-list" ? ok(JSON.stringify({ items: [] })) : file === "gh" && args[0] === "issue" && args[1] === "view" ? ok(JSON.stringify({ labels: [{ name: label }] })) : file === "gh" && args[1] === "item-add" ? ok(JSON.stringify({ id: "item" })) : file === "gh" && args[1] === "view" ? ok(JSON.stringify({ id: "project" })) : file === "gh" && args[1] === "field-list" ? ok(JSON.stringify({ fields: [{ id: "f", name: "Worker", options: [{ id: "o", name: "Pirx" }] }] })) : undefined;
   const improvement = await harness(respond("pirx-round"), { PIRX_TICK_ID: "tick-1" });
-  try { assert.equal((await call(improvement, "queue_set", { repository: REPO, issue: 9, worker: "Pirx" })).refused, true); } finally { await improvement.close(); }
+  try { assert.deepEqual((await call(improvement, "queue_set", { repository: REPO, issue: 9, worker: "Pirx" })).set, { Worker: "Pirx" }); } finally { await improvement.close(); }
+  const foreign = await harness(respond("enhancement"), { PIRX_TICK_ID: "tick-1" });
+  try { assert.equal((await call(foreign, "queue_set", { repository: REPO, issue: 9, worker: "Pirx" })).refused, true); } finally { await foreign.close(); }
   const bug = await harness(respond("pirx-bug"), { PIRX_TICK_ID: "tick-1" });
   try { assert.deepEqual((await call(bug, "queue_set", { repository: REPO, issue: 9, worker: "Pirx" })).set, { Worker: "Pirx" }); } finally { await bug.close(); }
   const chat = await harness(respond("pirx-round"));
@@ -499,4 +503,34 @@ test("journal retention: old tool calls go, ticks and notes stay", async () => {
     assert.deepEqual(reopened.journal().map((entry) => entry.kind), ["tick", "note"]);
     reopened.close();
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+test("queue_set never sets Done: only task_close does, after delivery (zdrovena#598 was closed around it)", async () => {
+  for (const env of [{ PIRX_TICK_ID: "tick-1" }, {}]) {
+    const h = await harness(undefined, env);
+    try {
+      const result = await call(h, "queue_set", { repository: REPO, issue: 598, status: "Done" });
+      assert.match(String(result.reason), /only by task_close/u);
+      assert.equal(h.calls.some((line) => line.startsWith("gh project item-edit")), false);
+    } finally { await h.close(); }
+  }
+});
+
+test("task_close parks a Task whose change is not on the target branch yet, so the idle queue does not wake ticks", async () => {
+  const h = await harness((file, args) => {
+    if (file === "gh" && args[1] === "view") return ok(JSON.stringify({ number: 599, state: "MERGED", mergeCommit: { oid: "afc139ae0000" }, body: "Fixes #598" }));
+    if (file === "git" && args[0] === "merge-base") return { ok: false, code: 1, stdout: "", stderr: "", command: "" };
+    if (file === "git" && args[1] === "list") return ok("");
+    return undefined;
+  });
+  try {
+    const result = await call(h, "task_close", { repository: REPO, issue: 598, evidence: "merged", pr: 599 });
+    assert.equal(result.parked, true);
+    assert.match(String(result.reason), /parked until main moves/u);
+    const task = h.store.getTask(`${REPO}#598`)!;
+    assert.equal(task.state, "parked");
+    assert.match(String(task.note), /^Awaiting delivery: PR #599 \(afc139a\)/u);
+    assert.equal(h.calls.some((line) => line.startsWith("gh issue close")), false);
+  } finally { await h.close(); }
 });

@@ -158,7 +158,7 @@ async function launch(context: CoordinationContext, repo: CoordinatedRepository,
 }
 
 /** The operator controls what Pirx may work on through the Project: only Worker=Pirx items that are not Done. */
-async function notQueuedForPirx(context: CoordinationContext, repository: string, issue: number): Promise<Record<string, unknown> | undefined> {
+export async function notQueuedForPirx(context: CoordinationContext, repository: string, issue: number): Promise<Record<string, unknown> | undefined> {
   const { settings } = context;
   if (settings.projectOwner === undefined || settings.projectNumber === undefined) return undefined;
   const result = await projectItems(context.run, context.store, settings);

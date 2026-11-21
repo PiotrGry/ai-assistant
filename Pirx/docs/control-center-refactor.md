@@ -241,7 +241,7 @@ The old daemon has been idle (`no_runnable_task`) since then.
 
 - **Stop everything:** `touch ~/.config/pirx/STOP`. Every mutating tool refuses until the file is removed; read tools and the chat keep working.
 - **Status:** `Pirx/scripts/go-live.sh status` shows what runs, live or shadow, and what is missing for live.
-- **New runtime:** `go-live.sh build <commit>` (build plus unit and integration tests), then `go-live.sh shadow <commit>`, then `pnpm eval --runs 3` in the runtime directory, then `go-live.sh live <commit>`. `live` refuses until the eval gate, the tests and five successful shadow ticks of that runtime are recorded.
+- **New runtime:** `go-live.sh build <commit>` (build plus unit and integration tests), then `go-live.sh eval <commit>` (3 runs per case, ~25 min; `--quick` = 1 run, ~8 min, for work in progress, never counts for live), then `go-live.sh shadow <commit>`, then `go-live.sh live <commit>`. `live` refuses until the eval gate, the tests and five successful shadow ticks of that runtime are recorded.
 - **Roll back:** `go-live.sh live <previous commit>`.
 - **Read what happened:** `pirx_explain` in the chat for one Task, or `sqlite3 ~/.local/share/pirx/pirx.sqlite "select at, name, substr(output,1,200) from coord_journal order by seq desc limit 20"`.
 - **Worker runs** are systemd units named `pirx-worker-*` (`systemctl --user list-units 'pirx-worker*'`); their logs and reports are in `~/.local/share/pirx/coordination/worker-logs/`.

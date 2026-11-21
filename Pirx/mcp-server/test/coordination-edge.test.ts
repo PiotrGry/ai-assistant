@@ -84,7 +84,8 @@ test("input: shell metacharacters in a title or body travel as one argument, nev
     await call(h, "issue_create", { repository: REPO, title, body, kind: "improvement" });
     const created = h.calls.find((entry) => entry[0] === "gh" && entry[2] === "create")!;
     assert.equal(created[created.indexOf("--title") + 1], title);
-    assert.equal(created[created.indexOf("--body") + 1], body);
+    // The body travels whole; Pirx appends only its duplicate-check marker after it.
+    assert.ok(created[created.indexOf("--body") + 1]!.startsWith(body));
   } finally { await h.close(); }
 });
 
@@ -188,10 +189,10 @@ test("issue_create fails closed: when the open Issues cannot be listed, nothing 
   } finally { await h.close(); }
 });
 
-test("issue_create: a sixth open bug Issue is refused", async () => {
+test("issue_create: no cap on open bug Issues; a sixth different bug is filed", async () => {
   const bugs = Array.from({ length: 5 }, (_, index) => ({ number: 800 + index, title: `bug ${String.fromCharCode(97 + index)}`, body: "" }));
-  const h = await harness((file, args) => file === "gh" && args[1] === "list" ? ok(JSON.stringify(bugs)) : undefined);
-  try { assert.match(String((await call(h, "issue_create", { repository: REPO, title: "another failure", body: "b", kind: "bug" })).reason), /cap is 5/u); } finally { await h.close(); }
+  const h = await harness((file, args) => file === "gh" && args[1] === "list" ? ok(JSON.stringify(bugs)) : file === "gh" && args[1] === "create" ? ok("https://github.com/x/y/issues/805") : undefined);
+  try { assert.equal((await call(h, "issue_create", { repository: REPO, title: "another failure", body: "b", kind: "bug" })).issue, 805); } finally { await h.close(); }
 });
 
 test("ci_rerun: a rerun that GitHub rejected does not use up the cap", async () => {
@@ -634,5 +635,70 @@ test("Project reads: the watcher and the tools share one copy; queue_set drops i
     await call(h, "queue_set", { repository: REPO, issue: 7, status: "Todo" });
     await call(h, "queue_list", {});
     assert.equal(reads, 2, "after a write the Project is read again");
+  } finally { await h.close(); }
+});
+
+// ── The operator takes a Task back ─────────────────────────────────────────
+
+test("Worker=Human: in a tick Pirx neither ships nor closes the Task; in the chat the operator may", async () => {
+  const human = (file: string, args: readonly string[]) => file === "gh" && args[0] === "project" && args[1] === "item-list" ? ok(JSON.stringify({ items: [{ content: { repository: REPO, number: 7, type: "Issue" }, worker: "Human", status: "Todo" }] })) : undefined;
+  const tick = await harness(first(human, gitState({})), { PIRX_TICK_ID: "tick-1" });
+  try {
+    workspace(tick, 7);
+    assert.match(String((await call(tick, "task_ship", { repository: REPO, issue: 7, title: "t", body: "b" })).reason), /Worker=Human/u);
+    assert.match(String((await call(tick, "task_close", { repository: REPO, issue: 7, evidence: "done", pr: 9 })).reason), /Worker=Human/u);
+    assert.equal(tick.ran("git push"), false);
+    assert.equal(tick.ran("gh issue close"), false);
+  } finally { await tick.close(); }
+  const chat = await harness(first(human, gitState({})));
+  try {
+    workspace(chat, 7);
+    await call(chat, "task_ship", { repository: REPO, issue: 7, title: "t", body: "b" });
+    assert.equal(chat.ran("git push"), true, "the operator asked in the chat");
+  } finally { await chat.close(); }
+});
+
+test("task_restart_clean leaves no workspace behind, so worker_start may begin again", async () => {
+  let stopAtAdd = false;
+  const h = await harness(first(queued(548), (file, args) => file === "git" && args[0] === "worktree" && args[1] === "list" ? ok("") : file === "git" && args[0] === "worktree" && args[1] === "add" && stopAtAdd ? fail("fatal: stopped by the test") : undefined, gitState({ ahead: 0 })));
+  try {
+    workspace(h, 548);
+    const restarted = await call(h, "task_restart_clean", { repository: REPO, issue: 548, reason: "clean start" });
+    assert.ok(restarted.archived !== undefined, JSON.stringify(restarted));
+    const task = h.store.getTask(`${REPO}#548`)!;
+    assert.equal(task.worktree, "");
+    assert.match(String(task.note), /Archived at/u);
+    // Stop at `git worktree add`: reaching it shows the workspace check passed (a real launch needs a real worktree).
+    stopAtAdd = true;
+    const started = await call(h, "worker_start", { repository: REPO, issue: 548, instruction: "go" });
+    assert.doesNotMatch(JSON.stringify(started), /already has a worktree/u);
+    assert.match(String(started.stderr), /stopped by the test/u);
+  } finally { await h.close(); }
+});
+
+test("watcher: a Task awaiting delivery wakes a tick only when the target branch moves", async () => {
+  const { collectEvents } = await import("../src/coordination/watch-cli.js");
+  const { loadCoordinationSettings } = await import("../src/coordination/settings.js");
+  const h = await harness();
+  const settings = loadCoordinationSettings({ HOME: h.root, PIRX_ORCHESTRATOR_CONFIG: join(h.root, "orchestrator.json") });
+  let head = "aaa111";
+  const lsRemote: string[] = [];
+  const run: Runner = async (file, args) => {
+    if (file === "git" && args[0] === "ls-remote") { lsRemote.push(args.join(" ")); return ok(`${head}\trefs/heads/main\n`); }
+    return ok(file === "gh" && args[0] === "pr" ? "[]" : JSON.stringify({ items: [] }));
+  };
+  const moved = (events: string[]) => events.some((event) => event.includes("przesunęła się") && event.includes("#598"));
+  try {
+    h.store.append({ kind: "tick", name: "tick", ok: true });
+    (await collectEvents(h.store, settings, run, 60)).commit();
+    assert.equal(lsRemote.length, 0, "nothing awaits delivery: the branch is not even read");
+    h.store.upsertTask({ repository: REPO, issue: 598, branch: "", worktree: "", state: "parked", note: "Awaiting delivery: PR #599 (afc139a) is not on main yet." });
+    const first = await collectEvents(h.store, settings, run, 60); first.commit();
+    assert.equal(moved(first.events), false, "the first read only records the head");
+    const same = await collectEvents(h.store, settings, run, 60); same.commit();
+    assert.equal(moved(same.events), false, "unchanged head: no tick");
+    head = "bbb222";
+    assert.equal(moved((await collectEvents(h.store, settings, run, 60)).events), true);
+    assert.ok(lsRemote.every((line) => line.includes("refs/heads/main")));
   } finally { await h.close(); }
 });

@@ -7,15 +7,29 @@ import { createHash } from "node:crypto";
 
 import { failure, jsonOf, type Runner } from "./shell.js";
 import { startOfDay, type CoordinationSettings } from "./settings.js";
-import { taskKey } from "./store.js";
+import { taskKey, type CoordinationStore } from "./store.js";
 import { tooLong, WORKER_ENV_ALLOWLIST } from "./worker.js";
 import { defineTool, issueInput, refuse, repositoryInput, type CoordinationContext } from "./toolkit.js";
 
 /** Every Issue Pirx creates carries this label, and only one may be open at a time. */
 const PROPOSAL_LABEL = "pirx-round";
+/** Note prefix of a Task parked until its change reaches the target branch; the watcher looks for it. */
+export const AWAITING_DELIVERY = "Awaiting delivery:";
 /** A production bug Pirx found itself. It may queue these in a tick; improvements wait for the operator. */
 const BUG_LABEL = "pirx-bug";
-const MAX_OPEN_BUGS = 5;
+
+/**
+ * Worker=Human means the operator took the Task back. In a tick Pirx then neither ships nor closes it,
+ * even when a worker already finished it: zdrovena#579 was shipped and auto-merged on 2026-11-20 while
+ * the operator was redesigning it. In the chat the operator asks, so this does not apply there.
+ */
+async function operatorTookBack(run: Runner, store: CoordinationStore, settings: CoordinationSettings, repository: string, issue: number): Promise<Record<string, unknown> | undefined> {
+  if (settings.projectOwner === undefined || settings.projectNumber === undefined) return undefined;
+  const listed = jsonOf(await projectItems(run, store, settings, 0)) as { items?: Record<string, unknown>[] } | undefined;
+  if (listed === undefined) return refuse("Cannot read the Project to check that the operator still leaves this Task to Pirx.");
+  const item = (listed.items ?? []).find((entry) => { const content = entry.content as { repository?: string; number?: number } | undefined; return content?.repository?.toLowerCase() === repository.toLowerCase() && content.number === issue; });
+  return item?.worker === "Human" ? refuse(`${repository}#${issue} has Worker=Human: the operator took it back. Do not ship or close it; leave it to the operator.`) : undefined;
+}
 
 /** The same error reworded is the same bug: numbers, ids, quotes and case are dropped before hashing. */
 export function bugFingerprint(text: string): string {
@@ -50,6 +64,8 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
     task: taskOf,
     run: async (input, { run, store }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
+      // In a tick, ship only work the operator still leaves to Pirx: Worker=Human stops a Task in flight (zdrovena#579, 2026-11-20).
+      const tookBack = settings.tick === undefined ? undefined : await operatorTookBack(run, store, settings, repo.repository, input.issue); if (tookBack !== undefined) return tookBack;
       const workspace = await locateWorkspace(run, store, repo, input.issue);
       if (workspace === undefined || !existsSync(workspace.worktree)) return refuse("This Task has no worktree; nothing to ship.");
       if (!PIRX_BRANCH.test(workspace.branch)) return refuse(`Only pirx/* branches are shipped; this one is ${workspace.branch}.`);
@@ -133,7 +149,8 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
       const archivedBranch = `pirx/archive/${workspace.branch.replace(/^pirx\//u, "")}-${stamp}`;
       const renamed = await run("git", ["branch", "-m", workspace.branch, archivedBranch], { cwd: archivedPath });
       if (!renamed.ok) return { moved: archivedPath, ...failure(renamed) };
-      store.upsertTask({ repository: repo.repository, issue: input.issue, branch: archivedBranch, worktree: archivedPath, state: "active", note: `Restarted clean: ${input.reason}` });
+      // The Task no longer has a workspace: the archived one is kept for reference only, so worker_start may begin again (#548, 2026-11-20).
+      store.upsertTask({ repository: repo.repository, issue: input.issue, branch: "", worktree: "", state: "active", note: `Restarted clean: ${input.reason}. Archived at ${archivedPath} (${archivedBranch}).` });
       return { archived: { worktree: archivedPath, branch: archivedBranch }, note: "worker_start can now begin from the current base." };
     },
   });
@@ -161,6 +178,7 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
     task: taskOf,
     run: async (input, { run, store }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
+      const tookBack = settings.tick === undefined ? undefined : await operatorTookBack(run, store, settings, repo.repository, input.issue); if (tookBack !== undefined) return tookBack;
       const workspace = await locateWorkspace(run, store, repo, input.issue);
       let prs: { number: number; mergeCommit?: { oid: string } | null; state: string }[] | undefined;
       if (input.pr !== undefined) {
@@ -182,7 +200,14 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
       if (merged === undefined) return refuse("No merged pull request carries this change. Give the pr that fixed it, or ship and merge first.", { prs });
       await run("git", ["fetch", "--quiet", repo.remoteName, repo.targetBranch], { cwd: repo.repositoryRoot, timeoutMs: 120_000 });
       const reached = await run("git", ["merge-base", "--is-ancestor", merged.mergeCommit!.oid, `${repo.remoteName}/${repo.targetBranch}`], { cwd: repo.repositoryRoot });
-      if (!reached.ok) return refuse(`PR #${merged.number} is merged, but its merge commit is not on ${repo.targetBranch} yet. Wait for the repository's own delivery.`);
+      if (!reached.ok) {
+        // Waiting for the repository's own release is not work: park the Task so the idle queue does not
+        // wake a tick every 15 min (27 refused task_close calls on zdrovena#598, night of 2026-11-21). The
+        // watcher wakes a tick when the target branch moves, and task_close is tried again then.
+        const own = store.getTask(taskOf(input));
+        store.upsertTask({ repository: repo.repository, issue: input.issue, branch: own?.branch ?? workspace?.branch ?? "", worktree: own?.worktree ?? workspace?.worktree ?? "", ...(own?.sessionId === undefined ? {} : { sessionId: own.sessionId }), state: "parked", note: `${AWAITING_DELIVERY} PR #${merged.number} (${merged.mergeCommit!.oid.slice(0, 7)}) is not on ${repo.targetBranch} yet.` });
+        return refuse(`PR #${merged.number} is merged, but its merge commit is not on ${repo.targetBranch} yet. The Task is parked until ${repo.targetBranch} moves; the watcher wakes a tick then. Do not retry before.`, { parked: true });
+      }
       const closed = await run("gh", ["issue", "close", String(input.issue), "-R", input.repository, "--reason", "completed", "--comment", input.evidence]);
       if (!closed.ok && !/already closed/iu.test(closed.stderr)) return failure(closed);
       const cleanup: Record<string, unknown> = {};
@@ -196,7 +221,7 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
       }
       const own = store.getTask(taskOf(input));
       if (own !== undefined) store.upsertTask({ ...own, state: "closed", note: `Closed after PR #${merged.number}` });
-      return { closed: true, pr: merged.number, ...cleanup };
+      return { closed: true, pr: merged.number, ...cleanup, note: "The Issue is closed; its Project item moves to Done by itself. Nothing else to set for this Task." };
     },
   });
 
@@ -209,16 +234,19 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
     run: async (input, { run, store }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
       const url = `https://github.com/${input.repository}/issues/${input.issue}`;
+      // Done closes the Issue (Project automation), so it would skip task_close's delivery check:
+      // zdrovena#598 was closed that way on 2026-11-21 while its change was not on main yet.
+      if (input.status === "Done") return refuse("Status Done is set only by task_close, once the change is on the target branch. Use task_close; if it refuses, the change is not delivered yet.");
       if (input.worker === "Pirx") {
         // Worker=Human is the operator's decision (e.g. a paused task). Pirx may queue new items, not take back the operator's.
         const listed = jsonOf(await projectItems(run, store, settings)) as { items?: Record<string, unknown>[] } | undefined;
         const current = listed?.items?.find((entry) => (entry.content as { url?: string } | undefined)?.url === url);
         if (current?.worker !== "Pirx" && settings.tick !== undefined) {
-          // In a tick nobody asked: Pirx may queue only the production bugs it filed. In the chat the operator asks, so anything may be queued.
+          // In a tick nobody asked: Pirx may queue the Issues it filed itself (pirx-bug, pirx-round), not others.
           const labels = jsonOf(await run("gh", ["issue", "view", String(input.issue), "-R", input.repository, "--json", "labels"])) as { labels?: { name: string }[] } | undefined;
-          if (labels?.labels?.some((label) => label.name === BUG_LABEL) !== true) return refuse(`In a tick Pirx queues only ${BUG_LABEL} Issues. ${input.repository}#${input.issue} is not one; the operator decides whether it is queued.`);
+          if (labels?.labels?.some((label) => label.name === BUG_LABEL || label.name === PROPOSAL_LABEL) !== true) return refuse(`In a tick Pirx queues only the Issues it filed (${BUG_LABEL}, ${PROPOSAL_LABEL}). ${input.repository}#${input.issue} is not one; the operator decides whether it is queued.`);
         }
-        if (current?.worker === "Human") return refuse(`${input.repository}#${input.issue} has Worker=Human: the operator handed it to themselves. Pirx may not take it back; ask the operator if it should be Pirx's.`);
+        if (current?.worker === "Human") return refuse(`${input.repository}#${input.issue} has Worker=Human: it is the operator's and stays so. Leave it and go on in this tick with other work, e.g. the next known problem from zdrovena_code_health.`);
       }
       forgetProjectItems(store);
       const found = await projectIds(run, settings);
@@ -257,20 +285,22 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
         const fingerprint = bugFingerprint(input.errorKey ?? input.title);
         const same = bugs.find((issue) => (issue.body ?? "").includes(`pirx-bug-fingerprint: ${fingerprint}`) || bugFingerprint(issue.title) === bugFingerprint(input.title));
         if (same !== undefined) return refuse(`This bug is already filed as #${same.number}.`, { open: bugs.map((issue) => ({ number: issue.number, title: issue.title })) });
-        if (bugs.length >= MAX_OPEN_BUGS) return refuse(`${bugs.length} Pirx bug Issues are already open; the cap is ${MAX_OPEN_BUGS}. Work on those first.`, { open: bugs });
         const bugArgs = ["issue", "create", "-R", input.repository, "--title", input.title, "--body", `${input.body}\n\n<!-- pirx-bug-fingerprint: ${fingerprint} -->`, "--label", BUG_LABEL];
         for (const label of input.labels ?? []) if (label !== BUG_LABEL && label !== PROPOSAL_LABEL) bugArgs.push("--label", label);
         const filed = await run("gh", bugArgs);
         return filed.ok ? { created: filed.stdout.trim(), issue: Number(/\/issues\/(\d+)/u.exec(filed.stdout)?.[1]), kind: "bug", note: "Queue it with queue_set (worker Pirx) if it should be fixed now." } : failure(filed, "A missing label must be created first, or leave it out.");
       }
-      // One open Pirx proposal at a time: prompt rules did not hold this (evals 2026-11-20, open-round-issue).
-      const open = jsonOf(await run("gh", ["issue", "list", "-R", input.repository, "--label", PROPOSAL_LABEL, "--state", "open", "--json", "number,title"])) as { number: number; title: string }[] | undefined;
+      // Any number of open proposals (operator, 2026-11-21: every known problem gets an Issue); only the
+      // same problem twice is refused, by the same fingerprint as bugs.
+      const open = jsonOf(await run("gh", ["issue", "list", "-R", input.repository, "--label", PROPOSAL_LABEL, "--state", "open", "--json", "number,title,body", "--limit", "200"])) as { number: number; title: string; body?: string }[] | undefined;
       if (open === undefined) return refuse(`Cannot check for open ${PROPOSAL_LABEL} Issues, so no new Issue is created.`);
-      if (open.length > 0) return refuse(`An earlier Pirx proposal is still open (${open.map((issue) => `#${issue.number}`).join(", ")}). Pirx creates a new Issue only when none is open.`, { open });
-      const args = ["issue", "create", "-R", input.repository, "--title", input.title, "--body", input.body, "--label", PROPOSAL_LABEL];
+      const proposalPrint = bugFingerprint(input.title);
+      const twin = open.find((issue) => (issue.body ?? "").includes(`pirx-round-fingerprint: ${proposalPrint}`) || bugFingerprint(issue.title) === proposalPrint);
+      if (twin !== undefined) return refuse(`This improvement is already filed as #${twin.number}.`, { open: open.map((issue) => ({ number: issue.number, title: issue.title })) });
+      const args = ["issue", "create", "-R", input.repository, "--title", input.title, "--body", `${input.body}\n\n<!-- pirx-round-fingerprint: ${proposalPrint} -->`, "--label", PROPOSAL_LABEL];
       for (const label of input.labels ?? []) if (label !== PROPOSAL_LABEL) args.push("--label", label);
       const result = await run("gh", args);
-      return result.ok ? { created: result.stdout.trim(), issue: Number(/\/issues\/(\d+)/u.exec(result.stdout)?.[1]) } : failure(result, "A missing label must be created first, or leave it out.");
+      return result.ok ? { created: result.stdout.trim(), issue: Number(/\/issues\/(\d+)/u.exec(result.stdout)?.[1]), kind: "improvement", note: "Queue it with queue_set (worker Pirx) so the worker takes it." } : failure(result, "A missing label must be created first, or leave it out.");
     },
   });
 
