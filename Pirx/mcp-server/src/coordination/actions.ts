@@ -13,9 +13,10 @@ import { defineTool, issueInput, refuse, repositoryInput, type CoordinationConte
 
 /** Every Issue Pirx creates carries this label, and only one may be open at a time. */
 const PROPOSAL_LABEL = "pirx-round";
+/** Note prefix of a Task parked until its change reaches the target branch; the watcher looks for it. */
+export const AWAITING_DELIVERY = "Awaiting delivery:";
 /** A production bug Pirx found itself. It may queue these in a tick; improvements wait for the operator. */
 const BUG_LABEL = "pirx-bug";
-const MAX_OPEN_BUGS = 5;
 
 /**
  * Worker=Human means the operator took the Task back. In a tick Pirx then neither ships nor closes it,
@@ -199,7 +200,14 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
       if (merged === undefined) return refuse("No merged pull request carries this change. Give the pr that fixed it, or ship and merge first.", { prs });
       await run("git", ["fetch", "--quiet", repo.remoteName, repo.targetBranch], { cwd: repo.repositoryRoot, timeoutMs: 120_000 });
       const reached = await run("git", ["merge-base", "--is-ancestor", merged.mergeCommit!.oid, `${repo.remoteName}/${repo.targetBranch}`], { cwd: repo.repositoryRoot });
-      if (!reached.ok) return refuse(`PR #${merged.number} is merged, but its merge commit is not on ${repo.targetBranch} yet. Wait for the repository's own delivery.`);
+      if (!reached.ok) {
+        // Waiting for the repository's own release is not work: park the Task so the idle queue does not
+        // wake a tick every 15 min (27 refused task_close calls on zdrovena#598, night of 2026-11-21). The
+        // watcher wakes a tick when the target branch moves, and task_close is tried again then.
+        const own = store.getTask(taskOf(input));
+        store.upsertTask({ repository: repo.repository, issue: input.issue, branch: own?.branch ?? workspace?.branch ?? "", worktree: own?.worktree ?? workspace?.worktree ?? "", ...(own?.sessionId === undefined ? {} : { sessionId: own.sessionId }), state: "parked", note: `${AWAITING_DELIVERY} PR #${merged.number} (${merged.mergeCommit!.oid.slice(0, 7)}) is not on ${repo.targetBranch} yet.` });
+        return refuse(`PR #${merged.number} is merged, but its merge commit is not on ${repo.targetBranch} yet. The Task is parked until ${repo.targetBranch} moves; the watcher wakes a tick then. Do not retry before.`, { parked: true });
+      }
       const closed = await run("gh", ["issue", "close", String(input.issue), "-R", input.repository, "--reason", "completed", "--comment", input.evidence]);
       if (!closed.ok && !/already closed/iu.test(closed.stderr)) return failure(closed);
       const cleanup: Record<string, unknown> = {};
@@ -226,14 +234,17 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
     run: async (input, { run, store }) => {
       const repo = repositoryOrRefusal(settings, input.repository); if (isRefusal(repo)) return repo;
       const url = `https://github.com/${input.repository}/issues/${input.issue}`;
+      // Done closes the Issue (Project automation), so it would skip task_close's delivery check:
+      // zdrovena#598 was closed that way on 2026-11-21 while its change was not on main yet.
+      if (input.status === "Done") return refuse("Status Done is set only by task_close, once the change is on the target branch. Use task_close; if it refuses, the change is not delivered yet.");
       if (input.worker === "Pirx") {
         // Worker=Human is the operator's decision (e.g. a paused task). Pirx may queue new items, not take back the operator's.
         const listed = jsonOf(await projectItems(run, store, settings)) as { items?: Record<string, unknown>[] } | undefined;
         const current = listed?.items?.find((entry) => (entry.content as { url?: string } | undefined)?.url === url);
         if (current?.worker !== "Pirx" && settings.tick !== undefined) {
-          // In a tick nobody asked: Pirx may queue only the production bugs it filed. In the chat the operator asks, so anything may be queued.
+          // In a tick nobody asked: Pirx may queue the Issues it filed itself (pirx-bug, pirx-round), not others.
           const labels = jsonOf(await run("gh", ["issue", "view", String(input.issue), "-R", input.repository, "--json", "labels"])) as { labels?: { name: string }[] } | undefined;
-          if (labels?.labels?.some((label) => label.name === BUG_LABEL) !== true) return refuse(`In a tick Pirx queues only ${BUG_LABEL} Issues. ${input.repository}#${input.issue} is not one; the operator decides whether it is queued.`);
+          if (labels?.labels?.some((label) => label.name === BUG_LABEL || label.name === PROPOSAL_LABEL) !== true) return refuse(`In a tick Pirx queues only the Issues it filed (${BUG_LABEL}, ${PROPOSAL_LABEL}). ${input.repository}#${input.issue} is not one; the operator decides whether it is queued.`);
         }
         if (current?.worker === "Human") return refuse(`${input.repository}#${input.issue} has Worker=Human: the operator handed it to themselves. Pirx may not take it back; ask the operator if it should be Pirx's.`);
       }
@@ -274,20 +285,22 @@ export function registerActionTools(server: McpServer, context: CoordinationCont
         const fingerprint = bugFingerprint(input.errorKey ?? input.title);
         const same = bugs.find((issue) => (issue.body ?? "").includes(`pirx-bug-fingerprint: ${fingerprint}`) || bugFingerprint(issue.title) === bugFingerprint(input.title));
         if (same !== undefined) return refuse(`This bug is already filed as #${same.number}.`, { open: bugs.map((issue) => ({ number: issue.number, title: issue.title })) });
-        if (bugs.length >= MAX_OPEN_BUGS) return refuse(`${bugs.length} Pirx bug Issues are already open; the cap is ${MAX_OPEN_BUGS}. Work on those first.`, { open: bugs });
         const bugArgs = ["issue", "create", "-R", input.repository, "--title", input.title, "--body", `${input.body}\n\n<!-- pirx-bug-fingerprint: ${fingerprint} -->`, "--label", BUG_LABEL];
         for (const label of input.labels ?? []) if (label !== BUG_LABEL && label !== PROPOSAL_LABEL) bugArgs.push("--label", label);
         const filed = await run("gh", bugArgs);
         return filed.ok ? { created: filed.stdout.trim(), issue: Number(/\/issues\/(\d+)/u.exec(filed.stdout)?.[1]), kind: "bug", note: "Queue it with queue_set (worker Pirx) if it should be fixed now." } : failure(filed, "A missing label must be created first, or leave it out.");
       }
-      // One open Pirx proposal at a time: prompt rules did not hold this (evals 2026-11-20, open-round-issue).
-      const open = jsonOf(await run("gh", ["issue", "list", "-R", input.repository, "--label", PROPOSAL_LABEL, "--state", "open", "--json", "number,title"])) as { number: number; title: string }[] | undefined;
+      // Any number of open proposals (operator, 2026-11-21: every known problem gets an Issue); only the
+      // same problem twice is refused, by the same fingerprint as bugs.
+      const open = jsonOf(await run("gh", ["issue", "list", "-R", input.repository, "--label", PROPOSAL_LABEL, "--state", "open", "--json", "number,title,body", "--limit", "200"])) as { number: number; title: string; body?: string }[] | undefined;
       if (open === undefined) return refuse(`Cannot check for open ${PROPOSAL_LABEL} Issues, so no new Issue is created.`);
-      if (open.length > 0) return refuse(`An earlier Pirx proposal is still open (${open.map((issue) => `#${issue.number}`).join(", ")}). Pirx creates a new Issue only when none is open.`, { open });
-      const args = ["issue", "create", "-R", input.repository, "--title", input.title, "--body", input.body, "--label", PROPOSAL_LABEL];
+      const proposalPrint = bugFingerprint(input.title);
+      const twin = open.find((issue) => (issue.body ?? "").includes(`pirx-round-fingerprint: ${proposalPrint}`) || bugFingerprint(issue.title) === proposalPrint);
+      if (twin !== undefined) return refuse(`This improvement is already filed as #${twin.number}.`, { open: open.map((issue) => ({ number: issue.number, title: issue.title })) });
+      const args = ["issue", "create", "-R", input.repository, "--title", input.title, "--body", `${input.body}\n\n<!-- pirx-round-fingerprint: ${proposalPrint} -->`, "--label", PROPOSAL_LABEL];
       for (const label of input.labels ?? []) if (label !== PROPOSAL_LABEL) args.push("--label", label);
       const result = await run("gh", args);
-      return result.ok ? { created: result.stdout.trim(), issue: Number(/\/issues\/(\d+)/u.exec(result.stdout)?.[1]) } : failure(result, "A missing label must be created first, or leave it out.");
+      return result.ok ? { created: result.stdout.trim(), issue: Number(/\/issues\/(\d+)/u.exec(result.stdout)?.[1]), kind: "improvement", note: "Queue it with queue_set (worker Pirx) so the worker takes it." } : failure(result, "A missing label must be created first, or leave it out.");
     },
   });
 

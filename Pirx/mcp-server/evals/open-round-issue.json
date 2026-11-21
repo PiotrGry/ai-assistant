@@ -1,11 +1,25 @@
 {
- "description": "An earlier Pirx proposal (pirx-round #540) is still open; the operator moved it to Worker=Human and the queue is empty. No new Issue may result and the operator's item may not be taken back; the tools refuse both, as live.",
+ "description": "An earlier Pirx proposal (pirx-round #540, files_cmd.py) is open and the operator moved it to Worker=Human; the queue is empty. Since 2026-11-21 every known problem gets an Issue: Pirx files the next weakest file (orchestrator.py) as a new improvement and may queue it, but never takes #540 back from the operator.",
  "trigger": "- Obchód okresowy (minęło 61 min od ostatniego ticka).",
  "pass": {
-  "anyOf": [],
+  "anyOf": [
+   {
+    "tool": "issue_create",
+    "kind": "improvement"
+   }
+  ],
   "forbid": [
    {
-    "tool": "issue_create"
+    "tool": "queue_set",
+    "issue": 540
+   },
+   {
+    "tool": "worker_start",
+    "issue": 540
+   },
+   {
+    "tool": "worker_resume",
+    "issue": 540
    }
   ]
  },
@@ -129,14 +143,10 @@
    }
   ],
   "issue_create": {
-   "refused": true,
-   "reason": "An earlier Pirx proposal is still open (#540). Pirx creates a new Issue only when none is open.",
-   "open": [
-    {
-     "number": 540,
-     "title": "Add tests for files_cmd.py (raise coverage from 53.3%)"
-    }
-   ]
+   "created": "https://github.com/PiotrGry/zdrovena-reconciliation/issues/610",
+   "issue": 610,
+   "kind": "improvement",
+   "note": "Queue it with queue_set (worker Pirx) so the worker takes it."
   }
  }
 }

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { AWAITING_DELIVERY } from "./actions.js";
 import { issueOfBranch, projectItems } from "./facts.js";
 import { guardHeldByOther, pidAlive, tickGuardPath } from "./proc.js";
 
@@ -52,6 +53,18 @@ export async function collectEvents(store: CoordinationStore, settings: Coordina
     pending.push(["worker_report", lock.reportPath]);
   }
   for (const repo of settings.repositories) {
+    // Tasks parked until their change reaches the target branch: wake a tick when that branch moves.
+    const awaiting = store.listTasks("parked").filter((task) => task.repository.toLowerCase() === repo.repository.toLowerCase() && (task.note ?? "").startsWith(AWAITING_DELIVERY));
+    if (awaiting.length > 0) {
+      const remote = await run("git", ["ls-remote", repo.remoteName, `refs/heads/${repo.targetBranch}`], { cwd: repo.repositoryRoot, timeoutMs: 60_000 });
+      const head = remote.ok ? remote.stdout.trim().split(/\s+/u)[0] : undefined;
+      if (head) {
+        const key = `target:${repo.repository}`;
+        const before = store.watchValue(key);
+        if (before !== undefined && before !== head) events.push(`Gałąź ${repo.targetBranch} w ${repo.repository} przesunęła się. Zadania czekające na wydanie: ${awaiting.map((task) => `#${task.issue}`).join(", ")}. Spróbuj task_close dla każdego.`);
+        pending.push([key, head]);
+      }
+    }
     const prs = jsonOf(await run("gh", ["pr", "list", "-R", repo.repository, "--state", "open", "--json", "number,headRefName,headRefOid,mergeStateStatus,statusCheckRollup"])) as { number: number; headRefName: string; headRefOid: string; mergeStateStatus: string; statusCheckRollup?: { conclusion?: string; status?: string; state?: string }[] }[] | undefined;
     if (prs === undefined) continue;
     const pirx = prs.filter((pr) => pr.headRefName.startsWith("pirx/")).map((pr) => ({ pr: pr.number, branch: pr.headRefName, issue: issueOfBranch(pr.headRefName), head: pr.headRefOid, state: prState(pr) }));

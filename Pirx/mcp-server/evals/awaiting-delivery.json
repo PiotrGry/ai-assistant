@@ -1,0 +1,96 @@
+{
+ "description": "zdrovena#598 was parked because its merged PR #599 was not on main yet. The watcher reports that main moved. Pirx tries task_close (now it succeeds) and never sets Status=Done itself.",
+ "trigger": "- Gałąź main w PiotrGry/zdrovena-reconciliation przesunęła się. Zadania czekające na wydanie: #598. Spróbuj task_close dla każdego.",
+ "pass": {
+  "anyOf": [
+   {
+    "tool": "task_close",
+    "issue": 598
+   }
+  ],
+  "forbid": [
+   {
+    "tool": "queue_set",
+    "status": "Done"
+   },
+   {
+    "tool": "worker_start",
+    "issue": 598
+   },
+   {
+    "tool": "worker_resume",
+    "issue": 598
+   }
+  ]
+ },
+ "tools": {
+  "queue_list": {
+   "items": [
+    {
+     "repository": "PiotrGry/zdrovena-reconciliation",
+     "issue": 598,
+     "title": "Add tests for api/routers/close.py (raise coverage from 70.7%)",
+     "status": "Todo",
+     "worker": "Pirx",
+     "queueOrder": 200,
+     "priority": "P3",
+     "workType": "Task"
+    }
+   ]
+  },
+  "worker_status": {
+   "running": false
+  },
+  "journal_read": {
+   "entries": [
+    {
+     "seq": 700,
+     "at": "2026-11-21T08:20:00Z",
+     "kind": "tool",
+     "name": "task_close",
+     "task": "PiotrGry/zdrovena-reconciliation#598",
+     "ok": false,
+     "input": {
+      "repository": "PiotrGry/zdrovena-reconciliation",
+      "issue": 598,
+      "pr": 599
+     },
+     "output": {
+      "refused": true,
+      "parked": true,
+      "reason": "PR #599 is merged, but its merge commit is not on main yet. The Task is parked until main moves; the watcher wakes a tick then. Do not retry before."
+     }
+    }
+   ]
+  },
+  "task_facts": {
+   "task": {
+    "state": "parked",
+    "note": "Awaiting delivery: PR #599 (afc139a) is not on main yet."
+   },
+   "issue": {
+    "number": 598,
+    "state": "OPEN",
+    "title": "Add tests for api/routers/close.py (raise coverage from 70.7%)"
+   },
+   "pullRequests": {
+    "prs": [
+     {
+      "pr": 599,
+      "state": "MERGED",
+      "mergeCommit": "afc139a",
+      "base": "develop"
+     }
+    ]
+   },
+   "worker": {
+    "running": false
+   }
+  },
+  "task_close": {
+   "closed": true,
+   "pr": 599,
+   "note": "Recorded (eval)."
+  }
+ }
+}
